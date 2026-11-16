@@ -96,6 +96,12 @@ def _project_to_response(
         exit_headers=project.exit_headers,
         observation_log=project.observation_log,
         observation_retention_days=project.observation_retention_days,
+        exit_reputation=project.exit_reputation,
+        exit_reputation_avoid_minutes=project.exit_reputation_avoid_minutes,
+        exit_reputation_half_life_hours=project.exit_reputation_half_life_hours,
+        exit_reputation_connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
+        exit_reputation_bad_reports=project.exit_reputation_bad_reports,
+        exit_reputation_bad_share=project.exit_reputation_bad_share,
         pending_deletion=project.pending_deletion,
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -140,6 +146,12 @@ def _view_to_summary(view: ProjectView) -> ProjectSummary:
         exit_headers=project.exit_headers,
         observation_log=project.observation_log,
         observation_retention_days=project.observation_retention_days,
+        exit_reputation=project.exit_reputation,
+        exit_reputation_avoid_minutes=project.exit_reputation_avoid_minutes,
+        exit_reputation_half_life_hours=project.exit_reputation_half_life_hours,
+        exit_reputation_connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
+        exit_reputation_bad_reports=project.exit_reputation_bad_reports,
+        exit_reputation_bad_share=project.exit_reputation_bad_share,
         pending_deletion=project.pending_deletion,
         credential_count=view.credentials,
         connector_count=view.connectors,
@@ -284,12 +296,12 @@ async def get_connect_info(
     params = parse_username_params(composed)
     error = params.location_error
     if params.username != project.username:
-        error = "The project username contains a reserved delimiter (-cc-, -st-, -city-, -sessid- or -prxy-), so the proxy cannot read it"
+        error = "The project username contains a reserved delimiter (-cc-, -st-, -city-, -sessid-, -prxy- or -tag-), so the proxy cannot read it"
     elif len(_DELIMITERS.findall(composed, len(project.username))) != len(values):
         # Only the delimiters put there may follow the username: a value holding one, or
         # forming one with the dash before or after it ("st-ny" after -sessid- reads as
         # -st-ny), would be read as another parameter.
-        error = "A value cannot contain -cc-, -st-, -city-, -sessid- or -prxy-, including one formed with the dash before or after it"
+        error = "A value cannot contain -cc-, -st-, -city-, -sessid-, -prxy- or -tag-, including one formed with the dash before or after it"
     elif params.sessid and ":" in params.sessid:
         # Basic auth splits user and password at the first colon.
         error = "A session ID cannot contain a colon"

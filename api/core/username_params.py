@@ -7,7 +7,7 @@ Parses proxy authentication usernames to extract routing parameters.
 Parameters are appended to the project username as ``-<key>-<value>``
 segments and may appear in any order:
 
-    <username>[-sessid-<session_id>][-cc-<country>][-st-<state>][-city-<city>][-prxy-<proxy_id>]
+    <username>[-sessid-<session_id>][-cc-<country>][-st-<state>][-city-<city>][-prxy-<proxy_id>][-tag-<tag>]
 
 Examples:
     'myuser'                          -> username only
@@ -16,6 +16,7 @@ Examples:
     'myuser-cc-de-sessid-abc'         -> both, in either order
     'myuser-cc-us-st-ny-city-new_york' -> New York City exits (state and city need the country)
     'myuser-prxy-<proxy_id>'         -> only through that proxy of the project
+    'myuser-tag-job42'                -> routed as 'myuser'; an exit report can name the request by its tag
 """
 
 from typing import NamedTuple
@@ -37,6 +38,7 @@ COUNTRY_SEPARATOR = "-cc-"
 STATE_SEPARATOR = "-st-"
 CITY_SEPARATOR = "-city-"
 PROXY_SEPARATOR = "-prxy-"
+TAG_SEPARATOR = "-tag-"
 
 # Every reserved delimiter and the parameter it introduces. Values run
 # until the next delimiter (or the end of the string), so a value may
@@ -47,6 +49,7 @@ _PARAM_SEPARATORS: dict[str, str] = {
     STATE_SEPARATOR: "state",
     CITY_SEPARATOR: "city",
     PROXY_SEPARATOR: "proxy_id",
+    TAG_SEPARATOR: "tag",
 }
 # Every delimiter the parser reserves, for checks that a username or a value holds none.
 RESERVED_SEPARATORS = tuple(_PARAM_SEPARATORS)
@@ -71,7 +74,8 @@ class UsernameParams(NamedTuple):
     place. ``location_error`` says why a named place cannot be honoured (a
     state or city without a country); the request must be refused rather
     than routed anywhere. ``proxy_id`` is the one proxy the request may go
-    through, from ``-prxy-``.
+    through, from ``-prxy-``. ``tag`` names the request for exit reports
+    (``-tag-``) and changes nothing about its routing.
     """
 
     username: str
@@ -79,6 +83,7 @@ class UsernameParams(NamedTuple):
     location: LocationTarget | None
     location_error: str | None = None
     proxy_id: str | None = None
+    tag: str | None = None
 
     @property
     def country(self) -> str | None:
@@ -94,6 +99,7 @@ class AuthResult(NamedTuple):
     location: LocationTarget | None = None
     location_error: str | None = None
     proxy_id: str | None = None
+    tag: str | None = None
 
 
 def parse_username_params(raw_username: str) -> UsernameParams:
@@ -119,6 +125,7 @@ def parse_username_params(raw_username: str) -> UsernameParams:
         'myuser-sessid-abc-cc-gb' -> ('myuser', 'abc', LocationTarget('GB'))
         'myuser-cc-us-st-ny-city-new_york' -> ('myuser', None, LocationTarget('US', 'NY', 'new_york'))
         'myuser-prxy-<id>' -> ('myuser', None, None, proxy_id='<id>')
+        'myuser-tag-job42' -> ('myuser', None, None, tag='job42')
         'myuser-sessid-' -> ('myuser', None, None)
         '-sessid-abc' -> ('-sessid-abc', None, None)
     """
@@ -169,12 +176,12 @@ def parse_username_params(raw_username: str) -> UsernameParams:
         error = error or LOCATION_INVALID_CITY
 
     location = LocationTarget(country=country, state=state, city=city)
-    proxy_id = values["proxy_id"]
+    proxy_id, tag = values["proxy_id"], values["tag"]
     if location.is_empty and error is None:
-        return UsernameParams(username, values["sessid"], None, proxy_id=proxy_id)
+        return UsernameParams(username, values["sessid"], None, proxy_id=proxy_id, tag=tag)
     if error is None and location.below_country and country is None:
         error = LOCATION_NEEDS_COUNTRY
-    return UsernameParams(username, values["sessid"], location or None, error, proxy_id)
+    return UsernameParams(username, values["sessid"], location or None, error, proxy_id, tag)
 
 
 def format_username_params(username: str, sessid: str | None, location: LocationTarget | None) -> str:

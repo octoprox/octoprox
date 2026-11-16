@@ -94,17 +94,19 @@ class TestOwnTokens:
 
 class TestAdminTokens:
     def test_admin_issues_and_revokes_for_a_service_account(self, authenticated_client: TestClient) -> None:
-        # A user with no password and no email: it exists to hold tokens.
+        # No password, no email: it exists to hold tokens.
         user = authenticated_client.post(
-            "/api/v1/users/invite", json={"username": "scraper-bot", "role": "viewer"}
-        ).json()["user"]
+            "/api/v1/users/service-accounts", json={"username": "scraper-bot", "role": "viewer"}
+        ).json()
         created = authenticated_client.post(f"/api/v1/users/{user['id']}/tokens", json={"name": "bot"})
         assert created.status_code == 201, created.text
         secret = created.json()["token"]
         assert created.json()["api_token"]["created_by"] == "testadmin"
 
         token_headers = {"Authorization": f"Bearer {secret}"}
-        assert authenticated_client.get("/api/v1/users/me", headers=token_headers).json()["username"] == "scraper-bot"
+        me = authenticated_client.get("/api/v1/users/me", headers=token_headers).json()
+        assert (me["username"], me["kind"]) == ("scraper-bot", "service")
+        assert authenticated_client.get("/api/v1/projects", headers=token_headers).status_code == 200
         # The role is the user's, read on every call: a viewer cannot write.
         assert authenticated_client.post("/api/v1/projects", json={"name": "x"}, headers=token_headers).status_code == 403
 
@@ -119,6 +121,28 @@ class TestAdminTokens:
         assert authenticated_client.delete(f"/api/v1/users/{user['id']}/tokens/{listed[0]['id']}").status_code == 204
         assert authenticated_client.get("/api/v1/users/me", headers=token_headers).status_code == 401
         authenticated_client.request("DELETE", f"/api/v1/users/{user['id']}")
+
+    def test_a_service_accounts_own_token_gives_it_no_email_or_password(self, authenticated_client: TestClient) -> None:
+        """An email would let whoever holds that address at a sign-in provider sign in as the account."""
+        account = authenticated_client.post(
+            "/api/v1/users/service-accounts", json={"username": f"bot-{uuid4().hex[:8]}"}
+        ).json()
+        secret = authenticated_client.post(f"/api/v1/users/{account['id']}/tokens", json={"name": "bot"}).json()["token"]
+        token_headers = {"Authorization": f"Bearer {secret}"}
+
+        email = authenticated_client.patch("/api/v1/users/me", json={"email": "bot@example.com"}, headers=token_headers)
+        password = authenticated_client.patch("/api/v1/users/me", json={"password": "sneaky-pass-1"}, headers=token_headers)
+
+        assert [(r.status_code, r.json()["detail"]) for r in (email, password)] == [
+            (400, "A service account has no email: nobody signs in as it"),
+            (400, "A service account has no password: it uses API tokens"),
+        ]
+        stored = authenticated_client.get(f"/api/v1/users/{account['id']}").json()
+        assert (stored["email"], stored["has_password"]) == ("", False)
+        # Its theme is no way in.
+        themed = authenticated_client.patch("/api/v1/users/me", json={"theme_preference": "dark"}, headers=token_headers)
+        assert themed.status_code == 200
+        authenticated_client.request("DELETE", f"/api/v1/users/{account['id']}")
 
     def test_deleting_the_user_ends_the_token(self, authenticated_client: TestClient) -> None:
         user = authenticated_client.post("/api/v1/users/invite", json={"username": "temp-bot", "role": "viewer"}).json()["user"]

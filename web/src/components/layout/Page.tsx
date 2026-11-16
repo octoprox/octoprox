@@ -4,9 +4,13 @@
 import { createContext, useContext, type ReactNode } from 'react'
 import { cn } from '../../utils/cn'
 import { Reloading } from '../ui'
+import type { ProjectSettingsTab } from '../ProjectForm'
 
 /** A panel the shell opens over any page (project settings); it takes the page's panel slot while set, the page's own panel kept hidden. */
 export const ShellPanelContext = createContext<ReactNode>(null)
+
+/** Opens the open project's settings on a tab, for a link on a page; null where the user cannot change them. */
+export const ProjectSettingsContext = createContext<((tab?: ProjectSettingsTab) => void) | null>(null)
 
 /** Who a page's settings reach, shown beside its title where that is not the open project (Administration: all projects). */
 export const PageScopeContext = createContext<string | null>(null)

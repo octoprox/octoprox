@@ -25,6 +25,7 @@ from api.core.stats import (
     FailureCountKey,
     FailureExample,
     MetricDelta,
+    RequestCount,
     StepMetricDelta,
     TunnelPeerMetricDelta,
 )
@@ -69,6 +70,7 @@ from api.db.redis import (
     RUNTIME_STREAM_KEY,
     SCALE_CREATING_KEY,
     SIGHTING_STREAM_KEY,
+    SITE_REQUEST_WINDOWS,
     STICKY_BINDING_KEY,
     TRAFFIC_BLOCKED_KEY,
     TRAFFIC_PENDING_KEY,
@@ -137,10 +139,14 @@ COUNT = ("proj", "conn", "upstream_rejected", 429)
 REFUSED = ("proj", None, "no_proxy", None)
 # A host whose colons must survive its key.
 HOST = ("proj", "conn", "[2001:db8::1]:443")
+# A dynamic connector's requests to a site with colons of its own, for a place: (project, connector, site, place).
+SITE_REQUESTS = ("proj", "conn", "2001:db8::1", "US/NY/new_york")
+# A connector's reports on a site no request was counted for.
+SITE_REPORTS = ("proj", "pool", "my-shop.co.uk", "")
 DEVICE = TunnelPeerMetricDelta(
     request_count=2, success_count=1, failure_count=1, latency_sum_ms=12.5, by_address=3, encrypted_dns_blocked=1
 )
-# A window of every kind, as gateways leave them between two flushes.
+# A window of every kind, as gateways and the report ingest leave them between two flushes.
 EVERY_KIND = MetricWindows(
     proxies={"p1": _requests(3), "p2": _requests(1, latency_ms=0.25)},
     projects={"proj": StepMetricDelta.summed(_requests(4))},
@@ -148,6 +154,11 @@ EVERY_KIND = MetricWindows(
     tunnel_peers={"dev:1": DEVICE},
     hosts={HOST: _requests(2)},
     failures={COUNT: FailureCount(2), REFUSED: FailureCount(1)},
+    site_requests={
+        SITE_REQUESTS: RequestCount(3, blocked=2, good=1),
+        ("proj", "conn", "my-shop.co.uk", ""): RequestCount(1),
+        SITE_REPORTS: RequestCount(blocked=1),
+    },
 )
 
 
@@ -301,6 +312,37 @@ class TestMetricsTake:
 
         assert await redis_client.client.hlen(_staging("1-0")) == 1500
         assert taken.hosts == hosts
+
+    async def test_reports_add_onto_the_site_window_a_gateway_counts_requests_in(self, redis_client: RedisClient) -> None:
+        """The report ingest's counts land in the window a gateway's requests do, listed for the next flush."""
+        await _meter(redis_client, MetricWindows(site_requests={SITE_REQUESTS: RequestCount(3)}))
+
+        await redis_client.add_site_reports({SITE_REQUESTS: RequestCount(blocked=2), SITE_REPORTS: RequestCount(good=1)})
+        await redis_client.add_site_reports({})
+
+        assert await redis_client.client.smembers(_index("site_requests")) == {
+            SITE_REQUEST_WINDOWS.key(SITE_REQUESTS),
+            SITE_REQUEST_WINDOWS.key(SITE_REPORTS),
+        }
+        assert (await redis_client.take_metric_windows("1-0")).site_requests == {
+            SITE_REQUESTS: RequestCount(3, blocked=2),
+            SITE_REPORTS: RequestCount(good=1),
+        }
+
+    async def test_a_site_window_flushes_with_any_count_and_is_left_out_with_none(self, redis_client: RedisClient) -> None:
+        reported = ("proj", "conn", "example.com", "GB")
+        await redis_client.client.hset(
+            _staging("1-0"),
+            mapping={
+                SITE_REQUEST_WINDOWS.key(SITE_REQUESTS): json.dumps({"requests": "0", "blocked": "0", "good": "0"}),
+                SITE_REQUEST_WINDOWS.key(SITE_REPORTS): json.dumps({"good": "2", "updated_at": "2026-11-15T12:00:00"}),
+                SITE_REQUEST_WINDOWS.key(reported): json.dumps({"blocked": "1"}),
+            },
+        )
+
+        taken = await redis_client.take_metric_windows("1-0")
+
+        assert taken.site_requests == {SITE_REPORTS: RequestCount(good=2), reported: RequestCount(blocked=1)}
 
     async def test_a_staged_window_that_cannot_be_read_is_left_out_and_logged(self, redis_client: RedisClient) -> None:
         unreadable = {
@@ -817,6 +859,7 @@ class TestMeteringBatch:
             "tunnel_peer": {TUNNEL_PEER_METRICS_KEY.format(peer_id="dev")},
             "host": {HOST_METRICS_KEY.format(project_id="proj", connector_id="conn", host="example.com")},
             "failure": set(),
+            "site_requests": set(),
         }
         demand = DEMAND_KEY.format(project_id="proj", minute=29433600)
         assert await redis_client.client.hgetall(demand) == {"r": "3"}

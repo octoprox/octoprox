@@ -9,7 +9,7 @@ applies; the api's previews compile over the same registry, with no store.
 
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -17,7 +17,9 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from api.core import utc_now
 from api.core.config import Settings
+from api.core.stats import RequestCount
 from api.db.geo_repository import GeoDatabaseRepository, GeoSettingsRepository
 from api.db.openvpn_repository import OpenVpnPeerRepository, OpenVpnSettingsRepository
 from api.db.redis import QUARANTINE_KEY, TRAFFIC_BLOCKED_KEY, RedisClient
@@ -28,6 +30,7 @@ from api.db.repository import (
     ProviderDescriptorRepository,
     ProxyRepository,
 )
+from api.db.reputation_repository import ExitReputationRepository
 from api.db.wireguard_repository import WireGuardPeerRepository, WireGuardSettingsRepository
 from api.feed.compiler import (
     DISPLAY_ONLY_METADATA,
@@ -37,9 +40,11 @@ from api.feed.compiler import (
 )
 from api.feed.models import (
     GLOBAL_SECTION,
+    REPUTATION_SECTION,
     RUNTIME_SECTION,
     ConnectorSection,
     GlobalSection,
+    ReputationSection,
     RuntimeSection,
     Section,
     connector_section,
@@ -49,13 +54,14 @@ from api.geo.settings import GeoSettingsStore
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
 from api.models.openvpn import OpenVpnPeer, OpenVpnServerSettings
-from api.models.project import Project
+from api.models.project import ExitReputationMode, Project
 from api.models.provider import ProviderRecord
 from api.models.proxy import Proxy, ProxyStatus
 from api.models.wireguard import WireGuardPeer, WireGuardServerSettings
 from api.providers.registry import ProviderRegistry, build_registry
 from api.providers.sdk.loader import descriptor_from_dict
 from api.providers.store import ProviderStore
+from api.reputation.record import ConnectorSiteKey, ExitIpKey, ReportCounts
 from api.routing.router import Router
 from api.routing.snapshot import RoutingSnapshot
 from tests.providers.test_registry import fail_to_build
@@ -851,6 +857,184 @@ class TestRuntime:
             harness.compiler.runtime_section({}, {})
 
 
+async def reported(harness: Harness, project_id: str, ip: str, site: str, at: datetime, **counts: int) -> None:
+    """Exit reports applied to the record of ``ip`` on ``site``, as the workers apply them, at ``at``."""
+    async with harness.session_factory() as session:
+        await ExitReputationRepository(session).apply_reports({ExitIpKey(project_id, ip, site): ReportCounts(**counts)}, at)
+        await session.commit()
+
+
+async def blocked(harness: Harness, key: ConnectorSiteKey, at: datetime, *, reports: int, requests: int) -> None:
+    """Blocked reports and the requests through a connector at ``key``'s place, applied to its records at every level of
+    the place as the metrics flush applies them, at ``at``."""
+    async with harness.session_factory() as session:
+        evidence = dict.fromkeys(key.levels(), RequestCount(requests=requests, blocked=reports))
+        await ExitReputationRepository(session).apply_evidence(evidence, [key.connector_id], at)
+        await session.commit()
+
+
+def runtime_of(sections: Mapping[str, Section]) -> RuntimeSection:
+    section = sections[RUNTIME_SECTION]
+    assert isinstance(section, RuntimeSection)
+    return section
+
+
+def reputation_of(sections: Mapping[str, Section]) -> ReputationSection:
+    section = sections[REPUTATION_SECTION]
+    assert isinstance(section, ReputationSection)
+    return section
+
+
+async def pool_exiting(harness: Harness, mode: ExitReputationMode, *ips: str) -> Connector:
+    """Project-1, its exit reputation in ``mode``, with a static connector whose rows were last seen exiting from ``ips``."""
+    credential = make_credential()
+    connector = make_connector("connector-1", credential)
+    rows = [make_proxy(f"proxy-{n}", connector, metadata={"discovered_ip": ip}) for n, ip in enumerate(ips, 1)]
+    await harness.save(make_project(exit_reputation=mode), credential, connector, *rows)
+    return connector
+
+
+class TestReputation:
+    """The exit reputation section: per project that avoids, the avoids of the exit IPs its rows hold and the factors of
+    its dynamic connectors, read from Postgres apart from the compiles (tests/feed/test_reputation.py has the rules)."""
+
+    async def test_a_compile_reads_none_and_names_the_projects_that_owe_a_read(self, harness: Harness) -> None:
+        await pool_exiting(harness, ExitReputationMode.AVOID, "203.0.113.1")
+        await reported(harness, "project-1", "203.0.113.1", "google.com", utc_now(), bad=1)
+
+        with patch("api.feed.reputation.ExitReputationRepository") as repository:
+            compiled = await harness.compile()
+            again = await harness.compile()
+
+        repository.assert_not_called()
+        assert reputation_of(compiled.sections) == ReputationSection()
+        # New in scope at the first compile; the next moves nothing.
+        assert compiled.reputation_owed == {"project-1"}
+        assert again.reputation_owed == frozenset()
+
+    async def test_a_read_carries_the_avoids_of_the_ips_its_rows_hold_and_its_dynamic_connectors_factors(
+        self, harness: Harness
+    ) -> None:
+        credential = make_credential()
+        connector = make_connector("connector-1", credential)
+        dynamic = make_connector("connector-dyn", credential)
+        other_credential = make_credential("credential-2", project_id="project-2")
+        other_connector = make_connector("connector-2", other_credential)
+        await harness.save(
+            make_project(exit_reputation=ExitReputationMode.AVOID),
+            make_project("project-2", exit_reputation=ExitReputationMode.RECORD),
+            credential,
+            connector,
+            dynamic,
+            other_credential,
+            other_connector,
+            make_proxy("proxy-1", connector, metadata={"discovered_ip": "203.0.113.1"}),
+            # A pooled slot counts by its last sighting, an IPv4-mapped one as its IPv4.
+            make_proxy("slot-1", connector, metadata={"session_id": "s1", "discovered_ip": "::ffff:203.0.113.3"}),
+            # A dynamic gateway's exit is per request: its stored IP holds nothing, and its connector is weighed.
+            make_proxy("gateway", dynamic, metadata={"dynamic_sessions": "true", "discovered_ip": "203.0.113.5"}),
+            make_proxy("unseen", connector),
+            make_proxy("proxy-2", other_connector, metadata={"discovered_ip": "203.0.113.1"}),
+        )
+        now = utc_now()
+        await reported(harness, "project-1", "203.0.113.1", "google.com", now, bad=1)
+        await reported(harness, "project-1", "203.0.113.3", "bing.com", now, bad=2)
+        # Good reports alone avoid nothing.
+        await reported(harness, "project-1", "203.0.113.1", "example.com", now, good=1)
+        await reported(harness, "project-1", "203.0.113.5", "google.com", now, bad=1)
+        await reported(harness, "project-1", "203.0.113.9", "google.com", now, bad=1)
+        # Ended already.
+        await reported(harness, "project-1", "203.0.113.1", "yahoo.com", now - timedelta(hours=2), bad=1)
+        # A project that only records.
+        await reported(harness, "project-2", "203.0.113.1", "google.com", now, bad=1)
+        # 5 blocked of 20 requests at every level of US/NY: 0.75 at each, carried at the country alone.
+        await blocked(harness, ConnectorSiteKey("project-1", "connector-dyn", "google.com", "US/NY"), now, reports=5, requests=20)
+        await harness.compile()
+
+        await harness.compiler.read_reputation()
+
+        section = harness.compiler.reputation_section()
+        # A first avoid lasts "Avoid for", an hour at the default, however many reports began it.
+        assert section.model_dump() == {
+            "projects": {
+                "project-1": {
+                    "ip_avoids": {
+                        "203.0.113.1": {"google.com": now + timedelta(hours=1)},
+                        "203.0.113.3": {"bing.com": now + timedelta(hours=1)},
+                    },
+                    "connector_factors": {"connector-dyn": {"google.com": {"US": 0.75}}},
+                }
+            }
+        }
+        # The next compile carries it as last read.
+        assert reputation_of((await harness.compile()).sections) is section
+
+    async def test_a_read_of_one_project_reads_its_records_alone(self, harness: Harness) -> None:
+        for project_id in ("project-1", "project-2"):
+            credential = make_credential(f"credential-{project_id}", project_id=project_id)
+            connector = make_connector(f"connector-{project_id}", credential)
+            await harness.save(
+                make_project(project_id, exit_reputation=ExitReputationMode.AVOID),
+                credential,
+                connector,
+                make_proxy(f"proxy-{project_id}", connector, metadata={"discovered_ip": "203.0.113.1"}),
+            )
+        await harness.compile()
+        now = utc_now()
+        for project_id in ("project-1", "project-2"):
+            await reported(harness, project_id, "203.0.113.1", "google.com", now, bad=1)
+
+        await harness.compiler.read_reputation(["project-2"])
+
+        assert list(harness.compiler.reputation_section().projects) == ["project-2"]
+        await harness.compiler.read_reputation()
+        assert list(harness.compiler.reputation_section().projects) == ["project-1", "project-2"]
+
+    async def test_a_compile_that_moves_a_rows_exit_or_a_projects_mode_names_it(self, harness: Harness) -> None:
+        await pool_exiting(harness, ExitReputationMode.AVOID, "203.0.113.1")
+        assert (await harness.compile()).reputation_owed == {"project-1"}
+        async with harness.session_factory() as session:
+            row = await ProxyRepository(session).get_by_id("proxy-1")
+            assert row is not None
+            row.metadata = {"discovered_ip": "203.0.113.9"}
+            await ProxyRepository(session).update(row)
+            await session.commit()
+
+        assert (await harness.compile()).reputation_owed == {"project-1"}
+        async with harness.session_factory() as session:
+            await session.execute(text("UPDATE projects SET exit_reputation = 'record'"))
+            await session.commit()
+        # A project that stops avoiding owes nothing: it leaves the section.
+        assert (await harness.compile()).reputation_owed == frozenset()
+        async with harness.session_factory() as session:
+            await session.execute(text("UPDATE projects SET exit_reputation = 'avoid'"))
+            await session.commit()
+        assert (await harness.compile()).reputation_owed == {"project-1"}
+
+    async def test_nothing_is_read_while_no_project_avoids(self, harness: Harness) -> None:
+        """Most installs never turn exit reputation on: they pay no query for it."""
+        await pool_exiting(harness, ExitReputationMode.RECORD, "203.0.113.1")
+        with patch("api.feed.reputation.ExitReputationRepository") as repository:
+            compiled = await harness.compile()
+            await harness.compiler.read_reputation()
+
+        repository.assert_not_called()
+        assert compiled.reputation_owed == frozenset()
+        assert reputation_of(compiled.sections) == ReputationSection()
+
+    async def test_the_runtime_section_carries_no_reputation(self, harness: Harness) -> None:
+        await pool_exiting(harness, ExitReputationMode.AVOID, "203.0.113.1")
+        await reported(harness, "project-1", "203.0.113.1", "google.com", utc_now(), bad=1)
+        await harness.compile()
+        await harness.compiler.read_reputation()
+
+        assert harness.compiler.runtime_section({}, {}) == RuntimeSection()
+
+    async def test_reputation_is_read_for_a_compile(self, harness: Harness) -> None:
+        with pytest.raises(RuntimeError):
+            await harness.compiler.read_reputation()
+
+
 async def project_feed(
     harness: Harness,
     project_id: str,
@@ -993,6 +1177,17 @@ class TestProjectCompile:
         name = connector_section("connector-project-1")
         assert sections[name].model_dump_json() == compiled.sections[name].model_dump_json()
         assert global_of(sections).projects == global_of(compiled.sections).projects[:1]
+
+    async def test_a_project_compile_reads_no_exit_reputation(self, harness: Harness) -> None:
+        """A preview compiles per request: the api shows exit reputation from its own reads of the records."""
+        await pool_exiting(harness, ExitReputationMode.AVOID, "203.0.113.1")
+        await reported(harness, "project-1", "203.0.113.1", "google.com", utc_now(), bad=1)
+
+        with patch("api.feed.reputation.ExitReputationRepository") as repository:
+            sections = await project_feed(harness, "project-1")
+
+        repository.assert_not_called()
+        assert REPUTATION_SECTION not in sections
 
     async def test_a_missing_project_compiles_to_a_feed_without_it(self, harness: Harness, two_projects: None) -> None:
         sections = await project_feed(harness, "project-missing")

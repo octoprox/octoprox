@@ -35,6 +35,13 @@ export const GROUP_INFO: Record<FailureGroup, { label: string; heading: string; 
 
 export const GROUP_ORDER: FailureGroup[] = ['upstream', 'refused', 'intercepted', 'other']
 
+/** What a refusal that came after a proxy was chosen is to Overview: a traffic limit cutting a request under way.
+ * Refusals before routing never name a proxy. */
+const REFUSED_AFTER_A_PROXY_NOTE = 'Octoprox answered the client itself, after a proxy had been chosen for the request, so Overview counts it as a failed request.'
+
+/** The refused group as a whole: mostly answered before any proxy, with the one kind of answer that came after one. */
+export const REFUSED_GROUP_NOTE = 'Octoprox answered the client itself, mostly before using any proxy, which Overview does not count as requests. A traffic limit that cut a request under way came after a proxy was used, and Overview counts it as a failed request.'
+
 interface KindInfo {
   label: string
   group: FailureGroup
@@ -94,6 +101,12 @@ export const KIND_INFO: Record<string, KindInfo> = {
     color: '#0d9488',
     hint: 'Every proxy that could serve the request is resting after hitting its rate limit, or the one a request named with -prxy- is. The client was told to retry later (429). If this is frequent, the pool is too small for the request rate or the limits are too tight.',
   },
+  exits_avoided: {
+    label: 'Exits avoided',
+    group: 'refused',
+    color: '#854d0e',
+    hint: 'Exit reputation keeps exit IPs away from a site after bad exit reports: every row that could serve the request has its IP avoided there, or a sticky session\'s row does while the project does not move refused sessions. Only connectors with IPs avoid IPs; a dynamic connector is weighted instead and never refuses. The message names the site. Avoids end after the project\'s Avoid for, longer for an IP avoided again: a larger pool leaves more IPs for the site, and a shorter Avoid for in the project\'s Exit reputation settings gives avoided IPs back sooner. The Exit locations page lists them on its Reputation tab.',
+  },
   traffic_limit_exceeded: {
     label: 'Traffic limit reached',
     group: 'refused',
@@ -140,6 +153,7 @@ export function formatWhen(value: string): string {
 export function FailurePanel({ record, onClose }: { record: FailureRecord; onClose: () => void }) {
   const info = kindInfo(record.kind)
   const tunnel = !!record.peer_id
+  const note = info.group === 'refused' && record.proxy_id ? REFUSED_AFTER_A_PROXY_NOTE : GROUP_INFO[info.group].note
 
   return (
     <Inspector
@@ -172,7 +186,7 @@ export function FailurePanel({ record, onClose }: { record: FailureRecord; onClo
       </div>
 
       {info.hint && <p className="text-[12.5px] text-fg-muted leading-relaxed">{info.hint}</p>}
-      {GROUP_INFO[info.group].note && <p className="text-[12px] text-fg-subtle leading-relaxed">{GROUP_INFO[info.group].note}</p>}
+      {note && <p className="text-[12px] text-fg-subtle leading-relaxed">{note}</p>}
 
       <InspectorSection title="Request">
         <div>

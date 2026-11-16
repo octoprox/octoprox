@@ -204,6 +204,18 @@ export interface Project {
   observation_log: boolean
   /** Days the project's observation log is kept (0 forever); null inherits the install's. */
   observation_retention_days: number | null
+  /** What exit reports do; each mode does what the one before it does. */
+  exit_reputation: ExitReputationMode
+  /** How long a first avoid lasts, in minutes (1 to 10080); each repeat avoid doubles it, up to 7 days. */
+  exit_reputation_avoid_minutes: number
+  /** "Remember for": hours an exit IP's reports and avoids take to count half (1 to 168). */
+  exit_reputation_half_life_hours: number
+  /** "Connector memory": requests a dynamic connector's evidence for a site and place takes to count half, an hour at most (20 to 10000). */
+  exit_reputation_connector_half_life_requests: number
+  /** Fresh bad reports that avoid an exit for a site (1 to 10). */
+  exit_reputation_bad_reports: number
+  /** The least share of an IP's recent reports for a site, in percent, that must be bad to avoid it there (1 to 99). */
+  exit_reputation_bad_share: number
   /** Deleted, and waiting for its cloud instances to be terminated: its clients are turned away until it goes. */
   pending_deletion: boolean
   created_at: string
@@ -229,6 +241,13 @@ export type UnknownAction = 'vendor' | 'refuse'
  * database agrees with the vendor (routing then uses the agreeing answer).
  */
 export type ConflictRule = 'consensus' | 'first' | 'any'
+/**
+ * Exit reputation: off records nothing; record keeps exit reports and the
+ * requests they are measured against without changing routing; avoid keeps
+ * exit IPs avoided for a site away from it and weighs each connector by its
+ * reputation there.
+ */
+export type ExitReputationMode = 'off' | 'record' | 'avoid'
 
 export interface ProjectSummary extends Project {
   credential_count: number
@@ -263,6 +282,12 @@ export interface ProjectCreate {
   exit_headers?: boolean
   observation_log?: boolean
   observation_retention_days?: number | null
+  exit_reputation?: ExitReputationMode
+  exit_reputation_avoid_minutes?: number
+  exit_reputation_half_life_hours?: number
+  exit_reputation_connector_half_life_requests?: number
+  exit_reputation_bad_reports?: number
+  exit_reputation_bad_share?: number
 }
 
 export interface ProjectUpdate {
@@ -289,6 +314,12 @@ export interface ProjectUpdate {
   observation_log?: boolean
   /** An empty string clears the override. */
   observation_retention_days?: number | '' | null
+  exit_reputation?: ExitReputationMode
+  exit_reputation_avoid_minutes?: number
+  exit_reputation_half_life_hours?: number
+  exit_reputation_connector_half_life_requests?: number
+  exit_reputation_bad_reports?: number
+  exit_reputation_bad_share?: number
 }
 
 export interface Proxy {
@@ -333,6 +364,8 @@ export interface Proxy {
   state_source: string | null
   city: string | null
   city_source: string | null
+  /** The IP the row's exit reputation is kept under (its last seen exit); null on a dynamic gateway or before one is seen. */
+  exit_ip: string | null
   tags: string[]
   created_at: string
 }
@@ -783,6 +816,130 @@ export const fetchGeoExitIps = async (params: ExitIpFilters & { limit?: number; 
   (await api.get('/geo/exits/ips', { params })).data
 export const countGeoExitIps = async (params: ExitIpFilters = {}): Promise<number> =>
   (await api.get('/geo/exits/ips/count', { params })).data.total
+
+// --- Exit reputation (docs/exit-reputation.md) ----------------------------------------
+
+/** Where an exit IP stands on a site: avoided there now, or not. */
+export type ReputationStatus = 'avoided' | 'none'
+export type ReputationStatusFilter = 'any' | ReputationStatus
+export type ReputationSort = 'last_seen' | 'reports'
+
+/** One exit IP's record on one site as it stands when answered. Times are UTC. */
+export interface ExitReputationRecord {
+  ip: string
+  /** The exact host requests went to (www.google.com and google.com are two sites), or an IP literal. */
+  site: string
+  status: ReputationStatus
+  /** The avoid's end while it is in force. */
+  avoided_until: string | null
+  good_reports: number
+  bad_reports: number
+  /** The counts that decide, decayed by "Remember for" to the time of the answer. */
+  weighted_good: number
+  weighted_bad: number
+  /** The avoids begun for the site, decayed the same way: the next lasts "Avoid for" doubled this many times, rounded. */
+  weighted_avoids: number
+  /** The last avoid's end, past ones included. */
+  avoid_until: string | null
+  first_seen_at: string
+  last_seen_at: string
+  last_report_at: string | null
+  last_reason: string | null
+}
+
+export interface ExitReputationFilters {
+  /** A whole IP, or the start of one. */
+  ip?: string
+  /** Any part of the site. */
+  site?: string
+  status?: ReputationStatusFilter
+  sort?: ReputationSort
+}
+
+export interface ExitReputationPage {
+  records: ExitReputationRecord[]
+  /** Counted no further than 10,000 rows past this page: a lower bound when `total_exact` is false. */
+  total: number
+  total_exact: boolean
+  limit: number
+  offset: number
+}
+
+/** A connector of the project that handed out the IP. */
+export interface ExitIpConnector {
+  connector_id: string
+  connector_name: string
+  first_seen: string
+  last_seen: string
+  sightings: number
+}
+
+/** One IP: the sites it has a record for and those avoiding it now, the records in force first, and the connectors that served it. */
+export interface ExitIpReputation {
+  ip: string
+  sites: number
+  avoided_sites: number
+  /** At most 100 of the `sites`: those avoiding it now first, then the one seen last first. */
+  records: ExitReputationRecord[]
+  connectors: ExitIpConnector[]
+}
+
+/** One IP's records over every site: its reports, the sites it has a record for, and those avoiding it now. */
+export interface ExitIpReputationSummary {
+  /** As it was asked for. */
+  ip: string
+  good_reports: number
+  bad_reports: number
+  sites: number
+  avoided_sites: number
+  /** The latest end among those avoids. */
+  avoided_until: string | null
+}
+
+export const fetchExitReputation = async (projectId: string, params: ExitReputationFilters & { limit?: number; offset?: number } = {}): Promise<ExitReputationPage> =>
+  (await api.get(`/projects/${projectId}/exit-reputation`, { params })).data
+export const fetchExitIpReputation = async (projectId: string, ip: string): Promise<ExitIpReputation> =>
+  (await api.get(`/projects/${projectId}/exit-reputation/ips/${encodeURIComponent(ip)}`)).data
+/** Per IP among `ips` (a page's worth at most) that has a record; the others are left out. */
+export const fetchExitReputationSummary = async (projectId: string, ips: string[]): Promise<ExitIpReputationSummary[]> =>
+  (await api.post(`/projects/${projectId}/exit-reputation/summary`, { ips })).data.ips
+
+/** One connector on one site: its reputation there and its share of the site's requests at its effective weight. */
+export interface ConnectorSiteCell {
+  reputation: number
+  reputation_kind: ReputationKind | null
+  /** The place level whose factor was used (dynamic connectors); null when none has one. */
+  reputation_place: string | null
+  blocked: number | null
+  requests: number | null
+  usable_ips: number | null
+  eligible_ips: number | null
+  effective_share: number
+}
+
+export interface ConnectorBySite {
+  connector_id: string
+  name: string
+  credential_type: CredentialType
+  dynamic: boolean
+  weight: number
+  /** Keyed by site; a site missing is one the connector has nothing for. */
+  cells: Record<string, ConnectorSiteCell>
+}
+
+/** Every connector against the project's busiest sites (at most 8), for requests naming `place`, or none. */
+export interface ConnectorsBySite {
+  place: string | null
+  /** The places with connector data, busiest first (at most 20), for the location picker. */
+  places: ReputationPlace[]
+  sites: string[]
+  /** Whether routing uses the effective weights: the project avoids. Where it does not, the shares are by weight. */
+  reputation_applied?: boolean
+  connectors: ConnectorBySite[]
+}
+
+export const fetchExitReputationConnectors = async (projectId: string, place?: string): Promise<ConnectorsBySite> =>
+  (await api.get(`/projects/${projectId}/exit-reputation/connectors`, { params: place ? { place } : {} })).data
 
 export interface ProxyListResponse {
   total: number
@@ -1606,6 +1763,44 @@ export interface ConnectorTrafficShare {
   observed_bytes: number
   cost: number | null
   currency: string | null
+  /**
+   * What exit reputation makes of the connector for the split's site (and place). For a dynamic connector, the place
+   * level whose factor was used (the place asked for, or a coarser one when the finer ones have too little evidence
+   * yet); null when no level has a factor, and for a connector with IPs.
+   */
+  reputation_place: string | null
+  /** What its weight is multiplied by for the site: 1 when nothing lowers it. */
+  reputation: number
+  /** How the reputation was measured: reported blocks per request (dynamic), or IPs still usable (with IPs); null when there is nothing to measure. */
+  reputation_kind: ReputationKind | null
+  /** A dynamic connector's blocked reports and requests behind its block rate. */
+  blocked: number | null
+  requests: number | null
+  /** A connector with IPs: its rows eligible for a request to the site from the place, and those not avoided for the site. */
+  usable_ips: number | null
+  eligible_ips: number | null
+  /**
+   * The weight routing uses for the site's requests from the place (0 when the connector takes none of them), and its
+   * share of them in percent; where the project does not avoid, the configured weights of the connectors serving them.
+   */
+  effective_weight: number
+  effective_share: number
+}
+
+/** How a connector's reputation for a site is measured. */
+export type ReputationKind = 'block_rate' | 'usable_ips'
+
+/** A site the project has exit reputation data for, with its reports. */
+export interface ReputationSite {
+  site: string
+  reports: number
+}
+
+/** A requested place a connector has reputation data at for a site: a LocationTarget key ("US", "US/NY", "US/NY/new_york") and its label. */
+export interface ReputationPlace {
+  place: string
+  label: string
+  reports: number
 }
 
 export interface TrafficSplitResponse {
@@ -1615,10 +1810,25 @@ export interface TrafficSplitResponse {
   observed_requests: number
   observed_bytes: number
   connectors: ConnectorTrafficShare[]
+  /** The site and requested place the effective weights are for; null without. */
+  site: string | null
+  place: string | null
+  /** Whether routing uses the effective weights: the project's exit reputation avoids and a site was asked for. */
+  reputation_applied: boolean
+  /** The sites with exit reputation data, busiest first (at most 20), for the site picker. */
+  reputation_sites: ReputationSite[]
+  /** The places with connector data for the site, busiest first (at most 20); empty without a site. */
+  reputation_places: ReputationPlace[]
 }
 
-export const fetchProjectTrafficSplit = async (projectId: string, range: TrafficSplitRange = '1h'): Promise<TrafficSplitResponse> => {
-  const response = await api.get(`/projects/${projectId}/metrics/traffic-split`, { params: { range } })
+/** The split under the current weights, and with `site` (and `place`, a LocationTarget key) under the effective weights for it. */
+export const fetchProjectTrafficSplit = async (projectId: string, range: TrafficSplitRange = '1h', site?: string, place?: string): Promise<TrafficSplitResponse> => {
+  const params: Record<string, string> = { range }
+  if (site) {
+    params.site = site
+    if (place) params.place = place
+  }
+  const response = await api.get(`/projects/${projectId}/metrics/traffic-split`, { params })
   return response.data
 }
 
@@ -2040,14 +2250,21 @@ export const clearFailures = async (projectId: string): Promise<void> => {
 }
 
 // User types
+/** A person, or a service account: a program's user, which holds API tokens and never signs in. */
+export type UserKind = 'person' | 'service'
+
 export interface UserAccount {
   id: string
   username: string
   email: string
   role: UserRole
+  kind: UserKind
   is_active: boolean
   has_password: boolean
   sign_in_providers: string[]
+  /** The user's API tokens, expired ones included, and the latest use of any of them. */
+  token_count: number
+  token_last_used_at: string | null
   theme_preference: string
   last_login_at: string | null
   created_at: string
@@ -2075,6 +2292,11 @@ export interface UserInviteCreate {
 export interface InviteResponse {
   user: UserAccount
   invite_url: string
+}
+
+export interface ServiceAccountCreate {
+  username: string
+  role: UserRole
 }
 
 export interface UserUpdate {
@@ -2111,6 +2333,11 @@ export const inviteUser = async (data: UserInviteCreate): Promise<InviteResponse
 
 export const reinviteUser = async (userId: string): Promise<InviteResponse> => {
   const response = await api.post(`/users/${userId}/reinvite`)
+  return response.data
+}
+
+export const createServiceAccount = async (data: ServiceAccountCreate): Promise<UserAccount> => {
+  const response = await api.post('/users/service-accounts', data)
   return response.data
 }
 
@@ -2235,6 +2462,8 @@ export interface SystemInventory {
   users: number
   users_active: number
   users_by_role: Record<string, number>
+  /** People and service accounts (UserKind); a kind no user has is absent. */
+  users_by_kind: Record<string, number>
   providers_total: number
   providers_builtin: number
   providers_custom: number
@@ -2428,7 +2657,7 @@ export interface SystemJobKindStats {
   in_flight: number
 }
 
-/** A worker: the job kinds it takes, and the sightings and observations it ingested. */
+/** A worker: the job kinds it takes, and the sightings, observations and exit reports it ingested. */
 export interface SystemWorkerSnapshot {
   jobs: Partial<Record<JobKind, SystemJobKindStats>>
   /** Preflight sightings attributed, and lost with a batch given up after five deliveries, since start. */
@@ -2437,6 +2666,9 @@ export interface SystemWorkerSnapshot {
   /** IP observations and exit judgements ingested, and lost the same way, since start. */
   observations_consumed: number
   observations_dropped: number
+  /** Exit reports applied to the exit reputation records, and lost the same way, since start. */
+  exit_reports_consumed: number
+  exit_reports_dropped: number
 }
 
 /** Why a follower read a stream in full rather than on from its position. */
@@ -2576,7 +2808,7 @@ export interface SystemTopology {
   instances: Record<string, SystemInstance[]>
   controller: SystemControllerStatus
   feed: SystemFeed
-  /** The work the workers take: each job kind's stream, the sightings and the observations. */
+  /** The work the workers take: each job kind's stream, the sightings, the observations and the exit reports. */
   streams: SystemWorkStreams
 }
 

@@ -33,7 +33,13 @@ from api.core.signals import (
     tunnel_encrypted_dns_blocked,
     tunnel_name_unresolved,
 )
-from api.core.stats import HOST_OVERFLOW, MetricDelta, StepMetricDelta, TunnelPeerMetricDelta
+from api.core.stats import (
+    HOST_OVERFLOW,
+    MetricDelta,
+    RequestCount,
+    StepMetricDelta,
+    TunnelPeerMetricDelta,
+)
 from api.core.timing import Step
 from api.core.traffic_limiter import PROGRESS_REPORT_BYTES
 from api.core.workers import WorkerName
@@ -60,11 +66,19 @@ from api.db.redis import (
     MetricWindows,
     RedisClient,
 )
-from api.feed.models import RUNTIME_SECTION, ConnectorSection, RuntimeSection
+from api.feed.models import (
+    GLOBAL_SECTION,
+    RUNTIME_SECTION,
+    ConnectorSection,
+    GlobalSection,
+    RuntimeSection,
+)
 from api.feed.state import RuntimeStateReader
 from api.gateway.metering import REJECTION_COUNT_INTERVAL_SECONDS, RequestMetering
 from api.models.connector import Connector
 from api.models.credential import CredentialType
+from api.models.location import LocationTarget
+from api.models.project import ExitReputationMode, Project
 from api.models.proxy import Proxy
 from api.providers.registry import ProviderRegistry
 from api.routing.inflight import InFlight
@@ -125,6 +139,8 @@ class Harness:
         # The routing snapshot's connector sections by connector id, and the connectors the feed says are blocked.
         self.sections: dict[str, ConnectorSection] = {}
         self.blocked: set[str] = set()
+        # The projects the feed's global section carries; none unless a test needs one.
+        self.projects: list[Project] = []
         self.trips: list[tuple[str, datetime]] = []
         self.now = NOW
         self.inflight = InFlight()
@@ -150,16 +166,23 @@ class Harness:
         self.sections[connector.id] = ConnectorSection(connector=connector, proxies=held.proxies if held else [])
         self._swap()
 
-    def add(self, connector: Connector | None = None, *, proxy_id: str = "proxy-1") -> Proxy:
+    def add(
+        self, connector: Connector | None = None, *, proxy_id: str = "proxy-1", metadata: dict[str, Any] | None = None
+    ) -> Proxy:
         """A proxy of ``connector`` (a fresh default one when None), now in the snapshot."""
         connector = connector or make_connector()
-        proxy = Proxy(id=proxy_id, host="10.0.0.1", port=8080, connector_id=connector.id)
+        proxy = Proxy(id=proxy_id, host="10.0.0.1", port=8080, connector_id=connector.id, metadata=metadata or {})
         held = self.sections.get(connector.id)
         self.sections[connector.id] = ConnectorSection(
             connector=connector, proxies=[*(held.proxies if held else []), proxy]
         )
         self._swap()
         return proxy
+
+    def project(self, mode: ExitReputationMode) -> None:
+        """Have the feed carry project-1 with its exit reputation in ``mode``."""
+        self.projects = [Project(id=PROJECT, name="P", username="u", password="pw", exit_reputation=mode)]
+        self._swap()
 
     def block(self, connector_id: str) -> None:
         """Have the feed block ``connector_id`` for its traffic limit."""
@@ -169,9 +192,8 @@ class Harness:
     def _swap(self) -> None:
         """Route on a snapshot of the sections and blocks as they are now."""
         runtime = RuntimeSection(traffic_blocked_until=dict.fromkeys(self.blocked, BLOCKED_UNTIL))
-        self.router.swap(
-            RoutingSnapshot.from_sections({**self.sections, RUNTIME_SECTION: runtime}, registry=ProviderRegistry())
-        )
+        sections = {**self.sections, RUNTIME_SECTION: runtime, GLOBAL_SECTION: GlobalSection(projects=self.projects)}
+        self.router.swap(RoutingSnapshot.from_sections(sections, registry=ProviderRegistry()))
 
     def complete(self, proxy: Proxy, *, success: bool = True, latency_ms: float = 10.0, **kwargs: Any) -> None:
         """One finished request through ``proxy``, 1 byte up and 2 down unless told otherwise."""
@@ -413,6 +435,53 @@ class TestCounting:
             assert (await window(redis_client, PROXY_WINDOWS, proxy.id) or MetricDelta()).request_count == 2
         finally:
             await harness.close()
+
+
+class TestSiteRequests:
+    """Exit reputation measures a dynamic connector's block rate per site and requested place against its requests."""
+
+    def dynamic(self, harness: Harness) -> Proxy:
+        return harness.add(make_connector("dynamic"), proxy_id="gateway", metadata={"dynamic_sessions": "true"})
+
+    async def test_a_dynamic_connectors_requests_count_per_site_and_place(
+        self, harness: Harness, redis_client: RedisClient
+    ) -> None:
+        harness.project(ExitReputationMode.RECORD)
+        gateway = self.dynamic(harness)
+        new_york = LocationTarget(country="US", state="NY", city="new_york")
+        harness.complete(gateway, target_host="WWW.Google.com.", location=new_york)
+        harness.complete(gateway, success=False, target_host="www.google.com", location=new_york)
+        harness.complete(gateway, target_host="www.google.com")
+        harness.complete(gateway, target_host="[2001:db8::1]", location=LocationTarget(country="GB"))
+
+        await harness.metering.flush()
+
+        assert (await live_windows(redis_client)).site_requests == {
+            (PROJECT, "dynamic", "www.google.com", "US/NY/new_york"): RequestCount(2),
+            (PROJECT, "dynamic", "www.google.com", ""): RequestCount(1),
+            (PROJECT, "dynamic", "2001:db8::1", "GB"): RequestCount(1),
+        }
+
+    async def test_only_proxy_clients_of_recording_projects_through_dynamic_connectors_count(
+        self, harness: Harness, redis_client: RedisClient
+    ) -> None:
+        """A connector with IPs is measured by its host windows; a tunnel device is never reported on."""
+        harness.project(ExitReputationMode.OFF)
+        gateway = self.dynamic(harness)
+        static = harness.add(proxy_id="static")
+        harness.complete(gateway, target_host="google.com")
+        harness.project(ExitReputationMode.AVOID)
+        harness.complete(static, target_host="google.com")
+        harness.complete(gateway, target_host="google.com", peer_id="device-1")
+        harness.complete(gateway)
+        harness.complete(gateway, target_host="bad host")
+        harness.complete(gateway, target_host="google.com")
+
+        await harness.metering.flush()
+
+        assert (await live_windows(redis_client)).site_requests == {
+            (PROJECT, "dynamic", "google.com", ""): RequestCount(1)
+        }
 
 
 class TestDemand:

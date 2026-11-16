@@ -279,6 +279,10 @@ class WorkerSnapshot(BaseModel):
     # given up after repeated deliveries, since start.
     observations_consumed: int = 0
     observations_dropped: int = 0
+    # Exit reports applied, and lost with a batch given up after repeated
+    # deliveries, since start.
+    exit_reports_consumed: int = 0
+    exit_reports_dropped: int = 0
 
 
 class StreamState(BaseModel):
@@ -436,7 +440,7 @@ class WorkStream(BaseModel):
 
 
 class WorkStreams(BaseModel):
-    """Every work stream by name (``jobs.<kind>``, ``sightings``, ``observations``), as Redis describes it now."""
+    """Every work stream by name (``jobs.<kind>``, ``sightings``, ``observations``, ``exit_reports``), as Redis describes it now."""
 
     # Empty when Redis could not be read (``error`` says why).
     by_name: dict[str, WorkStream] = Field(default_factory=dict)
@@ -455,7 +459,7 @@ class SystemTopology(BaseModel):
     instances: dict[str, list[InstanceInfo]] = Field(default_factory=dict)
     controller: ControllerStatus
     feed: FeedStatus
-    # The work streams: each job kind's, the sightings and the observations.
+    # The work streams: each job kind's, the sightings, the observations and the exit reports.
     streams: WorkStreams = Field(default_factory=WorkStreams)
 
 
@@ -474,6 +478,8 @@ class InventoryStats(BaseModel):
     users: int = 0
     users_active: int = 0
     users_by_role: dict[str, int] = Field(default_factory=dict)
+    # People and service accounts (``UserKind`` values); a kind no user has is absent.
+    users_by_kind: dict[str, int] = Field(default_factory=dict)
     providers_total: int = 0
     providers_builtin: int = 0
     providers_custom: int = 0

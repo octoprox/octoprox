@@ -1,0 +1,213 @@
+---
+layout: docs
+title: "Exit Reputation: Route Around What a Site Blocks"
+nav_id: exit-reputation
+description: "Tell Octoprox which requests a site blocked: an exit IP it blocked is kept away from that site for a while, and each connector's weight for the site follows its record there. Modes, settings, sites, reporting, routing and the views."
+---
+
+# Exit Reputation
+
+<p class="subtitle">Tell Octoprox which requests a site blocked, and it sends that site's requests around the exits and the vendors it blocks.</p>
+
+A site that has just blocked an exit IP usually blocks its next request too, while other sites still take it, and a vendor that does well on one site can do badly on another. Your client sees the captcha or the block page; Octoprox only sees a tunnel that worked. With exit reputation your clients send **exit reports** through the API ("this request was blocked by www.google.com"), and Octoprox keeps a record per **site**, the exact host a request went to:
+
+* **Connectors with IPs** (static lists, ISP and datacenter ports, cloud instances, pooled slots): a record per exit IP. An IP reported blocked is avoided for that site for a while, and every other site keeps using it. The connector's weight for the site follows how many of its IPs are still usable there.
+* **Dynamic connectors**, whose every session exits somewhere new: a record per connector. Its weight for the site follows its block rate there, the share of its recent requests to the site that were reported blocked.
+
+Evidence fades, so an exit or a vendor that recovered comes back on its own, without anyone clearing a list. An exit IP's fades with **Remember for**: a report counts in full when it arrives, half once that many hours have passed, a quarter after twice as long, and so on. A dynamic connector's fades with **Connector memory**: it counts half after that many more of the connector's requests to the site, and at least half every hour.
+
+## Modes
+
+Each project picks a mode in **Project settings**, **Exit reputation** tab (`exit_reputation` in the [API]({{ site.baseurl }}/api#projects)).
+
+| Mode | What it does |
+|------|--------------|
+| `off` (default) | Nothing is recorded and exit reports are refused. Routing is unchanged. |
+| `record` | Reports are taken and the requests they are measured against are counted. The views show the records and what `avoid` would do, but routing is unchanged: a safe way to see the settings at work first. |
+| `avoid` | Routing uses the records: an IP avoided for a site is not routed to for it, and each connector's weight for a site is multiplied by its reputation there (see [Routing](#routing)). |
+
+## Settings
+
+| Setting | Default | Range | What it decides |
+|---------|---------|-------|-----------------|
+| **Avoid for (minutes)** (`exit_reputation_avoid_minutes`) | 60 | 1 to 10080 | How long a first avoid of an exit IP for a site lasts. Each repeat doubles it, up to 7 days |
+| **Remember for (hours)** (`exit_reputation_half_life_hours`) | 24 | 1 to 168 | How many hours an exit IP's evidence takes to count half: its reports and its earlier avoids |
+| **Connector memory (requests)** (`exit_reputation_connector_half_life_requests`) | 100 | 20 to 10000 | How many more requests a dynamic connector's evidence for a site and place takes to count half, an hour at most: its blocked reports and the requests they are measured against |
+| **Bad reports to avoid** (`exit_reputation_bad_reports`) | 1 | 1 to 10 | How many fresh bad reports avoid an exit IP for a site |
+| **Minimum bad share (%)** (`exit_reputation_bad_share`) | 50 | 1 to 99 | The least share of an IP's recent reports for the site that must be bad before it is avoided |
+
+The tab also shows **Move refused sessions** (`location_session_move`, the same setting as on the Location tab), which decides what a `sticky` session does when its row's IP is avoided (see [Sessions](#sessions)).
+
+### When an exit IP is avoided
+
+* An IP is avoided for a site when its bad reports there, faded by Remember for, reach the **bad reports to avoid** (with half a report of slack, so one that came in a little earlier still counts), and make up at least the **minimum bad share** of its recent reports there.
+* The avoid lasts **Avoid for**, doubled for each earlier avoid of the IP for the site that is still remembered (those fade like reports, and are rounded to whole ones), and never more than 7 days.
+* While it runs, more bad reports add weight but do not lengthen it. Good reports end it early once the bad share falls under the minimum; they never start or lengthen one.
+
+With the defaults (60 minutes, 24 hours, 1 report, 50%):
+
+| What happened | Avoided for |
+|---------------|-------------|
+| One bad report | 1 hour |
+| Reported bad again 3 hours later, after the first avoid ended | 2 hours: the first avoid still counts 0.92, which rounds to 1 |
+| 8 bad reports at once | 1 hour: one avoid, however many reports start it |
+| Three avoids in one day | 1 hour, then 2, then 4 |
+| One bad report, then two good ones a minute later | A minute: the good reports end it, since a third of the recent reports are bad |
+
+### A connector's reputation for a site
+
+* **A dynamic connector**: one less its block rate for the site, never under 0.1, in steps of 0.05. The block rate is its bad reports for the site per request it carried there, over its recent requests: 30 bad reports among 100 requests give 0.7. A request here is what Octoprox counts everywhere, a connection: an HTTPS tunnel is one request however many requests the client sends through it ([Metrics]({{ site.baseurl }}/metrics#how-counting-works)), so report at most one block per connection. A record starts with the connector's first report for the site, and requests are counted from then on. Good reports are counted, but every request not reported bad already counts as a good one, so they change nothing here.
+* **Per requested place.** A dynamic connector can do well on a site for requests from Germany and badly for requests from the US, so its record is also kept per place the request asked for, at every level of it: a request with `-cc-us-st-ny-city-new_york` counts for New York, for NY and for the US. A level with fewer than 20 recent requests gives no factor, and routing uses the next coarser one: a quiet city takes its state's factor, or its country's. With none even at the country, the weight is unchanged, never a figure from every country. A request that names no place has its own record.
+* **A connector with IPs**: the share of its eligible IPs, those that could serve the request, not avoided for the site: 8 of 20 avoided gives 0.6. With none left it takes none of the site's requests. Its eligible rows already depend on the place asked for, so it needs no per-place record. Its record for the site still counts its reports and the requests it carried there, for the views alone. Those requests come from the per-host counts of [Hosts]({{ site.baseurl }}/metrics#hosts-where-the-traffic-goes): none are counted while `metrics.hosts.enabled` is off, and none for a host past the `metrics.hosts.max_hosts` ceiling.
+
+### How fast a dynamic connector reacts
+
+A dynamic connector's evidence for a site and place counts half after **Connector memory** more requests through it there (100 by default), and at least half every hour. Its factor is decided once a minute, when request counts are flushed, so a report takes effect within about a minute. The factor moves only when one less the block rate is a full step of 0.05 away from it, so a rate that wavers near a step does not move it back and forth.
+
+With the default Connector memory, a connector that a site starts blocking on every request falls to ×0.5 there:
+
+| Its requests to the site from the place | In about |
+|-----------------------------------------|----------|
+| 100 a minute or more | A minute |
+| 10 a minute | 8 minutes |
+| 1 a minute | 40 minutes |
+
+Once the blocks stop, every 100 clean requests halve what is left of them, and so does every hour. A lower Connector memory reacts sooner but moves more on a few unlucky requests; a higher one is steadier but slower.
+
+## Sites
+
+A site is the exact host a request went to: `www.google.com`, `maps.google.com` and `google.com` are three sites, since each can judge an exit on its own. A report counts for the one host it names, so name the host the request went to, or give the request's URL and its host is taken. Letter case, a port and a trailing dot make no difference (`WWW.Google.com.:443` is `www.google.com`). A host given as an IP address is its own site, and a name in another script counts as its ASCII form (`www.bücher.de` is `www.xn--bcher-kva.de`; name a site with a `ß` in the ASCII form the request went to). A report naming a public suffix of the [Public Suffix List](https://publicsuffix.org/), such as `com` or `co.uk`, or no host name at all, such as `*.google.com`, is refused.
+
+## Reporting exits
+
+A client tells Octoprox what a site did with a request by sending exit reports to `POST /api/v1/projects/{project_id}/exit-reports`, up to 1000 in one request. Any signed-in role may send them, a viewer included: give a scraper its own [service account]({{ site.baseurl }}/sso#service-accounts) with the viewer role, so the token that reports can change no setting.
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `username` | yes | The proxy username the request used. It tells the project, the place (its `-cc-`, `-st-` and `-city-`) and the request's `-tag-` |
+| `site` | yes | The host the request went to, or its URL; the report counts for that exact host, its [site](#sites), alone |
+| `verdict` | yes | `bad` (a block page, a captcha, a ban, a `403` or `429` from the site) or `good` (the site answered as it should) |
+| `reason` | no | Why, in up to 64 characters, such as `captcha`. An IP's record keeps the latest one |
+| `connector_id` | no | The request's `X-Octoprox-Connector-Id` [exit header]({{ site.baseurl }}/connecting#exit-headers) |
+| `ip` | no | The request's `X-Octoprox-Exit-Ip` exit header |
+
+**Naming the exit.** Octoprox has to know what the request went through. There are two ways:
+
+1. **A tag.** Add `-tag-<id>` to the request's proxy username: it changes nothing about the routing. A gateway notes what a tagged request went through, and keeps the note 2 minutes; report with the same username within that time.
+2. **The exit headers**, when the project sends them (**Exit headers** on its Location tab) and the client can read them: a dynamic connector's `connector_id` alone, or a connector with IPs' `connector_id` with its `ip`, which must be the last seen exit IP of one of that connector's rows. Complete headers name the exit by themselves and win over a tag.
+
+A report that names its exit neither way is refused.
+
+**What to do in a client:**
+
+* Add `-tag-<unique id>` to every request you might report, and report it with that username as soon as the answer is read, within 2 minutes. This works for every connector and every strategy.
+* Always send the tag yourself: a `-sessid-` is never read as a tag, and a username with no `-tag-` and no complete exit headers is refused.
+* Under the `sticky` strategy a whole session may share one tag value, such as the session's own (`myuser-sessid-abc-tag-abc`), which saves the gateway a write per request. The note is then written again at most once a minute, so report within a minute, and a block reported after the session moved to another exit is counted against the new one. Under the other strategies, use a tag per request.
+* The exit headers are optional. A client that reads them (every plain `http://` request; for `https://`, only clients that read the answer to their `CONNECT`) can name the exit without a tag.
+* A dynamic connector's block rate counts connections. A tag per request gets a connection per request in common clients. A client that shares a tag across a session, or names the exit by the headers of its `CONNECT`, keeps sending requests through one tunnel: turn connection reuse off ([how]({{ site.baseurl }}/metrics#disable-client-side-connection-pooling)) or close the connection after a block, or several blocks count against one request.
+* Good reports are optional. They change nothing for a dynamic connector, and for a connector with IPs they keep a mostly working IP from being avoided for one bad report, through the minimum bad share.
+
+The answer is `202`, with what became of each report, in the order sent. A refused report does not hold back the others:
+
+```json
+{
+  "accepted": 1,
+  "rejected": 1,
+  "results": [
+    {"index": 0, "status": "accepted", "ip": null, "site": "www.google.com", "connector_id": "6f1c...", "place": "US/NY", "error": null},
+    {"index": 1, "status": "rejected", "ip": null, "site": "www.example.com", "connector_id": null, "place": null,
+     "error": "no recent request with this tag (a note is kept 1 to 2 minutes after the tag's last request)"}
+  ]
+}
+```
+
+An accepted report's `ip`, `connector_id` and `place` are what it counts for: a connector with IPs gets the report on its IP (`place` empty), a dynamic connector on itself at the place the username named (`ip` null). A refused report's `error` says why:
+
+| `error` | Why |
+|---------|-----|
+| `site is empty`, `not a site: co.uk is a public suffix`, `not a site: *.google.com is not a host name` | The site names no host a request can go to, and no IP |
+| `username is not this project's` | The username before its parameters is not the project's proxy username |
+| `username: ...` | Its `-cc-`, `-st-` or `-city-` cannot be read, as a gateway would refuse it |
+| `name the exit with a -tag- in the username, or with the exit headers` | No tag, and no complete exit headers |
+| `no recent request with this tag (...)` | No request with the tag came through lately, or it was refused, or the mode was `off` then |
+| `...; exit headers: ...` | The headers sent did not name the exit, and why: `connector ... is not in this project`, `connector ... has IPs, so ip is needed too`, `not an IP: ...`, `no proxy of connector ... was last seen exiting from ...`, `ip needs connector_id` |
+
+The request as a whole answers `409` while the mode is `off`, `404` for an unknown project, `422` for a body that breaks the format (no report or more than 1000, a report without `username`, `site` or `verdict`, a `reason` over 64 characters or with a control character), and `503` when Redis cannot be reached: send the reports again. Reports are data, like metrics: they are not in the audit log. A report on an exit IP is applied within about a second of the `202` while the workers keep up; a report on a connector counts at the next minute's flush of request counts ([how fast](#how-fast-a-dynamic-connector-reacts)).
+
+```python
+import uuid
+
+import requests
+
+API = "https://octoprox.example.com/api/v1/projects/<project_id>/exit-reports"
+TOKEN = "octo_..."  # a viewer service account's token
+
+username = f"acme-cc-us-tag-{uuid.uuid4().hex[:12]}"
+proxy = f"http://{username}:<password>@proxy.example.com:8080"
+response = requests.get("https://www.example.com/search?q=shoes", proxies={"https": proxy}, timeout=30)
+if response.status_code in (403, 429) or "captcha" in response.text.lower():
+    requests.post(
+        API,
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json={"reports": [{"username": username, "site": "www.example.com", "verdict": "bad", "reason": "captcha"}]},
+        timeout=10,
+    )
+```
+
+## Routing
+
+With the mode `avoid`, a request's site changes where it goes. Octoprox reads the site from the host the request goes to: the `CONNECT` target, or a plain request's URL.
+
+1. **Rows whose IP is avoided for the site are dropped** before anything else, by the IP their last [check]({{ site.baseurl }}/ip-attribution#health-checks) saw, so rows that share an IP share its avoids. Requests to every other site keep using them. A request that names an avoided row with [`-prxy-`]({{ site.baseurl }}/routing-strategies#pinning-a-proxy) fails with `502 Bad Gateway (Proxy <id> is avoided for <site>)`.
+2. **Each connector's weight is multiplied by its reputation for the site**: a dynamic connector's factor at the finest level of the request's place with enough evidence, a connector with IPs' share of usable IPs. The [routing strategy]({{ site.baseurl }}/routing-strategies) then picks by these effective weights as it always does by weight; `sticky` places only new sessions by them, and a session already bound keeps its row while the row is eligible. `round_robin` draws a request whose weights reputation lowered at random by them, rather than in its fixed order, which the project's other requests keep ([why]({{ site.baseurl }}/routing-strategies#exit-reputation-and-effective-weights)).
+
+Weights stay relative, so a connector lowered less than the others gains share. For requests to www.google.com from the US:
+
+| Connector | Weight | Reputation | Effective weight | Share of the site's requests |
+|-----------|--------|------------|------------------|------------------------------|
+| Vendor A, dynamic | 3 | 35% blocked: ×0.65 | 1.95 | 37% (43% by weight) |
+| Vendor B, dynamic | 2 | 10% blocked: ×0.9 | 1.8 | 34% (29%) |
+| Static list of 500 IPs | 2 | 120 avoided: ×0.76 | 1.52 | 29% (29%) |
+
+Changes reach every gateway within moments: whatever starts or ends an avoid, or moves a factor, has the controller read the records again (at most once per `feed_compile_interval`, a second by default). An avoid ends on its own at its time; nothing has to lift it.
+
+### Sessions
+
+Under `sticky`, a session whose row's IP becomes avoided for a site follows **Move refused sessions** (`location_session_move`):
+
+* **On**, its next request to the site moves it to another row, which it keeps from then on, for every site.
+* **Off** (the default), its requests to that site are refused with `502 Bad Gateway (Exit <ip> of this session is avoided for <site>)` until the avoid ends, and its requests to other sites keep the row. A refused request keeps the session in use, so it does not go idle and move while the client keeps trying. A client that wants another exit sooner starts a new session.
+
+The other strategies hold no session to a row, so a session's next request simply goes through another one. Dynamic connectors avoid no IPs, so their sessions are never refused for this.
+
+### When every exit is avoided
+
+When every row that could serve a request has its IP avoided for the request's site, and no dynamic connector can take it, the request is refused:
+
+```
+HTTP/1.1 502 Bad Gateway (Every eligible exit is avoided for www.google.com)
+Proxy-Status: octoprox; error=exits_avoided; details="www.google.com"
+```
+
+The details name the site. The [Failures]({{ site.baseurl }}/metrics#failures-why-requests-failed) page counts it as **Exits avoided** (`exits_avoided`), among the requests refused before any proxy was used. The answers for rows resting after a rate limit (`429`) and for connectors over their [traffic limit]({{ site.baseurl }}/traffic-limits) come first when they hold for every row that could serve the request.
+
+Points that are easy to miss:
+
+* **A row no check has placed yet** has no exit IP, so it is never avoided.
+* **A pooled slot whose vendor session moved** is judged by the IP of its last sighting until the next check sees the new one.
+* **No preflight is needed**: reports name their exit themselves, and nothing is echoed for exit reputation.
+* **Switching the mode to `record` or `off`** gives every connector its configured weight back and releases every avoid at once, keeping the records; switching back to `avoid` routes by them again.
+* **Routing acts on at most 100 sites per exit IP**, and across the whole install on at most 100,000 IP and site avoids, the ones that end last, and 20,000 dynamic connector factors, the coarsest places first: an IP that served a wide crawl can be reported on thousands of sites, and every gateway carries what routing acts on. The records keep everything, and the [views](#views) show it.
+
+**How long records are kept.** A record is deleted 30 days after the day it was last seen, by a report or a request counted (`exit_reputation_retention_days`, see [Configuration]({{ site.baseurl }}/configuration#exit-reputation)), never while an IP's avoid is still ahead. At the default Remember for, 30 days leave an exit IP's evidence worth about a billionth of a fresh report, and a connector's evidence counts half every hour at least.
+
+## Views
+
+Every role sees what the project's exit reputation holds, as it stands when the page is read:
+
+* **Traffic split** (Overview and Connectors): pick a site under **Requests to**, and a place under **from**, to see each connector's **Weight**, its **Reputation** for the site (the factor, coloured by how far it lowers the weight), its **Effective** weight and the **Expected** share of the site's requests it gets, with the configured split faint above the one for the site and the reason for the connector lowered most under the rows. A tooltip on a dynamic connector says when its factor came from a coarser place than the one picked ("from United States: NY has too little evidence yet"), and a tag beside its factor names that place. While the mode is not `avoid`, the numbers are marked as not applied: they are what `avoid` would do. The sites offered are the 20 with the most reports.
+* **Exit locations, Reputation tab**: **Connectors by site**, every connector against the 8 sites with the most reports, each cell its expected share of the site's requests at its effective weight with its reputation under it, for requests from a place you pick or from none; and **Exit IPs by site**, one row per exit IP and site of the connectors with IPs, with its status (**Avoided until** a time, or `-`), its good and bad reports, and the latest one with its reason. Filter by IP (a whole address or its start), by site (any part of it) and by status, and order by last seen or by reports. A row opens its IP: the sites it has a record for (100 at most, those avoiding it now first; filter the tab by the IP for every one), with the counts that decide, the recent avoids a next one doubles by, and the connectors that handed it out.
+* **Exit locations, Exit IPs tab** gains two columns while the mode is not `off`: **Reports**, good / bad over every site, and **Avoided**, how many sites avoid the IP now.
+* **Proxies**: while the mode is not `off`, the inspector of a row with an exit IP has an **Exit reputation** section, each site of its IP with its status and ends.
+
+With the mode `record`, the views show what `avoid` would do, and routing does not use it. With the mode `off`, nothing new is recorded, and the records kept from before stay until they expire. The same reads are in the [API]({{ site.baseurl }}/api#exit-reputation-records).

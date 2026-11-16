@@ -21,6 +21,7 @@ from python_socks.async_.asyncio import Proxy as SocksProxy
 
 from api.core.error_response import (
     BANDWIDTH_LIMIT_PROXY_STATUS,
+    exits_avoided_proxy_status,
     reason_phrase,
     refusal_message,
     upstream_proxy_status,
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
     from api.core.mitm import MitmHandler
     from api.core.traffic_limiter import TrafficMeter
     from api.gateway.metering import RequestMetering
+    from api.gateway.tag_notes import TagNotes
     from api.geo.verifier import ExitVerifier
     from api.models.location import LocationTarget
     from api.routing.router import Router
@@ -144,6 +146,7 @@ class ProxyServer:
         timeout: Seconds an upstream connect, and each read the listener waits on, may take (``connection_timeout``).
         mitm_handler: Intercepts TLS for projects whose MITM mode is on; None intercepts nothing.
         exit_verifier: Verifies the exit before forwarding; None skips preflight.
+        tag_notes: Notes the exit of each request a client tagged, for the exit reports naming the tag; None notes none.
     """
 
     def __init__(
@@ -156,11 +159,13 @@ class ProxyServer:
         timeout: float,
         mitm_handler: MitmHandler | None = None,
         exit_verifier: ExitVerifier | None = None,
+        tag_notes: TagNotes | None = None,
     ) -> None:
         self._router = router
         self._meters = meters
         self._mitm_handler = mitm_handler
         self._exit_verifier = exit_verifier
+        self._tag_notes = tag_notes
         self._server: asyncio.Server | None = None
         self._host = host
         self._port = port
@@ -328,6 +333,7 @@ class ProxyServer:
             location=params.location,
             location_error=params.location_error,
             proxy_id=params.proxy_id,
+            tag=params.tag,
         )
 
     @staticmethod
@@ -359,8 +365,10 @@ class ProxyServer:
         limit (every connector that could serve the request is over its
         period's bytes) is the connector's configured status, 509 by
         default, with a Proxy-Status header naming the error whichever
-        status was chosen. Anything else is a 502: nothing is configured
-        for this request.
+        status was chosen. Exit reputation keeping every exit that could
+        serve it away from its site is a 502 with a Proxy-Status header
+        naming the site. Anything else is a 502: nothing is configured for
+        this request.
         """
         if await self._router.are_all_proxies_quarantined(
             project_id, target_host, session_id, location, pinned_proxy_id=pinned_proxy_id
@@ -392,6 +400,25 @@ class ProxyServer:
             await self._publish_failure(
                 build_failure(project_id, FailureKind.TRAFFIC_LIMIT_EXCEEDED, limit_status, message)
             )
+            return
+        avoided = await self._router.avoided_site(
+            project_id, target_host, session_id, location, pinned_proxy_id=pinned_proxy_id
+        )
+        if avoided is not None:
+            site = avoided.site
+            if pinned_proxy_id is not None:
+                message = f"Proxy {pinned_proxy_id} is avoided for {site}"
+            elif avoided.session_exit is not None:
+                # The session is held to its exit rather than moved: a new session would be served.
+                message = f"Exit {avoided.session_exit} of this session is avoided for {site}"
+            else:
+                message = f"Every eligible exit is avoided for {site}"
+            await self._send_error(
+                client_writer, 502, "Bad Gateway", message,
+                extra_headers=[f"Proxy-Status: {exits_avoided_proxy_status(site)}"],
+            )
+            await request_rejected.send_async(self, project_id=project_id, reason="exits_avoided")
+            await self._publish_failure(build_failure(project_id, FailureKind.EXITS_AVOIDED, 502, message))
             return
         message = self._no_proxy_message(
             location, pinned_proxy_id, self._router.reserved_by(project_id, target_host, location)
@@ -506,6 +533,7 @@ class ProxyServer:
             bytes_received=0,
             peer_id=peer_id,
             target_host=target_host,
+            location=location,
         )
         await self._publish_failure(failure)
         return None
@@ -661,11 +689,12 @@ class ProxyServer:
             if method.upper() == "CONNECT":
                 await self._handle_connect(
                     client_reader, client_writer, target, headers, project, session_id, location, pinned_proxy_id,
+                    tag=auth_result.tag,
                 )
             else:
                 await self._handle_http(
                     client_reader, client_writer, method, target, version, headers, project,
-                    session_id, location, pinned_proxy_id,
+                    session_id, location, pinned_proxy_id, tag=auth_result.tag,
                 )
 
         except asyncio.CancelledError:
@@ -776,6 +805,8 @@ class ProxyServer:
         session_id: str | None = None,
         location: LocationTarget | None = None,
         pinned_proxy_id: str | None = None,
+        *,
+        tag: str | None = None,
     ) -> None:
         """Handle HTTPS CONNECT tunneling."""
         # Parse target host:port before proxy selection (needed for domain filtering)
@@ -803,6 +834,8 @@ class ProxyServer:
         )
         if decision is None:
             return
+        if self._tag_notes is not None:
+            self._tag_notes.note(project, tag, decision)
 
         await self._relay(
             client_reader, client_writer, decision.proxy, project, target_host, target_port,
@@ -812,6 +845,7 @@ class ProxyServer:
                 b"HTTP/1.1 200 Connection Established\r\n" + self._exit_headers(project, decision) + b"\r\n"
             ),
             use_mitm=project.tls_mitm_mode != MitmMode.OFF and self._mitm_handler is not None,
+            location=location,
         )
 
     async def _relay(
@@ -828,6 +862,7 @@ class ProxyServer:
         use_mitm: bool,
         client_head: bytes = b"",
         peer_id: str | None = None,
+        location: LocationTarget | None = None,
     ) -> None:
         """Open the upstream leg to ``target_host:target_port``, relay until either side is done, then close that leg.
 
@@ -839,6 +874,7 @@ class ProxyServer:
             use_mitm: the MITM handler relays both legs once the upstream leg is up.
             client_head: the start of the client's TLS stream the caller already read off the socket, for the handshake.
             peer_id: the tunnel device the connection came from, whose counts take the transfer too.
+            location: the place the client asked for, which its completion names.
         """
         target = f"{target_host}:{target_port}"
         success = False
@@ -953,6 +989,7 @@ class ProxyServer:
                     bytes_received=bytes_received,
                     peer_id=peer_id,
                     target_host=target_host,
+                    location=location,
                 )
                 # Exactly the requests counted as failures above are logged.
                 if not success:
@@ -1106,6 +1143,8 @@ class ProxyServer:
         session_id: str | None = None,
         location: LocationTarget | None = None,
         pinned_proxy_id: str | None = None,
+        *,
+        tag: str | None = None,
     ) -> None:
         """Handle regular HTTP request forwarding."""
         project_id = project.id
@@ -1129,6 +1168,8 @@ class ProxyServer:
         )
         if decision is None:
             return
+        if self._tag_notes is not None:
+            self._tag_notes.note(project, tag, decision)
         proxy = decision.proxy
 
         success = False
@@ -1329,6 +1370,7 @@ class ProxyServer:
                 bytes_sent=bytes_sent,
                 bytes_received=bytes_received,
                 target_host=parsed_host,
+                location=location,
             )
             if not success:
                 await self._publish_failure(failure or self._interrupted_failure(project_id, proxy, timer))

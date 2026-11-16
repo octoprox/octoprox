@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from api.core.auth import RequireEditorDep
 from api.core.stats import MetricDelta
 from api.db.repository import ConnectorRepository
+from api.feed.models import static_exit_ip
 from api.geo.models import (
     META_CITY_VERDICT,
     META_COUNTRY_SOURCE,
@@ -104,6 +105,8 @@ def _proxy_to_response(view: ProxyView) -> ProxyResponse:
         state_source=proxy.state_source,
         city=proxy.city_slug,
         city_source=proxy.city_source,
+        # The IP routing keeps the row's exit reputation under, so the view and the routing never disagree.
+        exit_ip=static_exit_ip(proxy),
         tags=proxy.tags,
         created_at=proxy.created_at,
     )

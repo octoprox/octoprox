@@ -10,18 +10,22 @@ blocks, the counters without the window not flushed yet and demand as none, whil
 from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.core import utc_now
 from api.core.stats import HOST_OVERFLOW, MetricDelta, normalize_host
 from api.core.telemetry import CONTENT_TYPE
 from api.db.redis import PROJECT_WINDOWS
 from api.db.repository import ConnectorRepository, MetricsRepository, ProxyRepository
+from api.db.reputation_repository import ExitReputationRepository
 from api.models.location import LocationTarget
 from api.providers.sdk.strategies import is_dynamic_gateway
+from api.reputation.site import report_site
+from api.reputation.split import MAX_LISTED, ConnectorShare, ReputationSplit, place_key, place_label
+from api.reputation.weight import ReputationKind
 from api.routes.common import (
     api_runtime_of,
     require_project,
@@ -179,16 +183,87 @@ class ConnectorTrafficShare(BaseModel):
     observed_bytes: int = 0
     cost: float | None = None
     currency: str | None = None
+    # Exit reputation for the site asked about (all unset without one): what
+    # the weight is multiplied by there, what measures it, and the share it
+    # makes of the requests to the site from the place asked about. A dynamic
+    # connector is measured by its block rate at the finest level of the place
+    # that has enough requests; a connector with IPs by its rows eligible for
+    # such a request that are not avoided for the site.
+    reputation_place: str | None = Field(
+        default=None,
+        description="The level of the place whose factor a dynamic connector's reputation came from; null when no "
+        "level has one, and for a connector with IPs",
+    )
+    reputation: float = Field(default=1.0, description="What the weight is multiplied by for the site; 1 when nothing says otherwise")
+    reputation_kind: ReputationKind | None = None
+    blocked: int | None = Field(
+        default=None,
+        description="Recent blocked reports behind the reputation (decayed by Connector memory, and by half every "
+        "hour); null without a record",
+    )
+    requests: int | None = Field(default=None, description="Recent requests behind the reputation, decayed the same way")
+    usable_ips: int | None = Field(default=None, description="A connector with IPs: its eligible rows not avoided for the site")
+    eligible_ips: int | None = Field(
+        default=None, description="A connector with IPs: its rows eligible for a request to the site from the place, as routing finds them"
+    )
+    effective_weight: float = Field(
+        default=0.0, description="The weight routing uses for requests to the site from the place; 0 when the connector takes none of them"
+    )
+    effective_share: float = Field(
+        default=0.0,
+        description="Share of the requests to the site from the place, 0-100, by effective weight where the project avoids, else by "
+        "weight among the connectors serving them; the expected share without a site",
+    )
+
+    def weigh(self, share: ConnectorShare) -> None:
+        """Take what exit reputation says of the connector for the site asked about."""
+        reputation = share.reputation
+        self.reputation_place = reputation.place
+        self.reputation = reputation.value
+        self.reputation_kind = reputation.kind
+        self.blocked = share.blocked
+        self.requests = share.requests
+        self.usable_ips = reputation.usable_ips
+        self.eligible_ips = reputation.eligible_ips
+        self.effective_weight = round(share.effective_weight, 4)
+        self.effective_share = round(share.effective_share, 2)
+
+
+class ReputationSiteOption(BaseModel):
+    """A site with exit reputation data for the project, and the reports made on it."""
+    site: str
+    reports: int
+
+
+class ReputationPlaceOption(BaseModel):
+    """A requested place with connector reputation data, how it reads, and the reports made for it."""
+    place: str = Field(description="A LocationTarget key: US, US/NY, US/NY/new_york or US//austin")
+    label: str = Field(description="United States, US, NY or US, NY, new_york")
+    reports: int
 
 
 class TrafficSplitResponse(BaseModel):
-    """How a project's traffic divides between its connectors, expected and observed."""
+    """How a project's traffic divides between its connectors, expected and observed, and under exit reputation for one
+    site."""
     strategy: str
     range: str
     total_weight: int
     observed_requests: int
     observed_bytes: int = 0
     connectors: list[ConnectorTrafficShare]
+    site: str | None = Field(default=None, description="The site the effective shares are for, as records keep it")
+    place: str | None = Field(default=None, description="The requested place dynamic connectors are weighed at")
+    reputation_applied: bool = Field(
+        default=False, description="Routing weighs the connectors for the site: the project avoids and a site was given"
+    )
+    reputation_sites: list[ReputationSiteOption] = Field(
+        default_factory=list, description=f"Sites with exit reputation data for the project, most reported first, at most {MAX_LISTED}"
+    )
+    reputation_places: list[ReputationPlaceOption] = Field(
+        default_factory=list,
+        description=f"Places with connector reputation data for the site, most reported first, at most {MAX_LISTED}; "
+        "empty without a site",
+    )
 
 
 # What each history range reads: how far back (a timedelta), how many rows a
@@ -363,31 +438,55 @@ async def get_traffic_split(
     request: Request,
     project_id: str,
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("1h", alias="range"),
+    site: Annotated[
+        str | None,
+        Query(max_length=2048, description="A site (the exact host, or a URL) to weigh the connectors for under exit reputation"),
+    ] = None,
+    place: Annotated[
+        str | None,
+        Query(max_length=256, description="With a site: the requested place, a LocationTarget key such as US, US/NY or US/NY/new_york"),
+    ] = None,
 ) -> TrafficSplitResponse:
-    """Expected and observed share of traffic per connector.
+    """Expected and observed share of traffic per connector, and with a site each connector's exit reputation there.
 
     The expected share is what an untargeted request would see now, from the gateway's own router over a compile of the
     project with the quarantines and the traffic blocks Redis holds, as gateways enforce them; the observed share sums
-    the flushed connector metrics in the window.
+    the flushed connector metrics in the window. With a site, the effective share is a connector's share of the requests
+    to the site from ``place`` among the connectors serving them, once each weight is multiplied by the connector's
+    reputation there, read from the project's records in Postgres; it moves routing only where the project's exit
+    reputation avoids.
     """
+    try:
+        wanted_site = report_site(site) if site is not None and site.strip() else None
+        wanted_place = place_key(place) if wanted_site is not None else ""
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     preview = await api_runtime_of(request).preview_router(project_id)
     # The compile holds the project when it exists, so its absence is the 404.
-    if preview.get_project(project_id) is None:
+    project = preview.get_project(project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    eligible_groups = {
-        g.key: g for g in preview.group_by_connector(preview.get_routable_proxies_for_project(project_id))
-    }
-    total_weight = sum(g.weight for g in eligible_groups.values())
     serving_reserved = _serving_reserved(preview, project_id)
 
+    now = utc_now()
     delta, _limit, _bucket = RANGE_CONFIG[range]
-    since = utc_now() - delta
+    since = now - delta
     async with session_factory_of(request)() as session:
         connectors = await ConnectorRepository(session).get_by_project(project_id)
         statuses = await ProxyRepository(session).count_by_connector(project_id)
         totals = await MetricsRepository(session).get_connector_totals_since(
             {c.id: since for c in connectors}
         )
+        reputation = ExitReputationRepository(session)
+        sites = await reputation.busiest_sites(project_id, limit=MAX_LISTED)
+        places = await reputation.busiest_places(project_id, wanted_site, limit=MAX_LISTED) if wanted_site else []
+        split = await ReputationSplit.read(
+            session, project, preview, sites=[wanted_site] if wanted_site else [], place=wanted_place, now=now
+        )
+    eligible_groups = split.groups
+    # The preview's groups carry the configured weights: it reads no exit reputation.
+    total_weight = int(sum(g.weight for g in eligible_groups.values()))
+    shares = split.shares(wanted_site, [connector.id for connector in connectors])
     observed_total = sum(t["request_count"] for t in totals.values())
     observed_bytes_total = sum(t["bytes_sent"] + t["bytes_received"] for t in totals.values())
     # The rows each connector holds that still take requests, whatever their health.
@@ -396,7 +495,7 @@ async def get_traffic_split(
         if not row.status.retiring:
             active[row.connector_id] += row.count
 
-    shares: list[ConnectorTrafficShare] = []
+    connector_shares: list[ConnectorTrafficShare] = []
     for connector in sorted(connectors, key=lambda c: c.name.lower()):
         compiled = preview.snapshot.connector_view(connector.id)
         rows = [p for p in compiled.proxies if not p.status.retiring] if compiled is not None else []
@@ -417,7 +516,7 @@ async def get_traffic_split(
         requests = int(observed.get("request_count", 0))
         observed_bytes = int(observed.get("bytes_sent", 0)) + int(observed.get("bytes_received", 0))
         traffic_config = connector.parsed_traffic_config
-        shares.append(ConnectorTrafficShare(
+        share = ConnectorTrafficShare(
             connector_id=connector.id,
             name=connector.name,
             credential_type=connector.credential_type,
@@ -433,7 +532,9 @@ async def get_traffic_split(
             observed_bytes=observed_bytes,
             cost=traffic_config.cost_of(observed_bytes),
             currency=traffic_config.currency if traffic_config.price_per_gb is not None else None,
-        ))
+        )
+        share.weigh(shares[connector.id])
+        connector_shares.append(share)
 
     return TrafficSplitResponse(
         strategy=preview.strategy_for_project(project_id).name,
@@ -441,7 +542,14 @@ async def get_traffic_split(
         total_weight=total_weight,
         observed_requests=observed_total,
         observed_bytes=observed_bytes_total,
-        connectors=shares,
+        connectors=connector_shares,
+        site=wanted_site,
+        place=wanted_place if wanted_site else None,
+        reputation_applied=wanted_site is not None and split.applied,
+        reputation_sites=[ReputationSiteOption(site=name, reports=reports) for name, reports in sites],
+        reputation_places=[
+            ReputationPlaceOption(place=key, label=place_label(key), reports=reports) for key, reports in places
+        ],
     )
 
 

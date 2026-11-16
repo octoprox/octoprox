@@ -273,4 +273,5 @@ export const ROW_KIND_FACTS: RowKindFact[] = [
   { topic: 'Preflight', fixed: 'Never', pooled: 'When the client names a country', dynamic: 'Always on: once per session; session-less requests are sampled unless the settings can refuse them' },
   { topic: 'State and city', fixed: 'Served when the known place matches', pooled: 'Never served', dynamic: 'Rendered into the session' },
   { topic: 'Replaced on refuse', fixed: 'No, skipped', pooled: 'Yes, a fresh session', dynamic: 'Nothing to replace' },
+  { topic: 'Exit reputation (Avoid)', fixed: 'Not routed to for a site its IP is avoided for', pooled: 'Not routed to for a site its IP is avoided for', dynamic: 'The connector is weighted by its block rate for the site' },
 ]

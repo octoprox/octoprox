@@ -21,15 +21,20 @@ class ProxyGroup:
 
     ``key`` identifies the group (the connector id) so stateful strategies
     can keep per-group state across calls. ``weight`` is the connector's
-    relative share; only its ratio to the other groups' weights matters.
-    ``members`` is every row of the connector whatever its state, which
-    sticky places sessions over; empty means ``proxies`` are all of them.
+    relative share, always above zero; only its ratio to the other groups'
+    weights matters. Under exit reputation it is the effective weight for
+    the request's site, which may be a fraction, and ``lowered`` says
+    reputation took it under the configured weight: such a weight holds for
+    requests to that site and place alone. ``members`` is every row of the
+    connector whatever its state, which sticky places sessions over; empty
+    means ``proxies`` are all of them.
     """
 
     key: str
-    weight: int
+    weight: float
     proxies: list[Proxy] = field(default_factory=list)
     members: Sequence[Proxy] = ()
+    lowered: bool = False
 
 
 class RoutingStrategy(ABC):
@@ -119,6 +124,17 @@ class RoutingStrategy(ABC):
         """The proxy this strategy holds ``session_id`` to, which the router keeps it on while quarantined; none by default."""
         return None
 
+    def hold(  # noqa: B027
+        self,
+        session_id: str,
+        proxy_id: str,
+        *,
+        redis_client: "RedisClient | None" = None,
+        project_id: str | None = None,
+    ) -> None:
+        """Keep ``session_id`` held to ``proxy_id`` as a request through it would, while the router refuses the session
+        there instead of moving it; nothing by default."""
+
     def allows_exit_reselection(self, session_id: str | None) -> bool:
         """Whether a request may move to another proxy after its selection was found misplaced.
 
@@ -134,4 +150,4 @@ class RoutingStrategy(ABC):
 
 def weighted_random_group(groups: list[ProxyGroup]) -> ProxyGroup:
     """One group drawn at random with probability proportional to its weight."""
-    return random.choices(groups, weights=[max(g.weight, 1) for g in groups])[0]
+    return random.choices(groups, weights=[g.weight for g in groups])[0]

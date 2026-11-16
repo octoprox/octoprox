@@ -174,6 +174,13 @@ class ApiToken(BaseModel):
         return self.expires_at is not None and self.expires_at <= utc_now()
 
 
+class TokenUsage(BaseModel):
+    """How many tokens a user holds, expired ones included, and the latest use of any of them."""
+
+    count: int = 0
+    last_used_at: datetime | None = None
+
+
 class ApiTokenCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     # Days until the token stops working; null means it never expires.

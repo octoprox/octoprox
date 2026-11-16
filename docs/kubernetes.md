@@ -19,7 +19,7 @@ This guide describes the layout and what each piece needs, with manifests to ada
 | `octoprox-gateway` | `gateway` | 2 or more, autoscaled | 8080 proxy, 8000 probes and metrics | No database credentials |
 | `octoprox-gateway-tunnel` | `gateway` | 1 or more, optional | 51820/udp, 1194, 8080, 8000 | Only if you run [WireGuard]({{ site.baseurl }}/wireguard) or [OpenVPN]({{ site.baseurl }}/openvpn) devices |
 | `octoprox-controller` | `controller` | 2, small | 8000 probes and metrics | One leads, one stands by: the routing feed and the timers that publish the periodic jobs |
-| `octoprox-worker` | `worker` | 2 or more, autoscaled | 8000 probes and metrics | Every job kind, and the sighting and observation ingest |
+| `octoprox-worker` | `worker` | 2 or more, autoscaled | 8000 probes and metrics | Every job kind, and the sighting, observation and exit report ingest |
 | `octoprox-echo` | `echo` | 2, optional | 8000 | A public `/echo` apart from the admin API |
 
 Postgres and Redis are yours: a managed service or your own. The names above are suggestions; what matters when you come from 5.x is that they are new names, so the switch deletes the 5.x Deployment and creates these, rather than rolling a 5.x pod into a role (see [Migrating to 6.0]({{ site.baseurl }}/migrating-to-6)).
@@ -96,6 +96,7 @@ Give each role only what it reads. Gateways in particular face the internet and 
 | Feed compile interval, the periods of the periodic jobs (`ip_refresh_interval`, `metrics_flush_interval`, `geo.updater`) | | | yes | | |
 | `OCTOPROX_HEALTH_CHECK_INTERVAL` (the api shows it as the interval of connectors without their own) | yes | | yes | | |
 | Health check timeout and concurrency, `OCTOPROX_WORKER_JOBS` | | | | yes | |
+| `OCTOPROX_EXIT_REPUTATION_RETENTION_DAYS` | | | | yes | |
 | `system.metrics_interval` (and `system.metrics_retention_days` on workers) | yes | | yes | yes | |
 
 - **`OCTOPROX_INTERNAL_SECRET`** encrypts and authenticates the routing feed in Redis and signs the gateways' calls to the api. The controller seals the feed with it, gateways open it and the api checks their calls, so those three need the same value; workers and echo never read it. A gateway with another value cannot read the feed: it logs `Loop cycle failed` for its `feed_follower` loop and stays on what it had (unready, when it had nothing). To rotate it, set the new value on all three and restart them together.
@@ -218,8 +219,8 @@ Every tunnel gateway accepts every device: the key pair, the CA and the device l
 Redis is a trusted component of the install: every role but echo reads and writes it, and whoever can write to it can disturb routing. It holds:
 
 - the routing feed, which includes the credentials requests go upstream with (a secret no proxy template reads, such as a vendor account's API token, stays in Postgres) and the tunnels' server keys, encrypted and authenticated with `OCTOPROX_INTERNAL_SECRET`, so it cannot be read or altered without that secret;
-- per-key request state (sticky bindings, rate windows, quarantines, preflight verdicts, tunnel fake IPs), counters not flushed yet, and the change, runtime and feed streams;
-- the work in hand: each job kind's stream, the preflight sightings and the IP observations, taken by the workers through one consumer group;
+- per-key request state (sticky bindings, rate windows, quarantines, preflight verdicts, the exits of requests tagged for exit reports, tunnel fake IPs), counters not flushed yet, and the change, runtime and feed streams;
+- the work in hand: each job kind's stream, the preflight sightings, the IP observations and the exit reports, taken by the workers through one consumer group;
 - failure examples and MITM captures, which carry the targets and, for intercepted requests, request and response details.
 
 It must be Redis 7.2 or later, and anything between Octoprox and Redis must pass `HELLO` through: every connection opens with `HELLO 3` (RESP3).
@@ -244,7 +245,7 @@ So: require a password (`redis://:password@host:6379/0` in `OCTOPROX_REDIS_URL`,
 
 Scrape port 8000, path `/metrics`, on every pod: each process exports its own role's metrics, labelled with the role (see [Metrics]({{ site.baseurl }}/metrics#prometheus)). No process exports the work streams' depth: KEDA reads the streams from Redis itself.
 
-**Workers scale on stream length.** Every job kind has a stream of its own, `o6:jobs:<kind>:stream`, and the sightings and observations have `o6:stream:sightings` and `o6:stream:observations`. A stream's length (`XLEN`) counts the entries queued and the ones running, since a worker deletes each entry once it has handled it, so the workers in hand keep their replicas while they work. Set each trigger's `streamLength` to one worker's capacity for the stream, its batch size times its concurrency:
+**Workers scale on stream length.** Every job kind has a stream of its own, `o6:jobs:<kind>:stream`, and the sightings, observations and exit reports have `o6:stream:sightings`, `o6:stream:observations` and `o6:stream:exit_reports`. A stream's length (`XLEN`) counts the entries queued and the ones running, since a worker deletes each entry once it has handled it, so the workers in hand keep their replicas while they work. Set each trigger's `streamLength` to one worker's capacity for the stream, its batch size times its concurrency:
 
 | Stream | One worker's capacity, the threshold |
 |--------|--------------------------------------|
@@ -255,6 +256,7 @@ Scrape port 8000, path `/metrics`, on every pod: each process exports its own ro
 | `o6:jobs:metrics_flush:stream`, `o6:jobs:compaction:stream`, `o6:jobs:snapshot:stream`, `o6:jobs:geo_update:stream`, `o6:jobs:tunnel_last_seen:stream`, `o6:jobs:index_hygiene:stream`, `o6:jobs:update_check:stream` | 1 |
 | `o6:stream:sightings` | 500 |
 | `o6:stream:observations` | 5000 |
+| `o6:stream:exit_reports` | 500 |
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
@@ -287,7 +289,7 @@ spec:
 - **One `ScaledObject` per worker Deployment, one trigger per stream it takes.** KEDA takes the largest replica count its triggers ask for.
 - **Never `lagCount`, and no `consumerGroup` with `streamLength`.** Workers delete entries as they handle them, out of order, and Redis then reports a group's lag as unknown exactly when a backlog builds; the stream's length is the measure.
 - **From zero.** KEDA reads Redis itself, so it scales a Deployment up from zero workers. A Deployment that takes only rare kinds (such as `geo_update`, see [worker memory](#configuration-and-secrets-per-role)) can rest at zero; keep the main Deployment's minimum at 1 or more, since an install-wide kind's one entry a period never asks for a replica of its own.
-- **Redis access.** The user KEDA connects as needs read access to the keys `o6:jobs:*`, `o6:stream:sightings` and `o6:stream:observations`.
+- **Redis access.** The user KEDA connects as needs read access to the keys `o6:jobs:*`, `o6:stream:sightings`, `o6:stream:observations` and `o6:stream:exit_reports`.
 - **Producers do not burst.** The controller publishes each key of a periodic kind once per period, spread over the period, and after a stall it catches up on five seconds of keys at most, so a controller that froze for a minute never asks for a hundred workers.
 
 `OCTOPROX_WORKER_JOBS` splits workers by kind: a Deployment with `OCTOPROX_WORKER_JOBS=health` scaled on the health stream, and one with the other kinds, so a burst of health checks never holds up syncs and scaling. Every job kind needs at least one worker taking it: the System page says so on a stream with entries queued and no live worker taking it.
@@ -301,3 +303,7 @@ A rolling update of each Deployment keeps the install serving: gateways leave th
 The upgrade from 5.x is not rolling: one release deletes the 5.x Deployment and creates the 6.0 ones, a short downtime; see [Migrating to 6.0]({{ site.baseurl }}/migrating-to-6#on-kubernetes). Leave `--atomic` off that release: once 6.0 has migrated the database, 5.x starts on it only after its schema version is set back to 047, so a failed release is rolled back by hand, the version first ([the way back]({{ site.baseurl }}/migrating-to-6#the-way-back)).
 
 An upgrade from 6.3 or earlier can roll as usual, but while old and new pods run together some IP observations are retried or lost, and the observation log page fails on an old api pod (see [Restarts and upgrades]({{ site.baseurl }}/deployment#restarts-and-upgrades)). To lose none, scale the api, controller, worker and gateway Deployments to zero before applying the new release.
+
+An upgrade from 6.7 or earlier changes the routing feed's layout for [exit reputation]({{ site.baseurl }}/exit-reputation), and a gateway routes only on a feed of its own release's layout. It rolls as usual, with no controller stop. Once a new controller pod leads and publishes, gateway pods of the new release become ready, and gateway pods of the old release route on the feed they have until they are replaced, without the quarantines, traffic blocks and changes made meanwhile. Roll the gateway Deployment with `maxUnavailable: 0`, so an old pod leaves only once a new one is ready. Leave `--atomic` off this release: once it has migrated the database, 6.7 does not start on it, so a failed release is rolled back by hand, the schema version first (see [Restarts and upgrades]({{ site.baseurl }}/deployment#restarts-and-upgrades)).
+
+The same release makes `-tag-` a reserved delimiter: change any project username or session ID that contains it first (see [Restarts and upgrades]({{ site.baseurl }}/deployment#restarts-and-upgrades)).

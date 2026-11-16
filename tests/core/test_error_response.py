@@ -7,6 +7,7 @@ import pytest
 
 from api.core.error_response import (
     MAX_REASON_DETAIL_CHARS,
+    exits_avoided_proxy_status,
     proxy_status,
     reason_phrase,
     refusal_message,
@@ -59,6 +60,9 @@ class TestProxyStatus:
 
     def test_a_client_that_went_away_is_not_named(self) -> None:
         assert upstream_proxy_status(_failure(FailureKind.CLIENT_CLOSED)) is None
+
+    def test_exits_avoided_names_the_site(self) -> None:
+        assert exits_avoided_proxy_status("google.com") == 'octoprox; error=exits_avoided; details="google.com"'
 
 
 def test_a_refusal_reads_as_the_vendors_answer() -> None:

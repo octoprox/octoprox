@@ -52,7 +52,10 @@ def project_json(pid: str) -> dict:
         "tls_mitm_engine": None, "tls_mitm_browser": None, "metrics_retention_days": 30,
         "location_contradicted": "evidence", "location_unknown": "vendor", "location_preflight": True,
         "location_session_move": False, "location_conflict_rule": None, "location_city_radius_km": None,
-        "exit_headers": True, "observation_log": True, "observation_retention_days": None, "pending_deletion": False,
+        "exit_headers": True, "observation_log": True, "observation_retention_days": None,
+        "exit_reputation": "off", "exit_reputation_avoid_minutes": 60, "exit_reputation_half_life_hours": 24,
+        "exit_reputation_connector_half_life_requests": 100, "exit_reputation_bad_reports": 1,
+        "exit_reputation_bad_share": 50, "pending_deletion": False,
         "created_at": ago(days=p.created_days_ago), "updated_at": ago(days=1, hours=7),
         "credential_count": len(credentials_of(pid)), "connector_count": len(connectors_of(pid)),
         "proxy_count": pc["total"], "healthy_proxy_count": pc["healthy"],
@@ -286,7 +289,9 @@ def _project_get(pid: str, sub: str, q: dict[str, str]) -> object:
     if sub == "/metrics/history":
         return {"snapshots": series.project_history(pid, q.get("range", "24h"))}
     if sub == "/metrics/traffic-split":
-        return analytics.traffic_split(pid, q.get("range", "1h"))
+        return analytics.traffic_split(pid, q.get("range", "1h"), q.get("site"), q.get("place"))
+    if sub == "/exit-reputation/connectors":
+        return analytics.connectors_by_site(pid, q.get("place"))
     if sub == "/connectors":
         conns = connectors_of(pid)
         return {"total": len(conns), "connectors": [connector_json(c) for c in conns]}

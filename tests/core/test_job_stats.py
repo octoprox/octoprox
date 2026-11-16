@@ -313,6 +313,7 @@ class TestWorkerRegistry:
                 "job_runner_update_check",
                 "sighting_ingest",
                 "observation_ingest",
+                "exit_report_ingest",
             },
             Role.ECHO: {"loop_lag_monitor"},
         }

@@ -155,6 +155,8 @@ def _include_api(app: FastAPI, extension: Extension) -> None:
         credentials,
         echo,
         edition,
+        exit_reports,
+        exit_reputation,
         failures,
         geo,
         internal,
@@ -218,6 +220,12 @@ def _include_api(app: FastAPI, extension: Extension) -> None:
     app.include_router(mitm.router, prefix="/api/v1", tags=["MITM"], dependencies=auth_dependency)
     app.include_router(
         failures.router, prefix="/api/v1", tags=["Failures"], dependencies=auth_dependency
+    )
+    app.include_router(
+        exit_reports.router, prefix="/api/v1", tags=["Exit reputation"], dependencies=auth_dependency
+    )
+    app.include_router(
+        exit_reputation.router, prefix="/api/v1", tags=["Exit reputation"], dependencies=auth_dependency
     )
     app.include_router(
         users.router, prefix="/api/v1", tags=["Users"], dependencies=auth_dependency

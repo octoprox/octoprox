@@ -8,9 +8,11 @@ A gateway builds one per feed update, and the api one per preview, through :meth
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence, Set
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping, Sequence, Set
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+from functools import cached_property
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import structlog
@@ -21,11 +23,15 @@ from api.core.domain_filter import is_domain_allowed
 from api.core.logging import error_text
 from api.feed.models import (
     GLOBAL_SECTION,
+    REPUTATION_SECTION,
     RUNTIME_SECTION,
     ConnectorSection,
     GlobalSection,
+    ProjectReputation,
+    ReputationSection,
     RuntimeSection,
     Section,
+    static_exit_ip,
 )
 from api.geo.models import LocationRules, eligible_under
 from api.geo.service import GeoService
@@ -185,6 +191,22 @@ class ConnectorView:
         """Whether some row of the connector carries ``country`` as its slot group, whatever its state."""
         return country in self.geo_countries
 
+    @cached_property
+    def dynamic(self) -> bool:
+        """Whether the connector serves through a dynamic gateway row, whose exit is chosen per request: exit reputation
+        weighs such a connector by its record for the site, never its exit IPs."""
+        return any(is_dynamic_gateway(proxy) for proxy in self.proxies)
+
+    @cached_property
+    def exits(self) -> dict[str, tuple[str, ...]]:
+        """Exit IP (``static_exit_ip``) -> the ids of the rows last seen exiting there, whatever their status, in feed
+        order: what exit reputation is joined to. Worked out on the first ask, for the life of the view."""
+        exits: dict[str, list[str]] = {}
+        for proxy in self.proxies:
+            if (ip := static_exit_ip(proxy)) is not None:
+                exits.setdefault(ip, []).append(proxy.id)
+        return {ip: tuple(ids) for ip, ids in exits.items()}
+
     def candidates(self, country: str | None, rules: LocationRules) -> tuple[Proxy, ...]:
         """The rows that can serve a request for ``country`` (None: no country) under ``rules``, in feed order.
 
@@ -260,6 +282,85 @@ class _ProjectIndex:
         )
 
 
+class _SiteRows:
+    """The rows exit reputation avoids for one site of a project, each with the end of its avoid.
+
+    Which are in force at a moment is worked out once and kept until the first of their ends, so a request reads a set
+    whatever the number of rows.
+    """
+
+    __slots__ = ("_ends", "_live", "_since", "_until")
+
+    def __init__(self) -> None:
+        self._ends: dict[str, datetime] = {}
+        # The rows in force when last worked out, and the moments that answer holds between.
+        self._live: frozenset[str] = frozenset()
+        self._since = datetime.max
+        self._until = datetime.min
+
+    def add(self, proxy_ids: Iterable[str], end: datetime) -> None:
+        """Name the rows ``proxy_ids``, all exiting from one IP, with that IP's ``end`` for the site."""
+        for proxy_id in proxy_ids:
+            self._ends[proxy_id] = end
+        self._until = datetime.min
+
+    def at(self, now: datetime) -> frozenset[str]:
+        """The rows whose end is after ``now``."""
+        if not self._since <= now < self._until:
+            live = {proxy_id: end for proxy_id, end in self._ends.items() if end > now}
+            self._live = frozenset(live)
+            self._since, self._until = now, min(live.values(), default=datetime.max)
+        return self._live
+
+
+@dataclass(frozen=True, eq=False)
+class _ReputationIndex:
+    """One project's exit reputation as its requests read it, per site: the rows avoided there (its exit IPs joined to
+    its rows), and its dynamic connectors' factors by level of the requested place."""
+
+    # What it was built from: a later snapshot keeps it while the views are the very same objects and the records are
+    # equal, since a gateway decodes the whole section anew on every change of it.
+    source: ProjectReputation
+    views: tuple[ConnectorView, ...]
+    avoided: dict[str, _SiteRows]
+    # Site -> dynamic connector id -> level of the requested place -> factor.
+    factors: dict[str, dict[str, Mapping[str, float]]]
+
+    @classmethod
+    def build(cls, source: ProjectReputation, views: Sequence[ConnectorView]) -> _ReputationIndex:
+        """The index of the project's section over the rows of its connectors."""
+        ips = source.ip_avoids
+        avoided: dict[str, _SiteRows] = {}
+        for view in views if ips else ():
+            exits = view.exits
+            if not exits:
+                # A dynamic connector's rows hold no exit.
+                continue
+            # The IPs both hold, found from the smaller side, so a large pool or a long map costs the other's size.
+            for ip in exits.keys() & ips.keys():
+                rows = exits[ip]
+                for site, end in ips[ip].items():
+                    avoided.setdefault(site, _SiteRows()).add(rows, end)
+        factors: dict[str, dict[str, Mapping[str, float]]] = {}
+        for connector_id, by_site in source.connector_factors.items():
+            for site, by_place in by_site.items():
+                factors.setdefault(site, {})[connector_id] = by_place
+        return cls(source, tuple(views), avoided, factors)
+
+    def built_from(self, source: ProjectReputation, views: Sequence[ConnectorView]) -> bool:
+        """Whether it was built over these very connector views from records equal to ``source``, so it holds as it is."""
+        return (
+            len(self.views) == len(views)
+            and all(kept is view for kept, view in zip(self.views, views, strict=True))
+            and (self.source is source or self.source == source)
+        )
+
+
+# What a project without exit reputation, or a site nothing is recorded for, has in force.
+_NO_ROWS: frozenset[str] = frozenset()
+_NO_FACTORS: Mapping[str, Mapping[str, float]] = MappingProxyType({})
+
+
 class RoutingSnapshot:
     """One applied feed, indexed for routing; build it with :meth:`from_sections`."""
 
@@ -281,6 +382,8 @@ class RoutingSnapshot:
                     continue
                 for country in view.reserved:
                     self._reserving.setdefault((project_id, country), []).append(view)
+        # Project id -> its exit reputation as requests read it, built when the feed is applied (see from_sections).
+        self._reputation: dict[str, _ReputationIndex] = {}
 
     @classmethod
     def from_sections(
@@ -293,7 +396,9 @@ class RoutingSnapshot:
         """The snapshot of a whole feed, a gateway's update or a project's compile, reusing ``previous``'s indexes.
 
         A connector section's index is reused while both it and the global section are the very objects ``previous`` was
-        built from, since a new global section may have changed the registry its provider came from.
+        built from, since a new global section may have changed the registry its provider came from. Each project's exit
+        reputation is indexed here, never on a request, and reused while its part of the section is equal and its
+        connectors' indexes are the very objects ``previous`` built it from.
         """
         global_section = sections.get(GLOBAL_SECTION)
         if not isinstance(global_section, GlobalSection):
@@ -301,6 +406,10 @@ class RoutingSnapshot:
         runtime = sections.get(RUNTIME_SECTION)
         if not isinstance(runtime, RuntimeSection):
             runtime = RuntimeSection()
+        reputation = sections.get(REPUTATION_SECTION)
+        if not isinstance(reputation, ReputationSection):
+            # A preview's compile carries none.
+            reputation = ReputationSection()
         if previous is not None and previous._projects.section is global_section:
             projects = previous._projects
             reusable = previous._views
@@ -315,7 +424,23 @@ class RoutingSnapshot:
             views[section.connector.id] = (
                 old if old is not None and old.section is section else ConnectorView.build(section, registry)
             )
-        return cls(projects, views, runtime)
+        snapshot = cls(projects, views, runtime)
+        snapshot._index_reputation(reputation, previous)
+        return snapshot
+
+    def _index_reputation(self, section: ReputationSection, previous: RoutingSnapshot | None) -> None:
+        """Index each project's exit reputation over its connectors, keeping ``previous``'s index of a project while it
+        holds as it is."""
+        kept = previous._reputation if previous is not None else {}
+        for project_id, reputation in section.projects.items():
+            views = self.connector_views(project_id)
+            index = kept.get(project_id)
+            if index is None or not index.built_from(reputation, views):
+                index = _ReputationIndex.build(reputation, views)
+            elif index.source is not reputation:
+                # Equal records decoded anew: keep the index, holding the new copy so the old one is freed.
+                index = replace(index, source=reputation)
+            self._reputation[project_id] = index
 
     # --- projects -----------------------------------------------------------------------------
 
@@ -371,3 +496,21 @@ class RoutingSnapshot:
         """Whether the controller holds the connector back for its traffic limit now."""
         until = self._runtime.traffic_blocked_until.get(connector_id)
         return until is not None and until > utc_now()
+
+    # --- exit reputation ----------------------------------------------------------------------
+
+    def avoided(self, project_id: str, site: str, now: datetime) -> frozenset[str]:
+        """The project's rows exit reputation keeps away from ``site`` at ``now``: those whose exit IP is avoided there.
+
+        The feed carries it only for projects whose exit reputation avoids, and only for rows with a known exit.
+        """
+        index = self._reputation.get(project_id)
+        rows = index.avoided.get(site) if index is not None else None
+        return rows.at(now) if rows is not None else _NO_ROWS
+
+    def factors(self, project_id: str, site: str) -> Mapping[str, Mapping[str, float]]:
+        """The factors of the project's dynamic connectors for ``site``: connector id -> level of the requested place
+        ("" for none) -> factor. The feed carries them only for projects whose exit reputation avoids."""
+        index = self._reputation.get(project_id)
+        factors = index.factors.get(site) if index is not None else None
+        return factors if factors is not None else _NO_FACTORS

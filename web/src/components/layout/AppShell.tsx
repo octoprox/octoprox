@@ -20,14 +20,14 @@ import { useNavigationGuardContext } from '../../contexts/NavigationGuardContext
 import { fetchProjectMetrics, fetchProjectScalingMetrics, poolBreakdown } from '../../api/client'
 import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin'
 import { HelpMenu } from '../HelpMenu'
-import { ProjectPanel } from '../ProjectForm'
+import { ProjectPanel, type ProjectSettingsTab } from '../ProjectForm'
 import { NewVersionBanner } from '../NewVersion'
 import { LicenseBanner } from '../license/LicenseBanner'
 import { UserMenu } from '../UserMenu'
 import { LogoLoader } from '../ui'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { DeletingBadge } from '../DeletingBadge'
-import { PageScopeContext, ShellPanelContext } from './Page'
+import { PageScopeContext, ProjectSettingsContext, ShellPanelContext } from './Page'
 import { navItemBase, navItemCollapsed, navItemExpanded, navItemIdle } from './navStyles'
 import { cn } from '../../utils/cn'
 import { formatRpm } from '../../utils/format'
@@ -89,6 +89,8 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
   const { isDark } = useTheme()
   // Project settings belong to the page they were opened on: leaving it closes them.
   const [projectSettingsOn, setProjectSettingsOn] = useState<string | null>(null)
+  // The tab a page's link asked the settings to open on, a new object each time so an open panel switches again.
+  const [projectSettingsTab, setProjectSettingsTab] = useState<{ tab: ProjectSettingsTab } | null>(null)
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     if (isNarrow()) return true // a phone never opens on the overlay
     try { return localStorage.getItem(COLLAPSED_KEY) === '1' } catch { return false }
@@ -148,8 +150,9 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
   // Pages read the project from the context, so they wait until it holds the project in the URL (after a switch,
   // or Back into another project). A failed load clears the selection and lets the page show that.
   const projectPending = !!projectId && !!selectedProjectId && (selectedProjectId !== projectId || !selectedProject)
-  const openProjectSettings = () => {
+  const openProjectSettings = (tab?: ProjectSettingsTab) => {
     if (isNarrow()) setCollapsed(true) // the panel covers the screen on a phone
+    setProjectSettingsTab(tab ? { tab } : null)
     setProjectSettingsOn(location.pathname)
   }
 
@@ -198,7 +201,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
             label={selectedProject?.name ?? '…'}
             onSwitch={(p) => switchProject(p.id)}
             onAllProjects={showAllProjects}
-            onProjectSettings={canMutate && selectedProject ? openProjectSettings : undefined}
+            onProjectSettings={canMutate && selectedProject ? () => openProjectSettings() : undefined}
           />
         )}
 
@@ -246,7 +249,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
               {canMutate && selectedProject && (
                 <>
                   <NavGroup label="Project" collapsed={collapsed} />
-                  <NavButton icon={<SettingsIcon />} label="Project settings" collapsed={collapsed} onClick={projectSettingsOn === location.pathname ? () => setProjectSettingsOn(null) : openProjectSettings} active={projectSettingsOn === location.pathname} />
+                  <NavButton icon={<SettingsIcon />} label="Project settings" collapsed={collapsed} onClick={projectSettingsOn === location.pathname ? () => setProjectSettingsOn(null) : () => openProjectSettings()} active={projectSettingsOn === location.pathname} />
                 </>
               )}
             </>
@@ -291,11 +294,13 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
           ) : (
             // Keyed by project, so a switch starts the page afresh instead of keeping the old project's panels and filters.
             <ShellPanelContext
-              value={projectSettingsOn === location.pathname && selectedProject ? <ProjectPanel project={selectedProject} onClose={() => setProjectSettingsOn(null)} /> : null}
+              value={projectSettingsOn === location.pathname && selectedProject ? <ProjectPanel project={selectedProject} onClose={() => setProjectSettingsOn(null)} tabRequest={projectSettingsTab} /> : null}
             >
-              <PageScopeContext value={area === 'admin' ? AREAS.admin.scope : null}>
-                <Outlet key={projectId} />
-              </PageScopeContext>
+              <ProjectSettingsContext value={canMutate && selectedProject && !area ? openProjectSettings : null}>
+                <PageScopeContext value={area === 'admin' ? AREAS.admin.scope : null}>
+                  <Outlet key={projectId} />
+                </PageScopeContext>
+              </ProjectSettingsContext>
             </ShellPanelContext>
           )}
         </div>

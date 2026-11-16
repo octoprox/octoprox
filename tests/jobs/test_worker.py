@@ -20,18 +20,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from api.core.job_stats import job_stats
 from api.core.roles import JobKind
 from api.core.workers import WorkerName, job_runner_name
-from api.db.redis import SIGHTING_STREAM_KEY, RedisClient
+from api.db.redis import EXIT_REPORT_STREAM_KEY, SIGHTING_STREAM_KEY, RedisClient
 from api.db.streams import ChangeLog
 from api.geo.models import IpObservation, ObservationSource
 from api.geo.observations import ObservationRecorder
 from api.geo.runtime import GeoStack
 from api.geo.updater import GeoDatabaseUpdater
-from api.jobs.messages import SightingMessage
+from api.jobs.messages import ExitReportMessage, SightingMessage
+from api.models.exit_reports import ExitVerdict
+from api.models.project import ExitReputationMode
 from api.models.proxy import ProxyStatus
 from api.models.system import WorkerSnapshot
 from api.providers.registry import ProviderRegistry
 from api.providers.sdk.strategies import META_DISCOVERED_IP
 from api.providers.store import ProviderStore
+from api.reputation.ingest import ExitReportCount
 from api.roles.worker import WorkerRuntime
 from tests.conftest import queued_job_keys
 from tests.jobs.conftest import LONDON_IP, FakeUpstream, Rows, announced, geo_settings
@@ -93,7 +96,7 @@ def _task_names(runtime: WorkerRuntime) -> list[str]:
 
 
 class TestLoops:
-    async def test_it_starts_and_stops_its_refresher_a_runner_per_kind_it_takes_and_both_ingests(
+    async def test_it_starts_and_stops_its_refresher_a_runner_per_kind_it_takes_and_the_ingests(
         self, build: Build
     ) -> None:
         runtime = await build(worker_jobs=[JobKind.SYNC, JobKind.HEALTH])
@@ -103,7 +106,7 @@ class TestLoops:
 
         assert _task_names(runtime) == sorted([
             WorkerName.DEFINITIONS_REFRESHER, WorkerName.JOB_RUNNER_SYNC, WorkerName.JOB_RUNNER_HEALTH,
-            WorkerName.SIGHTING_INGEST, WorkerName.OBSERVATION_INGEST,
+            WorkerName.SIGHTING_INGEST, WorkerName.OBSERVATION_INGEST, WorkerName.EXIT_REPORT_INGEST,
         ])
         assert not any(task.done() for task in runtime.tasks.tasks)
         await runtime.stop()
@@ -127,6 +130,7 @@ class TestLoops:
 
         assert _task_names(runtime) == sorted([
             WorkerName.DEFINITIONS_REFRESHER, WorkerName.SIGHTING_INGEST, WorkerName.OBSERVATION_INGEST,
+            WorkerName.EXIT_REPORT_INGEST,
         ])
 
     async def test_stop_never_raises_and_can_be_called_twice(self, build: Build) -> None:
@@ -244,6 +248,23 @@ class TestWork:
         await recorder.flush()
 
         await until(lambda: runtime.snapshot().observations_consumed == 1)
+
+    async def test_appended_exit_reports_are_applied_and_counted(
+        self, build: Build, rows: Rows, redis_client: RedisClient
+    ) -> None:
+        project = await rows.project(exit_reputation=ExitReputationMode.RECORD)
+        runtime = await build(worker_jobs=[])
+        await start(runtime)
+        message = ExitReportMessage(
+            project_id=project.id, ip=LONDON_IP, site="google.com", verdict=ExitVerdict.BAD,
+            reported_at=datetime(2026, 11, 14, 12, 0),
+        )
+
+        await redis_client.client.xadd(EXIT_REPORT_STREAM_KEY, {"item": message.model_dump_json()})
+
+        await until(lambda: runtime.snapshot().exit_reports_consumed == 1)
+        # Counted only once applied to the project's record.
+        assert runtime.exit_report_ingest.counts.snapshot() == [ExitReportCount("", "", "bad", 1)]
 
     async def test_a_new_ip_database_file_asks_for_every_proxy_to_be_re_attributed(
         self, build: Build, redis_client: RedisClient, monkeypatch: pytest.MonkeyPatch

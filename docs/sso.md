@@ -15,7 +15,7 @@ Octoprox has three ways into the management API and the dashboard. Every one of 
 |---|---|---|
 | Username and password | Anyone the admin added with a password or an invite link | Administration, Users |
 | Sign in with Google, Microsoft or GitHub | Anyone the admin added with the email they use at that provider | Administration, Sign-in |
-| Personal access token | Scripts, CI jobs and API clients, acting as a user or a service account | Account, from your name in the sidebar (or the user's inspector, for an admin) |
+| Personal access token | Scripts, CI jobs and API clients, acting as a user or a [service account](#service-accounts) | Account, from your name in the sidebar (or the user's inspector under Administration, Users, for an admin) |
 
 Proxy traffic on port 8080 is unrelated: proxy clients authenticate with a project's credentials, which have nothing to do with who may open the dashboard.
 
@@ -91,7 +91,7 @@ The login page shows why a sign-in through a provider did not complete:
 
 The server log has the specific reason behind each one, with the provider's subject id, never the error text the browser sees.
 
-A refused password sign-in answers `Invalid username or password` whatever the cause, except for a disabled account (`Account is disabled`), and logs one `Failed login attempt` line with its `reason`: `unknown user`, `no password set`, `wrong password` or `account disabled`. On Octoprox Enterprise the [audit log]({{ site.baseurl }}/audit-log#sign-ins) records each refusal too, a provider's only when its callback answers a sign-in this install started with that provider.
+A refused password sign-in answers `Invalid username or password` whatever the cause, except for a disabled account (`Account is disabled`), and logs one `Failed login attempt` line with its `reason`: `unknown user`, `service account`, `no password set`, `wrong password` or `account disabled`. On Octoprox Enterprise the [audit log]({{ site.baseurl }}/audit-log#sign-ins) records each refusal too, a provider's only when its callback answers a sign-in this install started with that provider.
 
 ## Personal access tokens
 
@@ -106,11 +106,31 @@ A token lets a script call the API as a user without a password and without the 
 
 - **It acts as the user is right now.** The role and the active flag are read from the user on every call, so a role change takes effect immediately and disabling the user ends the token at once. This is unlike a session token from a password login, which carries its role until it expires.
 - **Revoke it** from the same list. The next call made with it gets 401. A token cannot create other tokens: something that leaked one should not be able to breed replacements that outlive its revocation.
-- **Service accounts.** For automation that should not run under a person's identity, an admin adds a user with no password and no email (an invite that is never used, or any account), and issues it a token from the user's inspector under Administration, Users. The admin's name is recorded on the token. Give the account the lowest role that does the job; a viewer token can read everything and change nothing.
+- **Automation** that should not run under a person's name gets a [service account](#service-accounts) and its own tokens.
 
 The Users inspector shows every token a person holds, when each was last used and when it expires, so an admin can confirm nothing outlives a departure. A token's first authenticated call sets its last use even when that call is refused, such as a viewer's token trying a write; later calls move it at most once a minute.
 
 A token starts with `octo_`, which is how the API tells it from a session token and how secret scanners can match the format.
+
+### Service accounts
+
+A service account is a user for a program rather than a person: a scraper, a CI job, a deploy script. It has a name, a role and the API tokens an admin issues it, and nothing else. It has no password, no email and no invite link, so nobody signs in as it, on the login page or through a provider.
+
+1. **Add one** under Administration, Users, *Service accounts*: a name that says what uses it, such as `scraper-eu`, and a role.
+2. **Issue it a token** in its inspector, which opens as soon as it is added: **New token**, a name and an expiry. The secret is shown once. The token records the admin who issued it. Issuing one needs a signed-in session: a token cannot issue tokens, not even an admin's.
+3. **Send the token** as a bearer token, like any other.
+
+Give it the lowest role that does the job: a viewer's token reads everything and changes no setting, and it can send [exit reports]({{ site.baseurl }}/exit-reputation#reporting-exits), which steer routing where the project's exit reputation avoids, so a scraper that reports the requests sites blocked needs no more. The role and the active flag are read on every call, so a new role applies to the next call, and turning the account off refuses its tokens until it is turned back on. Deleting it deletes its tokens.
+
+The *Service accounts* list shows each account's role, how many tokens it holds and when one of them was last used. Its History shows who added it and every change to it, and on Octoprox Enterprise every token issued to it, used for the first time or revoked.
+
+What would make it a way in for a person is refused:
+
+- A password sign-in answers `Invalid username or password`, as for a wrong password; the server log, and on Octoprox Enterprise the audit log, give the reason `service account`.
+- Setting a password or an email, by an admin or with the account's own token, and sending a set-password link answer `400`. With no email, no Google, Microsoft or GitHub account can ever match it.
+- It stays a service account: no edit turns it into a person, or a person into one.
+
+Users stay what they were on upgrade, people, including accounts made the earlier way for scripts (no password, no email, a token). A user's kind never changes, so to move a script onto a service account, add one, issue it a new token, switch the script over, then delete the old account, which also removes its tokens and any invite link it still holds.
 
 ## Octoprox Enterprise
 
@@ -148,7 +168,7 @@ Octoprox Enterprise runs from its own image, `ghcr.io/octoprox/octoprox-enterpri
 
 A license names the organisation, an expiry date, the number of seats and the features it turns on. Paste the key (it starts with `oxl1.`) into the *License* card, the first card under Administration, System. The key is checked offline against a public key the image carries, so nothing phones home; a key it cannot verify, or one whose grace period has already ended, is refused with the reason and nothing is saved. Saving a key is recorded in the audit log, the key itself masked. The card shows the license's state (Active, Grace period, Expired, Invalid, No key), the organisation, the license ID, the expiry and the end of the grace period, the seats in use and allowed, and the features. While the license is active or in its grace period, the organisation's name is shown on the login page.
 
-- **Seats** count the active users, invited and token-only accounts included. More active users than seats blocks nobody: the License card shows it (27 of 25 seats), and admins see a banner on every page until users are disabled or the license covers more.
+- **Seats** count the active users, invited people and service accounts included. More active users than seats blocks nobody: the License card shows it (27 of 25 seats), and admins see a banner on every page until users are disabled or the license covers more.
 - **Expiry.** A license is active up to and including its expiry date, in UTC, and a grace period of 30 days follows in which everything goes on as before. From the day after the expiry date, admins see a banner on every page until a valid key is entered. After the grace period, Octoprox Enterprise stops recording sign-ins, token events and audit log lines, while the Activity page and its export stay readable with the expired license, so an install can still answer an auditor about what it recorded. A refused key gives admins a banner too.
 - **Nobody is ever locked out.** The license decides only what the audit log records and whether the Activity page can be read: sign-in, passwords and tokens work the same on every edition.
 

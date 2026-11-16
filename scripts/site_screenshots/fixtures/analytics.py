@@ -283,8 +283,13 @@ def exits_rows(project_id: str | None, connector_id: str | None, days: int) -> l
 
 # --------------------------------------------------------------------------- traffic split
 
-def traffic_split(project_id: str, rng: str) -> dict:
-    """Each connector's expected and observed share of the requests, its eligible proxies and its cost."""
+def traffic_split(project_id: str, rng: str, site: str | None = None, place: str | None = None) -> dict:
+    """Each connector's expected and observed share of the requests, its eligible proxies and its cost.
+
+    The demo projects keep no exit reputation (their mode is off), so a site asked for changes no weight: every
+    connector's reputation is 1 and its effective share its expected one, as the API answers without records (a
+    dynamic connector measured by a block rate it has no reports for, one with IPs by its eligible IPs, all usable).
+    """
     conns = connectors_of(project_id)
     minutes = RANGE_MINUTES.get(rng, 1440)
     proxies = build_proxies(project_id)
@@ -309,9 +314,25 @@ def traffic_split(project_id: str, rng: str) -> dict:
             "observed_share": round(o["request_count"] / max(1, obs_req) * 100, 2), "observed_bytes": b,
             "cost": round(b / GB * price, 2) if price is not None else None,
             "currency": c.traffic_config.get("currency", "USD") if price is not None else None,
+            "reputation_place": None, "reputation": 1.0,
+            "reputation_kind": None if not site else "block_rate" if c.target and c.target.get("dynamic") else "usable_ips",
+            "blocked": None, "requests": None,
+            "usable_ips": eligible if site and not (c.target and c.target.get("dynamic")) else None,
+            "eligible_ips": eligible if site and not (c.target and c.target.get("dynamic")) else None,
+            "effective_weight": float(c.weight), "effective_share": round(c.weight / total_weight * 100, 2),
         })
     return {"strategy": PROJECTS[project_id].strategy, "range": rng, "total_weight": total_weight,
-            "observed_requests": obs_req, "observed_bytes": obs_bytes, "connectors": rows}
+            "observed_requests": obs_req, "observed_bytes": obs_bytes, "connectors": rows,
+            "site": site or None, "place": (place or "") if site else None, "reputation_applied": False,
+            "reputation_sites": [], "reputation_places": []}
+
+
+def connectors_by_site(project_id: str, place: str | None = None) -> dict:
+    """Every connector against the sites with exit reputation data: none in the demo projects, whose mode is off."""
+    return {"place": place or None, "places": [], "sites": [], "reputation_applied": False,
+            "connectors": [{"connector_id": c.id, "name": c.name, "credential_type": c.ctype,
+                            "dynamic": bool(c.target and c.target.get("dynamic")), "weight": c.weight, "cells": {}}
+                           for c in connectors_of(project_id)]}
 
 
 # --------------------------------------------------------------------------- activity (the Enterprise audit log)

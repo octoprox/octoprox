@@ -5,14 +5,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
+from api.db.filters import any_of
 from api.db.models import ApiTokenModel, AuthIdentityModel, AuthProviderModel
-from api.models.auth import ApiToken, AuthIdentity, AuthProviderConfig, AuthProviderKind
+from api.models.auth import ApiToken, AuthIdentity, AuthProviderConfig, AuthProviderKind, TokenUsage
 
 
 class AuthProviderRepository:
@@ -163,6 +165,19 @@ class ApiTokenRepository:
             select(ApiTokenModel).where(ApiTokenModel.user_id == user_id).order_by(ApiTokenModel.created_at)
         )
         return [self._to_domain(m) for m in result.scalars().all()]
+
+    async def usage_by_user(self, user_ids: Iterable[str] | None = None) -> dict[str, TokenUsage]:
+        """Each user's token count and latest use in one query, for every user or those of ``user_ids``; a user
+        holding no token is absent."""
+        statement = select(
+            ApiTokenModel.user_id, func.count(), func.max(ApiTokenModel.last_used_at)
+        ).group_by(ApiTokenModel.user_id)
+        if user_ids is not None:
+            statement = statement.where(any_of(ApiTokenModel.user_id, user_ids))
+        result = await self._session.execute(statement)
+        return {
+            user_id: TokenUsage(count=count, last_used_at=last_used_at) for user_id, count, last_used_at in result.all()
+        }
 
     async def create(self, token: ApiToken) -> ApiToken:
         self._session.add(

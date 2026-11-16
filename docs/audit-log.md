@@ -26,7 +26,7 @@ Every change a person makes, in the web UI or through the API:
 | WireGuard or OpenVPN device | adds, edits or removes it, or rotates its keys (WireGuard) or certificate (OpenVPN) |
 | WireGuard or OpenVPN settings | saves them, or rotates the server key (WireGuard) or the CA (OpenVPN, with the number of device certificates reissued) |
 | Custom provider | creates, imports, edits (enabling and disabling too) or deletes it, with the vendor hosts each change added or removed |
-| User | adds, invites, edits or deletes one, or sends a new invite link; changes their own email or password under Account; sets their password through an invite link |
+| User | adds a person or a [service account]({{ site.baseurl }}/sso#service-accounts), invites, edits or deletes one, or sends a new invite link; changes their own email or password under Account; sets their password through an invite link |
 | Sign-in provider | saves its settings under Administration → Sign-in |
 | IP attribution | saves the settings; uploads, adds from a URL, edits (pausing and resuming too) or removes a database |
 | System settings | changes the audit log's retention, or on Octoprox Enterprise the license key |
@@ -169,7 +169,7 @@ Every sign-in, successful or refused, is an entry on the user who signed in or t
 
 The reasons, by method:
 
-- `password`: `unknown user`, `no password set`, `wrong password`, `account disabled`.
+- `password`: `unknown user`, `service account` (a service account never signs in with a password), `no password set`, `wrong password`, `account disabled`.
 - `invite`: `unknown link`, `expired link`, `account disabled`.
 - `sso`: `cancelled` (the person pressed cancel at the provider), `refused by the provider: <error>` with the error code the callback carried (`refused by the provider` alone when that is not a plain code of up to 64 letters, digits, `.`, `_` and `-`), `provider not enabled`, `unexpected error`, or for any other refusal the reason the server log gives, such as an email that matches no user.
 
@@ -181,7 +181,7 @@ What the person sees does not change: the same `Invalid username or password`, t
 
 [Personal access tokens]({{ site.baseurl }}/sso#personal-access-tokens) are recorded on their owner, with the token's name, prefix, ID and expiry (`token_name`, `token_prefix`, `token_id`, `expires_at`), never its secret:
 
-- **Token issued**, by the owner, or by an admin for a service account.
+- **Token issued**, by the owner, or by an admin for another user, such as a [service account]({{ site.baseurl }}/sso#service-accounts).
 - **Token first used**: the token's first authenticated call, with its address and browser. The call may still be refused, as a viewer's token trying a write is; its first use is recorded all the same, once however many calls arrive together. When recording fails, the server logs `Audit token record failed` and the call goes on.
 - **Token revoked**.
 

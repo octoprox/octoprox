@@ -35,6 +35,7 @@ from api.models.audit import MASK
 from api.models.connector import Connector
 from api.models.credential import Credential
 from api.models.project import (
+    ExitReputationMode,
     MitmBrowser,
     MitmEngine,
     MitmMode,
@@ -82,6 +83,23 @@ class TestCreate:
         assert await stored(sessions, project.id) == project
         assert (project.routing_strategy, project.location_preflight, project.exit_headers) == ("sticky", True, True)
         assert project.location_session_move is True
+
+    async def test_stores_the_exit_reputation_settings(
+        self, project_service: ProjectService, sessions: async_sessionmaker[AsyncSession], actor: Actor
+    ) -> None:
+        project = await project_service.create(
+            create(exit_reputation=ExitReputationMode.AVOID, exit_reputation_bad_reports=2), actor
+        )
+
+        assert await stored(sessions, project.id) == project
+        assert (
+            project.exit_reputation,
+            project.exit_reputation_avoid_minutes,
+            project.exit_reputation_half_life_hours,
+            project.exit_reputation_connector_half_life_requests,
+            project.exit_reputation_bad_reports,
+            project.exit_reputation_bad_share,
+        ) == (ExitReputationMode.AVOID, 60, 24, 100, 2, 50)
 
     async def test_an_unknown_routing_strategy_is_refused(
         self, project_service: ProjectService, sessions: async_sessionmaker[AsyncSession], actor: Actor
@@ -206,6 +224,46 @@ class TestUpdate:
         )
 
         assert await queued_job_keys(redis_client, JobKind.REATTRIBUTE) == []
+
+    async def test_exit_reputation_edits_are_stored_and_ask_for_no_reattribution(
+        self,
+        project_service: ProjectService,
+        project: Project,
+        sessions: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        actor: Actor,
+    ) -> None:
+        """They decide what exit reports do, not how a row's location is judged."""
+        edit = ProjectUpdate(
+            exit_reputation=ExitReputationMode.AVOID,
+            exit_reputation_avoid_minutes=15,
+            exit_reputation_half_life_hours=6,
+            exit_reputation_connector_half_life_requests=40,
+            exit_reputation_bad_reports=2,
+            exit_reputation_bad_share=75,
+        )
+
+        saved = await project_service.update(project.id, edit, actor)
+
+        assert (
+            saved.exit_reputation,
+            saved.exit_reputation_avoid_minutes,
+            saved.exit_reputation_half_life_hours,
+            saved.exit_reputation_connector_half_life_requests,
+            saved.exit_reputation_bad_reports,
+            saved.exit_reputation_bad_share,
+        ) == (ExitReputationMode.AVOID, 15, 6, 40, 2, 75)
+        assert await stored(sessions, project.id) == saved
+        assert await queued_job_keys(redis_client, JobKind.REATTRIBUTE) == []
+        *_, entry = await audit_entries(sessions, project.id)
+        assert entry.changes == {
+            "exit_reputation": ["off", "avoid"],
+            "exit_reputation_avoid_minutes": [60, 15],
+            "exit_reputation_half_life_hours": [24, 6],
+            "exit_reputation_connector_half_life_requests": [100, 40],
+            "exit_reputation_bad_reports": [1, 2],
+            "exit_reputation_bad_share": [50, 75],
+        }
 
 
 class TestDelete:

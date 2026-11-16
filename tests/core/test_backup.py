@@ -29,12 +29,14 @@ from api.core.backup import (
     _free,
     _KeptUser,
 )
-from api.core.stats import FailureKind
+from api.core.stats import FailureKind, RequestCount
 from api.db.audit_repository import AuditRepository, SystemSettingsRepository
 from api.db.models import (
     ApiTokenModel,
     AuditLogModel,
     AuthIdentityModel,
+    ConnectorSiteReputationModel,
+    ExitIpReputationModel,
     GeoDatabaseBlobModel,
     IpObservationModel,
     MetricFlushModel,
@@ -56,13 +58,15 @@ from api.db.repository import (
     ProjectRepository,
     ProxyRepository,
 )
+from api.db.reputation_repository import ExitReputationRepository
 from api.models.audit import AuditEntry
 from api.models.backup import BackupPayload, ImportSummary
 from api.models.connector import Connector
-from api.models.credential import Credential
-from api.models.project import Project
+from api.models.credential import Credential, CredentialType
+from api.models.project import ExitReputationMode, Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import build_registry
+from api.reputation.record import ConnectorSiteKey, ExitIpKey, ReportCounts
 from tests.conftest import HEAD
 
 PASSPHRASE = "correct horse battery"
@@ -147,6 +151,19 @@ class TestEveryEntityTravels:
         models = {spec.model for spec in _ENTITY_SPECS}
         assert MetricTotalsModel not in models and MetricFlushModel not in models
 
+    def test_exit_reputation_records_are_history_restored_after_their_projects_and_connectors(self) -> None:
+        """They ride the metrics flag like the exit IPs; the import's project delete takes those the file leaves out."""
+        keys = [spec.key for spec in _ENTITY_SPECS]
+        for model, key in (
+            (ExitIpReputationModel, "exit_ip_reputation"),
+            (ConnectorSiteReputationModel, "connector_site_reputation"),
+        ):
+            [spec] = [spec for spec in _ENTITY_SPECS if spec.model is model]
+            assert (spec.key, spec.is_metric) == (key, True)
+            assert not spec.travels(include_metrics=False, include_database_files=True)
+        assert keys.index("projects") < keys.index("exit_ip_reputation")
+        assert keys.index("connectors") < keys.index("connector_site_reputation")
+
 
 class TestCompatibility:
     @staticmethod
@@ -198,6 +215,13 @@ class TestColumnSerialization:
         assert rebuilt.tags == ["a", "b"]
         assert rebuilt.metadata_ == {"region": "eu"}
         assert rebuilt.created_at == created
+
+    def test_a_service_account_keeps_its_kind(self) -> None:
+        spec = _EntitySpec("users", UserModel)
+        row = spec.dump(UserModel(id="u-bot", username="bot", email="", role="viewer", kind="service"))
+
+        assert row["kind"] == "service"
+        assert spec.build(row).kind == "service"
 
     def test_a_key_the_model_does_not_map_is_skipped(self) -> None:
         rebuilt = _EntitySpec("proxies", ProxyModel).build({"id": "proxy-1", "host": "h.example.com", "retired": 1})
@@ -358,6 +382,42 @@ class TestOnTheDatabase:
         assert set(payload) == {spec.key for spec in _ENTITY_SPECS}
         assert result.summary.projects == 1
         assert [project.name for project in await ProjectRepository(db_session).get_all()] == ["Kept"]
+
+    async def test_exit_reputation_records_travel_with_the_history_and_come_back_as_they_were(
+        self, db_session: AsyncSession
+    ) -> None:
+        """Their days travel as ISO dates, as their times do."""
+        project = await ProjectRepository(db_session).create(
+            Project(name="Rep", username="rep", password="pw", exit_reputation=ExitReputationMode.AVOID)
+        )
+        credential = Credential(name="Rep", type=CredentialType.STATIC_PROXY_PROVIDER, project_id=project.id, config={})
+        await CredentialRepository(db_session).create(credential)
+        connector = Connector(
+            name="Rep", credential_id=credential.id, credential_type=CredentialType.STATIC_PROXY_PROVIDER,
+            project_id=project.id, config={},
+        )
+        await ConnectorRepository(db_session).create(connector)
+        ip_key = ExitIpKey(project.id, "203.0.113.7", "google.com")
+        connector_key = ConnectorSiteKey(project.id, connector.id, "google.com", "US")
+        records = ExitReputationRepository(db_session)
+        await records.apply_reports({ip_key: ReportCounts(bad=2, reason="captcha")}, datetime(2026, 11, 14, 12))
+        await records.apply_evidence(
+            {connector_key: RequestCount(requests=50, blocked=2)}, [connector.id], datetime(2026, 11, 14, 12)
+        )
+        await db_session.commit()
+        before = (await records.ip_record(ip_key), await records.connector_record(connector_key))
+        repository = BackupRepository(db_session)
+
+        exported = await repository.export(include_metrics=False)
+        assert exported["exit_ip_reputation"] == exported["connector_site_reputation"] == []
+        payload = await repository.export(include_metrics=True)
+        assert payload["connector_site_reputation"][0]["last_seen_day"] == "2026-11-14"
+        result = await repository.replace_all(BackupPayload.model_validate(payload), REGISTRY)
+        await db_session.commit()
+
+        assert (result.summary.exit_ip_reputation, result.summary.connector_site_reputation) == (1, 1)
+        assert None not in before
+        assert (await records.ip_record(ip_key), await records.connector_record(connector_key)) == before
 
     async def test_the_kept_user_keeps_its_sign_ins_and_tokens_and_its_imported_copy_takes_its_own(
         self, db_session: AsyncSession

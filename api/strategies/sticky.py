@@ -246,7 +246,18 @@ class StickySessionStrategy(RoutingStrategy):
         session_id: str,
         proxy: Proxy,
     ) -> None:
-        binding = self.remember(session_id, proxy.id)
+        self.hold(session_id, proxy.id, redis_client=redis_client, project_id=project_id)
+
+    def hold(
+        self,
+        session_id: str,
+        proxy_id: str,
+        *,
+        redis_client: "RedisClient | None" = None,
+        project_id: str | None = None,
+    ) -> None:
+        """Push out the session's binding to ``proxy_id`` here, and in Redis when its rewrite is due, as a request does."""
+        binding = self.remember(session_id, proxy_id)
         self._refresh_redis(redis_client, project_id, session_id, binding)
 
     def allows_exit_reselection(self, session_id: str | None) -> bool:
@@ -276,4 +287,4 @@ def _rendezvous_score(group: ProxyGroup, session_id: str) -> float:
     probability proportional to its weight.
     """
     u = (_session_hash(group.key, session_id) + 1) / (2**64 + 1)
-    return -max(group.weight, 1) / math.log(u)
+    return -group.weight / math.log(u)

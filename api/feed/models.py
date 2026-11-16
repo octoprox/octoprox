@@ -3,8 +3,8 @@
 
 """What the routing feed carries: the definitions every gateway routes on, cut into sections.
 
-There is a global section, one per connector and a runtime one; the controller publishes them (:mod:`api.feed.publisher`),
-and every gateway fetches those that changed (:mod:`api.feed.follower`).
+There is a global section, one per connector, a runtime one and one of exit reputation; the controller publishes them
+(:mod:`api.feed.publisher`), and every gateway fetches those that changed (:mod:`api.feed.follower`).
 """
 
 from __future__ import annotations
@@ -28,17 +28,22 @@ from api.models.location import LocationTarget
 from api.models.openvpn import OpenVpnProtocol
 from api.models.project import Project
 from api.models.proxy import Proxy
+from api.providers.sdk.strategies import META_DISCOVERED_IP, is_dynamic_gateway
+from api.reputation.site import canonical_ip
 
 # The layout of the sections below. A follower applies only a head of its own
 # schema, so a controller and gateways of different releases never read each
 # other's sections wrongly during an upgrade. Bump it with any change an older
-# reader would misread.
-FEED_SCHEMA = 1
+# reader would misread. 2: the exit reputation section.
+FEED_SCHEMA = 2
 # The name of the section holding everything that belongs to no one connector.
 GLOBAL_SECTION = "global"
 # The name of the section holding the quarantines and traffic blocks, which
 # move with traffic, without the definitions.
 RUNTIME_SECTION = "runtime"
+# The name of the section holding the exit reputation projects that avoid are
+# routed by, which moves with exit reports and is read from Postgres.
+REPUTATION_SECTION = "reputation"
 # Connector sections are named "connector:<id>".
 _CONNECTOR_SECTION_PREFIX = "connector:"
 
@@ -234,6 +239,17 @@ class ConnectorSection(BaseModel):
     proxies: list[Proxy] = Field(default_factory=list)
 
 
+def static_exit_ip(proxy: Proxy) -> str | None:
+    """The exit IP exit reputation knows a stored row by: where it was last seen exiting, as canonical text.
+
+    None for a row never seen exiting, and for a dynamic gateway, whose exit is chosen per request.
+    """
+    ip = proxy.metadata.get(META_DISCOVERED_IP)
+    if not isinstance(ip, str) or is_dynamic_gateway(proxy):
+        return None
+    return canonical_ip(ip)
+
+
 class RuntimeSection(BaseModel):
     """The runtime state the feed carries for the whole install: the quarantines gateways trip, the traffic blocks workers set.
 
@@ -246,16 +262,41 @@ class RuntimeSection(BaseModel):
     traffic_blocked_until: dict[str, datetime] = Field(default_factory=dict)
 
 
+class ProjectReputation(BaseModel):
+    """One project's exit reputation as its gateways route by it: the avoids of the exit IPs its rows with IPs hold, and
+    the factors its dynamic connectors' weights are multiplied by."""
+
+    # Exit IP (static_exit_ip) -> site -> the end of its avoid (naive UTC): the IPs the project's rows were last seen
+    # exiting from, with the avoids still ahead when Postgres was read. A gateway joins its rows to it by their exit IP.
+    ip_avoids: dict[str, dict[str, datetime]] = Field(default_factory=dict)
+    # Dynamic connector id -> site -> level of the requested place ("" for none) -> its factor there: only where it
+    # differs from what the coarser levels give (1 when none has one), since routing takes the finest level with a
+    # factor, so a 1.0 for a city still wins over a 0.5 for its country.
+    connector_factors: dict[str, dict[str, dict[str, float]]] = Field(default_factory=dict)
+
+
+class ReputationSection(BaseModel):
+    """The exit reputation the feed carries for the whole install, read from Postgres by the controller: per project
+    whose mode avoids, what its routing is weighed by. Every map in key order, so the same records give the same JSON."""
+
+    # Project id -> its exit reputation; a project with nothing to carry is left out.
+    projects: dict[str, ProjectReputation] = Field(default_factory=dict)
+
+
 # Any kind of section, as the compiler builds them and a follower decodes them.
-type Section = GlobalSection | ConnectorSection | RuntimeSection
+type Section = GlobalSection | ConnectorSection | RuntimeSection | ReputationSection
 
 
-def section_model(name: str) -> type[GlobalSection] | type[ConnectorSection] | type[RuntimeSection]:
+def section_model(
+    name: str,
+) -> type[GlobalSection] | type[ConnectorSection] | type[RuntimeSection] | type[ReputationSection]:
     """The model a section of this name holds; ValueError for a name the feed never uses."""
     if name == GLOBAL_SECTION:
         return GlobalSection
     if name == RUNTIME_SECTION:
         return RuntimeSection
+    if name == REPUTATION_SECTION:
+        return ReputationSection
     if name.startswith(_CONNECTOR_SECTION_PREFIX):
         return ConnectorSection
     raise ValueError(f"Not a feed section: {name}")

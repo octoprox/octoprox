@@ -3,8 +3,8 @@
 
 """The worker runtime: what a ``worker`` process (and ``all``) runs besides the node's own loops.
 
-A job runner per kind it takes (``worker_jobs``), the sighting and observation ingests and the definitions refresher,
-all reading Redis streams; what its jobs write is announced on the change stream.
+A job runner per kind it takes (``worker_jobs``), the sighting, observation and exit report ingests and the definitions
+refresher, all reading Redis streams; what its jobs write is announced on the change stream.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from api.jobs.scale import AutoscaleJob
 from api.jobs.sync import ProviderSyncJob
 from api.jobs.traffic import TrafficJob
 from api.models.system import JobKindStats, WorkerSnapshot
+from api.reputation.ingest import ExitReportIngest
 from api.roles.refresh import DefinitionsRefresher
 from api.roles.runtime import RoleRuntime
 from api.services.connectors import ConnectorService
@@ -57,7 +58,7 @@ logger = structlog.get_logger()
 
 
 class WorkerRuntime(RoleRuntime):
-    """Runs a job runner per kind it takes, the sighting and observation ingests, and the definitions refresher.
+    """Runs a job runner per kind it takes, the sighting, observation and exit report ingests, and the definitions refresher.
 
     The node makes the refresher's first read before any runtime starts, so the first runs judge with the definitions.
     """
@@ -119,7 +120,11 @@ class WorkerRuntime(RoleRuntime):
             EnrichJob(attribution),
             TrafficJob(session_factory, redis_client),
             MetricsFlushJob(session_factory, redis_client),
-            CompactionJob(session_factory, geo.geo_service),
+            CompactionJob(
+                session_factory,
+                geo.geo_service,
+                reputation_retention_days=settings.exit_reputation_retention_days,
+            ),
             SnapshotJob(
                 session_factory,
                 redis_client,
@@ -136,15 +141,17 @@ class WorkerRuntime(RoleRuntime):
         self.runners = {kind: JobRunner(redis_client, by_kind[kind]) for kind in settings.worker_jobs}
         self.sighting_ingest = SightingIngest(redis_client, attribution)
         self.observation_ingest = ObservationIngest(redis_client, session_factory)
+        self.exit_report_ingest = ExitReportIngest(redis_client, session_factory)
         self._loops: tuple[Loop, ...] = (
             self.refresher,
             *self.runners.values(),
             self.sighting_ingest,
             self.observation_ingest,
+            self.exit_report_ingest,
         )
 
     def loops(self) -> Sequence[Loop]:
-        """The definitions refresher, a runner per kind it takes, then the sighting and observation ingests."""
+        """The definitions refresher, a runner per kind it takes, then the sighting, observation and exit report ingests."""
         return self._loops
 
     async def start(self) -> None:
@@ -162,7 +169,7 @@ class WorkerRuntime(RoleRuntime):
         return self.refresher.readiness()
 
     def snapshot(self) -> WorkerSnapshot:
-        """This worker's counters: per job kind, and the sightings and observations it ingested."""
+        """This worker's counters: per job kind, and the sightings, observations and exit reports it ingested."""
         jobs: dict[JobKind, JobKindStats] = {}
         for kind, runner in self.runners.items():
             stats = job_stats.get(runner.name)
@@ -179,4 +186,6 @@ class WorkerRuntime(RoleRuntime):
             sightings_dropped=self.sighting_ingest.dropped,
             observations_consumed=self.observation_ingest.consumed,
             observations_dropped=self.observation_ingest.dropped,
+            exit_reports_consumed=self.exit_report_ingest.consumed,
+            exit_reports_dropped=self.exit_report_ingest.dropped,
         )

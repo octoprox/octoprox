@@ -65,6 +65,7 @@ class WorkerName(StrEnum):
     JOB_RUNNER_UPDATE_CHECK = "job_runner_update_check"
     SIGHTING_INGEST = "sighting_ingest"
     OBSERVATION_INGEST = "observation_ingest"
+    EXIT_REPORT_INGEST = "exit_report_ingest"
 
 
 def job_runner_name(kind: JobKind) -> WorkerName:
@@ -309,9 +310,10 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     ),
     WorkerName.JOB_RUNNER_METRICS_FLUSH: WorkerInfo(
         "Moves the Redis request counters (proxies, projects, connectors, tunnel devices, hosts, "
-        "failures) into Postgres history rows and running totals, each window once: it takes the "
-        "windows out of Redis under its job's id and commits them with that id - the "
-        "Redis-to-Postgres half of the metrics pipeline",
+        "failures) into Postgres history rows and running totals, each window once, and the site "
+        "windows' requests and exit reports into the connectors' exit reputation records, deciding "
+        "their factors: it takes the windows out of Redis under its job's id and commits them with "
+        "that id - the Redis-to-Postgres half of the metrics pipeline",
         roles=_WORKER,
     ),
     WorkerName.JOB_RUNNER_COMPACTION: WorkerInfo(
@@ -357,6 +359,13 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
         "Writes the IP observations and exit judgements every process publishes into Postgres "
         "history, the exit table and the per-connector location accuracy aggregates, a batch at a "
         "time, counting each hand-out once whichever worker ingests it",
+        roles=_WORKER,
+    ),
+    WorkerName.EXIT_REPORT_INGEST: WorkerInfo(
+        "Applies the exit reports clients send through the api to each project's exit IP records, "
+        "a batch at a time in one transaction, and adds the connectors' reports to the Redis site "
+        "windows the metrics flush applies to their records, then tells the controller when an "
+        "avoid that routing uses moved",
         roles=_WORKER,
     ),
 }

@@ -475,6 +475,22 @@ class TestHeldProxy:
         assert await strategy.held_proxy("s") is None
         assert strategy.bound_proxy_id("s") is None
 
+    async def test_a_hold_keeps_a_sticky_binding_in_use_as_a_request_would(self, sample_proxies: list[Proxy]) -> None:
+        """What the router does for a session it refuses on its proxy (exit reputation's avoid): the binding stays live."""
+        now = [0.0]
+        redis = AsyncMock(spec=RedisClient)
+        redis.get_sticky_binding.return_value = None
+        strategy = StickySessionStrategy(ttl_seconds=300, clock=lambda: now[0])
+        first = await strategy.select(sample_proxies, session_id="s", redis_client=cast(RedisClient, redis), project_id="p")
+        assert first is not None
+        for _ in range(10):
+            now[0] += 100
+            strategy.hold("s", first.id, redis_client=cast(RedisClient, redis), project_id="p")
+        await strategy.settle()
+        # A thousand seconds on the binding is live, and Redis was rewritten every half TTL, not on each hold.
+        assert strategy.bound_proxy_id("s") == first.id
+        assert redis.set_sticky_binding.await_count == 6
+
 
 def _measured(**outcomes: tuple[int, int, float]) -> LocalOutcomes:
     """A gateway's outcomes with each proxy's ``(requests, successes, latency sum in ms)`` recorded, latency spread evenly.
@@ -587,7 +603,7 @@ class TestGetStrategy:
             assert await get_strategy(name).settle() is None
 
 
-def _group(key: str, weight: int, count: int) -> ProxyGroup:
+def _group(key: str, weight: float, count: int, *, lowered: bool = False) -> ProxyGroup:
     return ProxyGroup(
         key=key,
         weight=weight,
@@ -595,6 +611,7 @@ def _group(key: str, weight: int, count: int) -> ProxyGroup:
             Proxy(id=f"{key}-{i}", host=f"{key}{i}", port=1, connector_id=key, status=ProxyStatus.HEALTHY)
             for i in range(count)
         ],
+        lowered=lowered,
     )
 
 
@@ -733,3 +750,68 @@ class TestWeightedSelection:
         sick, well = _group("a", 3, 1), _group("b", 1, 1)
         counts = Counter([(await strategy.select_weighted([sick, well])).connector_id for _ in range(4000)])
         assert 0.70 < counts["a"] / 4000 < 0.80
+
+
+class TestEffectiveWeights:
+    """Exit reputation hands the strategies effective weights, configured weight times reputation, often a fraction:
+    every strategy picks the connector by them as by whole weights, round robin by a draw where they were lowered."""
+
+    async def test_random_follows_fractional_weights(self) -> None:
+        random.seed(5)
+        strategy = RandomStrategy()
+        groups = [_group("a", 0.25, 3), _group("b", 1.0, 1)]
+        counts = Counter([(await strategy.select_weighted(groups)).connector_id for _ in range(4000)])
+        assert 0.75 < counts["b"] / 4000 < 0.85
+
+    async def test_round_robin_interleaves_by_fractional_weights(self) -> None:
+        strategy = RoundRobinStrategy()
+        groups = [_group("a", 0.25, 1), _group("b", 1.0, 1)]
+        picks = [(await strategy.select_weighted(groups)).connector_id for _ in range(10)]
+        # One "a" for every four "b", spread out: b b a b b, twice.
+        assert picks == ["b", "b", "a", "b", "b"] * 2
+
+    async def test_round_robin_draws_lowered_weights_and_keeps_its_order_for_the_other_requests(self) -> None:
+        """Weights exit reputation lowered hold for one site's requests alone, while round robin's order is shared by
+        every request of the project: in that order, a site's requests alternating with another's would all go to the
+        connector lowered there. So round robin draws them by their weights, and the other requests keep the order."""
+        random.seed(7)
+        strategy = RoundRobinStrategy()
+        to_site = [_group("a", 0.1, 1, lowered=True), _group("b", 1.0, 1)]
+        to_others = [_group("a", 1, 1), _group("b", 1, 1)]
+        on_site: Counter[str] = Counter()
+        elsewhere: list[str] = []
+        for _ in range(2000):
+            on_site[(await strategy.select_weighted(to_site)).connector_id] += 1
+            elsewhere.append((await strategy.select_weighted(to_others)).connector_id)
+        # 0.1 of 1.1: about 9% of the site's requests.
+        assert 0.06 < on_site["a"] / 2000 < 0.12
+        # The other requests take the connectors in turn, as without the site's.
+        assert all(first != second for first, second in zip(elsewhere, elsewhere[1:], strict=False))
+        assert Counter(elsewhere) == {"a": 1000, "b": 1000}
+
+    async def test_least_used_divides_by_fractional_weights(self) -> None:
+        inflight = InFlight()
+        strategy = LeastUsedStrategy(inflight)
+        # One transfer each: "a" at 0.5 carries 2 per unit of weight, "b" at 1 carries 1.
+        a, b = _group("a", 0.5, 1), _group("b", 1.0, 1)
+        _open(inflight, a, 1)
+        _open(inflight, b, 1)
+        assert (await strategy.select_weighted([a, b])).connector_id == "b"
+        random.seed(13)
+        idle = LeastUsedStrategy(InFlight())
+        counts = Counter([(await idle.select_weighted([_group("a", 0.25, 1), _group("b", 1.0, 1)])).connector_id for _ in range(4000)])
+        assert 0.75 < counts["b"] / 4000 < 0.85
+
+    async def test_sticky_places_new_sessions_by_fractional_weights(self) -> None:
+        strategy = StickySessionStrategy()
+        groups = [_group("a", 0.1, 1), _group("b", 1.0, 1)]
+        counts = Counter([strategy.pick_group(groups, f"session-{i}").key for i in range(4000)])
+        # 0.1 of 1.1: about 9% of new sessions.
+        assert 0.06 < counts["a"] / 4000 < 0.12
+
+    async def test_health_based_draws_the_connector_by_fractional_weights(self) -> None:
+        random.seed(17)
+        strategy = HealthBasedStrategy()
+        groups = [_group("a", 0.25, 1), _group("b", 1.0, 1)]
+        counts = Counter([(await strategy.select_weighted(groups)).connector_id for _ in range(4000)])
+        assert 0.75 < counts["b"] / 4000 < 0.85

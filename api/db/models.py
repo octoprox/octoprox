@@ -3,13 +3,14 @@
 
 """SQLAlchemy database models for Octoprox."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -43,6 +44,8 @@ class UserModel(Base):
     email: Mapped[str] = mapped_column(String(255), default="")
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="viewer")
+    # ``person``, or ``service`` for an account that only ever holds API tokens (api.models.user.UserKind).
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="person", server_default="person")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     invite_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     invite_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -157,6 +160,17 @@ class ProjectModel(Base):
     # many days (0 forever); null days inherit geo_settings.observation_retention_days.
     observation_log: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     observation_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Exit reputation: what exit reports do (api.models.project.ExitReputationMode), how many minutes a first avoid
+    # lasts, an exit IP record's half-life in hours, a connector record's in requests, the fresh bad reports that avoid
+    # an exit for a site, and the least bad share in percent.
+    exit_reputation: Mapped[str] = mapped_column(String(16), nullable=False, default="off", server_default="off")
+    exit_reputation_avoid_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60, server_default="60")
+    exit_reputation_half_life_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24, server_default="24")
+    exit_reputation_connector_half_life_requests: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100, server_default="100"
+    )
+    exit_reputation_bad_reports: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    exit_reputation_bad_share: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50")
     # Set by a delete; the project goes once no connector holds it (its cloud instances terminated).
     pending_deletion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
@@ -839,3 +853,84 @@ class ConnectorExitIpModel(Base):
     # ingest's updates of last_seen and the latest state rewrite a row in place
     # without index writes. See migration 049 for why.
     __table_args__ = ({"postgresql_with": {"fillfactor": 80}},)
+
+
+class ExitIpReputationModel(Base):
+    """What clients reported about one exit IP on one site of a project, and until when it is avoided there.
+
+    Counts are for the record's life; the weights decay with the project's half-life from ``weighted_at``
+    (api.reputation.record.ExitIpReputation).
+    """
+
+    __tablename__ = "exit_ip_reputation"
+
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    # Canonical text (api.reputation.site.canonical_ip).
+    ip: Mapped[str] = mapped_column(String(45), primary_key=True)
+    # The exact host a request went to, or an IP literal (api.reputation.site.site_of).
+    site: Mapped[str] = mapped_column(String(253), primary_key=True)
+    good_reports: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    bad_reports: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    weighted_good: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
+    weighted_bad: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
+    # The avoids begun for the site, decayed like the reports: how far the next one doubles.
+    weighted_avoids: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
+    weighted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    avoid_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # The day of last_seen_at, what the retention sweep selects by.
+    last_seen_day: Mapped[date] = mapped_column(Date, nullable=False)
+    last_report_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # New pages keep a fifth free so updates rewrite a row in place, and the
+    # indexes besides the key are on columns that change seldom: the day at
+    # most once a day per row, the avoid's end only when an avoid begins or
+    # lifts. See migration 060 for why.
+    __table_args__ = (
+        Index("ix_exit_ip_reputation_last_seen_day", "last_seen_day"),
+        Index("ix_exit_ip_reputation_avoid_until", "avoid_until"),
+        {"postgresql_with": {"fillfactor": 80}},
+    )
+
+
+class ConnectorSiteReputationModel(Base):
+    """What clients reported about one connector on one site and requested place, against the requests it carried
+    there, and the factor its routing weight is multiplied by for them.
+
+    Counts are for the record's life; the weights decay with the requests the metrics flush adds (the project's
+    connector half-life) and by the hour from ``weighted_at`` (api.reputation.record.ConnectorSiteReputation). A report
+    makes a record; requests only add to one.
+    """
+
+    __tablename__ = "connector_site_reputation"
+
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    connector_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("connectors.id", ondelete="CASCADE"), primary_key=True
+    )
+    site: Mapped[str] = mapped_column(String(253), primary_key=True)
+    # The level of the requested place the record is kept at (a LocationTarget key: "US", "US/NY",
+    # "US/NY/new_york", "US//austin"), "" for requests that named none and for connectors with IPs.
+    place: Mapped[str] = mapped_column(String(128), primary_key=True)
+    blocked_reports: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    good_reports: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    requests: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    weighted_blocked: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
+    weighted_requests: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
+    weighted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # 0.1 to 1 in steps of 0.05; None while too few requests weigh in to tell.
+    factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen_day: Mapped[date] = mapped_column(Date, nullable=False)
+
+    # As exit_ip_reputation: a fifth of each page free, and besides the key
+    # the day index and one on the connector, which never changes. See
+    # migration 060 for why.
+    __table_args__ = (
+        Index("ix_connector_site_reputation_last_seen_day", "last_seen_day"),
+        Index("ix_connector_site_reputation_connector_id", "connector_id"),
+        {"postgresql_with": {"fillfactor": 80}},
+    )

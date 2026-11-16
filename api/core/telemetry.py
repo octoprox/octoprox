@@ -3,8 +3,9 @@
 
 """Prometheus exposition of one process: each scrape turns the process's heartbeat snapshot into metric families.
 
-A gateway's latency histograms are read from its metering instead, so the heartbeat never carries them. Every sample is
-labelled with the process's ``role``, and a scrape reads memory only, never Redis or Postgres.
+A gateway's latency histograms are read from its metering instead, and a worker's exit report counts from its ingest, so
+the heartbeat never carries them. Every sample is labelled with the process's ``role``, and a scrape reads memory only,
+never Redis or Postgres.
 """
 
 from __future__ import annotations
@@ -26,12 +27,14 @@ from prometheus_client.registry import Collector, CollectorRegistry
 from api.core.stats import FailureKind
 from api.db.streams import FullRead
 from api.gateway.latency import LATENCY_BUCKETS
+from api.models.exit_reports import ExitVerdict
 from api.models.system import ApiSnapshot, ControllerSnapshot, GatewaySnapshot, WorkerSnapshot
 
 if TYPE_CHECKING:
     from api.gateway.latency import LatencyHistogram
     from api.models.system import InstanceSnapshot
     from api.models.tunnel import TunnelEndpointState
+    from api.reputation.ingest import ExitReportCount
 
 # The prefix every metric name starts with.
 METRIC_PREFIX = "octoprox"
@@ -452,7 +455,8 @@ class ControllerFamilies(RoleFamilies[ControllerSnapshot]):
 
 
 class WorkerFamilies(RoleFamilies[WorkerSnapshot]):
-    """A worker's batches, failures, time and entries in hand per job kind, and the sightings and observations it ingested."""
+    """A worker's batches, failures, time and entries in hand per job kind, and the sightings, observations and exit
+    reports it ingested."""
 
     def _section(self, snapshot: InstanceSnapshot) -> WorkerSnapshot | None:
         return snapshot.worker
@@ -499,15 +503,61 @@ class WorkerFamilies(RoleFamilies[WorkerSnapshot]):
                 worker.observations_dropped,
                 "IP observations and exit judgements this worker gave up after repeated deliveries, never ingested",
             ),
+            (
+                "worker_exit_reports_consumed_total",
+                worker.exit_reports_consumed,
+                "Exit reports this worker ingested",
+            ),
+            (
+                "worker_exit_reports_dropped_total",
+                worker.exit_reports_dropped,
+                "Exit reports this worker gave up after repeated deliveries, never applied",
+            ),
         ):
             yield _sample(_counter(name, documentation), role, value)
 
 
+class ExitReportFamilies(SectionFamilies):
+    """The exit reports a worker applied to the records, by connector and verdict.
+
+    Read from the worker's ingest on each scrape, since they grow with every connector and the heartbeat, which
+    publishes the snapshot, has no use for them.
+    """
+
+    def __init__(self, reports: Callable[[], Sequence[ExitReportCount]]) -> None:
+        self._reports = reports
+
+    def families(self, snapshot: InstanceSnapshot) -> Iterator[Metric]:
+        counts = self._reports()
+        if not counts:
+            return
+        role = snapshot.runtime.role.value
+        reports = _counter(
+            "worker_exit_reports_total",
+            "Exit reports this worker took for the exit reputation records (an exit IP's applied at once, a connector's at "
+            "the next metrics flush), by connector (empty for none) and verdict",
+            "connector",
+            "name",
+            "verdict",
+        )
+        by_connector: dict[tuple[str, str], dict[str, int]] = {}
+        for count in counts:
+            by_connector.setdefault((count.connector_id, count.connector_name), {})[count.verdict] = count.count
+        for (connector_id, name), by_verdict in sorted(by_connector.items()):
+            for verdict, value in _counted_from_zero(ExitVerdict, by_verdict).items():
+                reports.add_metric([role, connector_id, name, verdict], value)
+        yield reports
+
+
 class SnapshotCollector(Collector):
-    """Turns the process's snapshot, and a gateway's latency histograms, into metric families each time Prometheus scrapes."""
+    """Turns the process's snapshot, a gateway's latency histograms and a worker's exit report counts into metric families
+    each time Prometheus scrapes."""
 
     def __init__(
-        self, snapshot: Callable[[], InstanceSnapshot], latencies: Callable[[], Sequence[LatencyHistogram]]
+        self,
+        snapshot: Callable[[], InstanceSnapshot],
+        latencies: Callable[[], Sequence[LatencyHistogram]],
+        exit_reports: Callable[[], Sequence[ExitReportCount]] = tuple,
     ) -> None:
         self._snapshot = snapshot
         # Every part of the process, in the order a scrape renders its families.
@@ -521,6 +571,7 @@ class SnapshotCollector(Collector):
             LatencyFamilies(latencies),
             ControllerFamilies(),
             WorkerFamilies(),
+            ExitReportFamilies(exit_reports),
         )
 
     def collect(self) -> Iterator[Metric]:
@@ -539,15 +590,17 @@ class Telemetry:
 
     Args:
         latencies: the gateway's latency histograms as they stand; none for a process without a gateway.
+        exit_reports: the worker's exit report counts as they stand; none for a process without a worker.
     """
 
     def __init__(
         self,
         snapshot: Callable[[], InstanceSnapshot],
         latencies: Callable[[], Sequence[LatencyHistogram]] = tuple,
+        exit_reports: Callable[[], Sequence[ExitReportCount]] = tuple,
     ) -> None:
         self.registry = CollectorRegistry(auto_describe=False)
-        self.registry.register(SnapshotCollector(snapshot, latencies))
+        self.registry.register(SnapshotCollector(snapshot, latencies, exit_reports))
 
     def render(self) -> bytes:
         """The text exposition of every family, from a snapshot built now."""

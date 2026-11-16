@@ -172,6 +172,16 @@ class TestParseUsernameParams:
     def test_empty_pinned_proxy_is_absent(self) -> None:
         assert parse_username_params("myuser-prxy--sessid-s1") == UsernameParams("myuser", "s1", None)
 
+    def test_a_tag_names_the_request_and_changes_nothing_else(self) -> None:
+        """What an exit report names the request by: the routing parameters around it read as without it."""
+        assert parse_username_params("myuser-tag-job-42") == UsernameParams("myuser", None, None, tag="job-42")
+        params = parse_username_params("my-project-cc-us-st-ny-tag-t1-sessid-s1")
+        assert params == UsernameParams(
+            "my-project", "s1", LocationTarget(country="US", state="NY"), tag="t1"
+        )
+        assert parse_username_params("myuser-tag-").tag is None
+        assert parse_username_params("myuser-st-ny-tag-t1").location_error == LOCATION_NEEDS_COUNTRY
+
 
 class TestFormatUsernameParams:
     """format_username_params is the inverse of the parser, in the spelling the docs use."""

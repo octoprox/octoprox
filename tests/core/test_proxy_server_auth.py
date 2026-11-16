@@ -95,6 +95,7 @@ class TestCredentials:
         router.select_proxy_for_project.return_value = None
         router.are_all_proxies_quarantined.return_value = False
         router.traffic_limit_status.return_value = None
+        router.avoided_site.return_value = None
         router.reserved_by.return_value = []
         token = base64.b64encode(b"geo-cc-us:s3cret-pw").decode()
         await server.start()

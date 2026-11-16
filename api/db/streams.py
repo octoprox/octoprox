@@ -106,6 +106,9 @@ class RuntimeSignal(StrEnum):
     QUARANTINE = "quarantine"
     # A traffic job set or lifted a connector's block; ref is the connector.
     TRAFFIC = "traffic"
+    # Exit reports or the requests counted against them moved an exit IP's avoid or a connector's factor in a project
+    # that routes by them; ref is the project. Unlike the others, what it says to read again lives in Postgres.
+    REPUTATION = "reputation"
 
     def append(self, pipe: Pipeline, *ids: str) -> None:
         """Queue on ``pipe``, the transaction that made the change, this signal's runtime entry about the rows ``ids``."""

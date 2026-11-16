@@ -6,7 +6,7 @@
 from typing import TYPE_CHECKING
 
 from api.models.proxy import Proxy
-from api.strategies.base import ProxyGroup, RoutingStrategy
+from api.strategies.base import ProxyGroup, RoutingStrategy, weighted_random_group
 
 if TYPE_CHECKING:
     from api.db.redis import RedisClient
@@ -19,14 +19,15 @@ class RoundRobinStrategy(RoutingStrategy):
 
     Across connectors it runs smooth weighted round robin (the nginx
     algorithm): weights 3 and 1 produce the fixed order A A B A, three A
-    for every B with the B spread out rather than clumped. Each connector
+    for every B with the B spread out rather than clumped; a request whose
+    weights exit reputation lowered is drawn by them instead. Each connector
     then keeps its own position, so its proxies are cycled in order
     regardless of how often the other connectors are picked in between.
     """
 
     def __init__(self) -> None:
         self._indices: dict[str, int] = {}
-        self._current: dict[str, int] = {}
+        self._current: dict[str, float] = {}
 
     @property
     def name(self) -> str:
@@ -61,14 +62,19 @@ class RoundRobinStrategy(RoutingStrategy):
 
         A connector absent from a call (quarantined, filtered out) keeps its
         accumulated credit and resumes its cadence when it returns; state
-        for a removed connector goes through ``forget_group``.
+        for a removed connector goes through ``forget_group``. A call with
+        weights exit reputation lowered is a weighted random draw that
+        leaves the credit alone: they hold for one site's requests, and a
+        cadence shared with the others would not keep them.
         """
-        total = 0
+        if any(g.lowered for g in groups):
+            return weighted_random_group(groups)
+        total = 0.0
         best: ProxyGroup | None = None
         for g in groups:
-            weight = max(g.weight, 1)
+            weight = g.weight
             total += weight
-            self._current[g.key] = self._current.get(g.key, 0) + weight
+            self._current[g.key] = self._current.get(g.key, 0.0) + weight
             if best is None or self._current[g.key] > self._current[best.key]:
                 best = g
         assert best is not None

@@ -21,7 +21,7 @@ Request bodies are JSON, and a request that sends one must say so with `Content-
 
 ## Authentication
 
-All API endpoints except `/api/v1/auth/*`, `/api/v1/edition` ([Edition](#edition)) and the ops endpoints (`/live`, `/ready`, `/health`, `/metrics`, see [Health Check](#health-check)) require a bearer token: either a session token from a login, or a personal access token. Mutation endpoints require at least Editor role; user management requires Admin role.
+All API endpoints except `/api/v1/auth/*`, `/api/v1/edition` ([Edition](#edition)) and the ops endpoints (`/live`, `/ready`, `/health`, `/metrics`, see [Health Check](#health-check)) require a bearer token: either a session token from a login, or a personal access token. Mutation endpoints require at least Editor role; user management requires Admin role. Exit reports are the exception: any signed-in role may send them, a viewer included, so a scraper can report with the token of a viewer [service account](#users-and-service-accounts) that can change nothing else (see [Exit reputation]({{ site.baseurl }}/exit-reputation)).
 
 The API is served by the api role (or a single instance); any api process answers any request, a write included, since every one reads the entities from Postgres on each request, and the provider catalog (`GET /api/v1/providers`, `GET /api/v1/providers/{provider_id}`) and the attribution settings (`GET /api/v1/geo/settings`) as well. Each api also keeps the custom provider descriptors, the attribution settings and the IP database list in memory for its other routes (credential checks, previews, lookups); those follow a change made through another api as soon as the change stream announces it.
 
@@ -71,7 +71,7 @@ A token (`octo_...`) is sent exactly like a session token and acts as its user w
 | POST | `/users/me/tokens` | Create one from `{name, expires_in_days}` (`expires_in_days` null for no expiry). Returns `{token, api_token}`. Refused (403) when the caller is itself a token |
 | DELETE | `/users/me/tokens/{id}` | Revoke |
 | GET | `/users/{user_id}/tokens` | A user's tokens (admin) |
-| POST | `/users/{user_id}/tokens` | Issue a token on a user's behalf (admin); how a service account gets one |
+| POST | `/users/{user_id}/tokens` | Issue a token on a user's behalf (admin); how a [service account](#users-and-service-accounts) gets one |
 | DELETE | `/users/{user_id}/tokens/{id}` | Revoke (admin) |
 
 ```bash
@@ -83,6 +83,37 @@ curl -H "Authorization: Bearer octo_..." http://localhost:8000/api/v1/projects
 ```
 
 `last_used_at` is set by the token's first authenticated call, even one that is then refused (a viewer's token trying a write gets 403 and is still used), and moves at most once a minute after that. A change made with a token is recorded in the [audit log](#audit-log) with the token's name and ID, as `auth_token` and `auth_token_id` in the entry's `details`.
+
+### Users and Service Accounts
+
+Users are managed by admins, except a user's own profile under `/users/me`. A user is a person (`kind` `person`), who signs in with a password, an invite link or a provider, or a service account (`kind` `service`), which a program uses through the API tokens an admin issues it and which never signs in. See [Service accounts]({{ site.baseurl }}/sso#service-accounts).
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/users` | Every user, people and service accounts alike: `{total, users}` |
+| GET | `/users/{user_id}` | One user |
+| POST | `/users` | Add a person with a password: `{username, email, password, role}` |
+| POST | `/users/invite` | Add a person with a set-password link instead: `{username, email, role}`. Returns `{user, invite_url}` |
+| POST | `/users/service-accounts` | Add a service account: `{username, role}`, `role` `viewer` when left out. Answers `201` with the user. An admin's token may call it |
+| POST | `/users/{user_id}/reinvite` | A new set-password link for a person who has no password. Needs a session |
+| PATCH | `/users/{user_id}` | Change `username`, `email`, `password` (needs a session), `role` or `is_active` |
+| DELETE | `/users/{user_id}` | Delete a user with their tokens and linked sign-ins; not yourself |
+| GET | `/users/me` | The caller, whatever their role |
+| PATCH | `/users/me` | The caller's own `email`, `password` (needs a session, and `current_password` once one is set) and `theme_preference` |
+
+A user is `{id, username, email, role, kind, is_active, has_password, sign_in_providers, token_count, token_last_used_at, theme_preference, last_login_at, created_at, updated_at}`. `token_count` counts the user's tokens, expired ones included, and `token_last_used_at` is the latest use of any of them. A duplicate username or email is a `400`.
+
+A service account has no email, password or invite link, and keeps none: setting a password, by an admin or with its own token, and asking for a set-password link answer `400` `A service account has no password: it uses API tokens`; setting an email answers `400` `A service account has no email: nobody signs in as it`. A password sign-in with its name answers `401` `Invalid username or password`. `kind` is set when the user is added and never changes. Its tokens are issued, listed and revoked with the admin [token endpoints](#personal-access-tokens):
+
+```bash
+curl -X POST -H "Authorization: Bearer <session token>" -H "Content-Type: application/json" \
+  -d '{"username": "scraper-eu", "role": "viewer"}' http://localhost:8000/api/v1/users/service-accounts
+# {"id": "6f1c...", "username": "scraper-eu", "email": "", "role": "viewer", "kind": "service", "has_password": false, "token_count": 0, ...}
+
+curl -X POST -H "Authorization: Bearer <session token>" -H "Content-Type: application/json" \
+  -d '{"name": "scraper-eu", "expires_in_days": 365}' http://localhost:8000/api/v1/users/6f1c.../tokens
+# {"token": "octo_...", "api_token": {"id": "...", "name": "scraper-eu", "created_by": "admin", ...}}
+```
 
 ### Sign in with a Provider
 
@@ -140,6 +171,8 @@ Projects provide multi-tenancy support. Each project has its own credentials, co
 `exit_headers` (boolean, default `false`) tells the project's clients which exit IP served each request, in `X-Octoprox-*` headers on the `CONNECT` answer and on plain HTTP responses; see [Exit headers]({{ site.baseurl }}/connecting#exit-headers).
 
 `observation_log` (boolean, default `true`) keeps a row in the [observation log]({{ site.baseurl }}/ip-attribution#unique-exits-per-connector) for each sighting of the project's exits; off, the sightings still count in its exit IPs and provider accuracy. `observation_retention_days` (optional, up to 3650; `0` keeps forever) is how many days the project's rows are kept; left out it follows the install's `observation_retention_days`, and on update an empty string clears it.
+
+`exit_reputation` (`off`, `record` or `avoid`; default `off`) decides what the project's [exit reputation]({{ site.baseurl }}/exit-reputation) does with exit reports: nothing, keep them, or also route by them, keeping exits avoided for a site away from it and weighing dynamic connectors by their record there. Five numbers tune the decision: `exit_reputation_avoid_minutes` ("Avoid for", 1 to 10080, default 60) is how long a first avoid lasts, doubled for each recent one up to 7 days; `exit_reputation_half_life_hours` ("Remember for", 1 to 168, default 24) is how many hours an exit IP's reports and avoids take to count half; `exit_reputation_connector_half_life_requests` ("Connector memory", 20 to 10000, default 100) is how many more requests a dynamic connector's blocked reports and requests for a site and place take to count half, an hour at most; `exit_reputation_bad_reports` (1 to 10, default 1) is how many fresh bad reports avoid an exit for a site; and `exit_reputation_bad_share` (1 to 99, default 50) is the least percentage of the IP's recent reports for the site that must be bad. A value out of range is a `422`. See [Settings]({{ site.baseurl }}/exit-reputation#settings).
 
 ### List Projects
 
@@ -282,6 +315,107 @@ Content-Type: application/json
 ```
 
 Each role is `off`, `serves` or `reserved`; connectors left out keep theirs. For a connector that lists countries, `off` takes the country off its list and `serves` or `reserved` adds it, which provisions or drops a pool's proxies there; for one listing none, `off` excludes the country. Every connector is saved, or none: a refused role answers `422`, for instance turning off the only country a connector lists, since an empty list means every country. Answers with the new overview. Editors only.
+
+### Exit Reports
+
+Tell Octoprox what a site did with your requests, for the project's [exit reputation]({{ site.baseurl }}/exit-reputation). Tag each request you might report with `-tag-<id>` in its proxy username (it changes nothing about the routing; one id per request, or one a session reuses; a dynamic connector's block rate counts connections, so report at most one block per connection): the gateway notes what the request went through, and keeps the note 1 to 2 minutes after the tag's last request. Any signed-in role may send reports, a viewer included. See [Reporting exits]({{ site.baseurl }}/exit-reputation#reporting-exits).
+
+```bash
+POST /api/v1/projects/{project_id}/exit-reports
+Content-Type: application/json
+
+{"reports": [
+  {"username": "acme-cc-us-tag-job42", "site": "www.google.com", "verdict": "bad", "reason": "captcha"},
+  {"username": "acme-tag-job43", "site": "https://example.com/search", "verdict": "good"},
+  {"username": "acme-cc-gb-tag-job44", "site": "www.google.co.uk", "verdict": "bad",
+   "connector_id": "8f14e45f-ceea-467a-9cbb-5f4d2c3a1b2e", "ip": "198.51.100.23"}
+]}
+```
+
+Between 1 and 1000 reports. Each has the `username` the request used; a `site` (the host the request went to, or its URL; it counts for that exact host alone, so `google.com` and `www.google.com` are two sites); a `verdict` (`good` or `bad`); and an optional `reason` (up to 64 characters, no control characters). The request's exit is named by the [exit headers]({{ site.baseurl }}/connecting#exit-headers) of its response when they are complete: `connector_id` (`X-Octoprox-Connector-Id`) alone for a dynamic connector, or with `ip` (`X-Octoprox-Exit-Ip`) for a connector with IPs, where it must be the exit IP one of the connector's rows was last seen exiting from. Complete headers win: the tag's note is not read then, and a tag that names another exit is no error. Otherwise the username's `-tag-` names it, and a report naming its exit neither way is refused. A session id never names an exit. A report counts for what the request went through: the exit IP and the connector of a proxy row with IPs, or a dynamic connector alone, at the place the username's `-cc-`, `-st-` and `-city-` name, since its exits are per request.
+
+**Response** (`202`), each report's result in the order sent:
+
+```json
+{
+  "accepted": 2,
+  "rejected": 1,
+  "results": [
+    {"index": 0, "status": "accepted", "ip": "203.0.113.7", "site": "www.google.com", "connector_id": "...", "place": "", "error": null},
+    {"index": 1, "status": "rejected", "ip": null, "site": "example.com", "connector_id": null, "place": null, "error": "no recent request with this tag (a note is kept 1 to 2 minutes after the tag's last request)"},
+    {"index": 2, "status": "accepted", "ip": "198.51.100.23", "site": "www.google.co.uk", "connector_id": "8f14e45f-ceea-467a-9cbb-5f4d2c3a1b2e", "place": "", "error": null}
+  ]
+}
+```
+
+An accepted report's `ip`, `connector_id` and `place` are what it counts for: `ip` null for a dynamic connector, `place` empty for a connector with IPs. A refused report does not hold back the others; when its exit headers did not name the exit, its `error` ends with why (`exit headers: ...`). `409` while the project's `exit_reputation` is `off`, `404` for an unknown project, `422` for a body that breaks the format, and `503` when Redis cannot be reached: send the reports again. The workers apply a report on an exit IP within about a second; a report on a connector counts at the next minute's flush of request counts, when its factor is decided ([how fast]({{ site.baseurl }}/exit-reputation#how-fast-a-dynamic-connector-reacts)).
+
+### Exit Reputation Records
+
+What a project's [exit reputation]({{ site.baseurl }}/exit-reputation#views) holds, whatever the mode: one record per exit IP and site, as the Exit locations page shows them, and its connectors on its busiest sites. Any signed-in role may read them. Times are UTC, written with a `Z`; `404` for an unknown project.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/projects/{project_id}/exit-reputation` | One page of records. Filters: `ip` (a whole IP matches exactly, anything shorter as its start, such as `203.0.113.`), `site` (any part of the site, such as `google`), `status` (`avoided`, `none`, or `any`, the default). `sort`: `last_seen` (the default, newest first) or `reports` (most good and bad reports first). Paging with `limit` (1 to 1000, default 100) and `offset`. `total` is counted no further than 10,000 records past the page: `total_exact` false makes it a lower bound |
+| GET | `/projects/{project_id}/exit-reputation/ips/{ip}` | One IP: how many sites it has a record for (`sites`) and how many avoid it now (`avoided_sites`); up to 100 of those records as `records`, those avoiding it now first, each the one seen last first; and the project's connectors that handed it out, from their exit IPs, as `connectors` (`connector_id`, `connector_name`, `first_seen`, `last_seen`, `sightings`). Both lists are empty for an IP the project has nothing on; `400` for text that is not an IP |
+| POST | `/projects/{project_id}/exit-reputation/summary` | Per IP, its records over every site: `{"ips": [...]}`, up to 1000, answers `{"ips": [{ip, good_reports, bad_reports, sites, avoided_sites, avoided_until}]}` for the IPs with a record, in the order asked, each under the text it was asked by. A read, sent as a `POST` so a page of IPs fits |
+| GET | `/projects/{project_id}/exit-reputation/connectors` | Every connector of the project on each of its busiest sites, for a request naming `place` (a place as `-cc-`, `-st-` and `-city-` name it: `US`, `US/NY`, `US/NY/new_york`, `US//austin`; left out, a request naming none). See below |
+
+A record, read half an hour after the report that began its second avoid:
+
+```json
+{
+  "ip": "203.0.113.7",
+  "site": "google.com",
+  "status": "avoided",
+  "avoided_until": "2026-11-14T10:59:40Z",
+  "good_reports": 1,
+  "bad_reports": 3,
+  "weighted_good": 0.49,
+  "weighted_bad": 1.94,
+  "weighted_avoids": 1.9,
+  "avoid_until": "2026-11-14T10:59:40Z",
+  "first_seen_at": "2026-11-02T14:03:11Z",
+  "last_seen_at": "2026-11-14T08:59:40Z",
+  "last_report_at": "2026-11-14T08:59:40Z",
+  "last_reason": "captcha"
+}
+```
+
+`status` is `avoided` while the avoid is ahead, with `avoided_until` its end, else `none`. The counts are for the record's life; the `weighted_` ones are the recent counts that decide, faded by the project's "Remember for" to the time of the answer, `weighted_avoids` the recent avoids the next one doubles by. `avoid_until` is the last avoid's end, so it may be past.
+
+**Connectors by site.** `GET /projects/{project_id}/exit-reputation/connectors?place=US/NY` answers, for the up to 8 sites with the most reports:
+
+```json
+{
+  "place": "US/NY",
+  "places": [{"place": "US", "label": "United States", "reports": 41}, {"place": "US/NY", "label": "US, NY", "reports": 17}],
+  "sites": ["www.google.com", "www.bing.com"],
+  "reputation_applied": true,
+  "connectors": [
+    {
+      "connector_id": "…", "name": "Oxylabs residential", "credential_type": "oxylabs", "dynamic": true, "weight": 3,
+      "cells": {
+        "www.google.com": {"reputation": 0.65, "reputation_kind": "block_rate", "reputation_place": "US/NY", "blocked": 70,
+                           "requests": 200, "usable_ips": null, "eligible_ips": null, "effective_share": 79.59},
+        "www.bing.com": {"reputation": 1.0, "reputation_kind": "block_rate", "reputation_place": null, "blocked": null,
+                         "requests": null, "usable_ips": null, "eligible_ips": null, "effective_share": 75.0}
+      }
+    },
+    {
+      "connector_id": "…", "name": "DC pool", "credential_type": "static_proxy_provider", "dynamic": false, "weight": 1,
+      "cells": {
+        "www.google.com": {"reputation": 0.5, "reputation_kind": "usable_ips", "reputation_place": null, "blocked": 10,
+                           "requests": 380, "usable_ips": 10, "eligible_ips": 20, "effective_share": 20.41},
+        "www.bing.com": {"reputation": 1.0, "reputation_kind": "usable_ips", "reputation_place": null, "blocked": 0,
+                         "requests": 95, "usable_ips": 20, "eligible_ips": 20, "effective_share": 25.0}
+      }
+    }
+  ]
+}
+```
+
+Each cell is the connector on that site as the [traffic split](#traffic-split) shows one site: its `reputation` and what measures it, the counts behind it, and its `effective_share` of the site's requests. `places` lists the requested places with connector records on any site (the most reported first, at most 20; requests naming no place are the `place` left out), and `reputation_applied` says whether routing weighs the connectors by it: the project's `exit_reputation` is `avoid`. `400` for a `place` that names none.
 
 ---
 
@@ -721,6 +855,8 @@ A cloud proxy is marked terminating and a worker terminates its instance before 
 
 Every proxy response carries the outcome of [IP attribution]({{ site.baseurl }}/ip-attribution): `country` (what routing uses), `country_source` (`database`, `vendor`, `endpoint` or `manual`), `vendor_country` (what the vendor claimed), `location_conflict` (the claim is contradicted), `location_verdict` (`confirmed`, `contradicted` or `open`; null when nothing was claimed or the exit was not judged yet), `location` (region, `state_code`, city, coordinates, ASN and anonymity flags from the databases, when any covers the IP), `state_code`, `state_source`, `city` and `city_source` (the state and city routing matches on: pinned by hand, or resolved from the databases, then the echo endpoint, then the vendor's word, like the country), and `state_verdict` and `city_verdict` (how a claimed state or city fared, with the same values as `location_verdict`). Setting `country` by hand pins it as `manual`: attribution then verifies the exit against it instead of overwriting it.
 
+`exit_ip` is the IP the proxy's [exit reputation]({{ site.baseurl }}/exit-reputation#views) is kept under: its last seen exit, as one canonical text (an IPv4-mapped IPv6 address as the IPv4). It is null on a dynamic gateway, whose every session exits somewhere new, and until the exit is first seen.
+
 ---
 
 ## Metrics
@@ -790,13 +926,14 @@ Oldest first. `avg_latency_ms` is averaged over the point's successful requests,
 
 ### Traffic Split
 
-How the project's traffic divides between its connectors under the current [weights]({{ site.baseurl }}/routing-strategies#connector-weights), expected and observed.
+How the project's traffic divides between its connectors under the current [weights]({{ site.baseurl }}/routing-strategies#connector-weights), expected and observed, and under [exit reputation]({{ site.baseurl }}/exit-reputation#routing) for one site.
 
 ```bash
 GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h
+GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h&site=www.google.com&place=US/NY
 ```
 
-`range` is one of `1h` (default), `6h`, `24h`, `7d`, `30d` and bounds the observed counts.
+`range` is one of `1h` (default), `6h`, `24h`, `7d`, `30d` and bounds the observed counts. `site` (a host, or a URL whose host is taken) asks for each connector's reputation there and the [effective share](#effective-shares) it makes; `place`, with a site, is the place requests to it name, as `-cc-`, `-st-` and `-city-` name it (`US`, `US/NY`, `US/NY/new_york`, `US//austin`; left out, a request naming none). `400` for a site or place that names none.
 
 **Response:**
 ```json
@@ -840,11 +977,40 @@ GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h
       "cost": null,
       "currency": null
     }
-  ]
+  ],
+  "site": null,
+  "place": null,
+  "reputation_applied": false,
+  "reputation_sites": [{"site": "www.google.com", "reports": 58}, {"site": "www.bing.com", "reports": 12}],
+  "reputation_places": []
 }
 ```
 
 `expected_share` (0-100) is what an untargeted request sees right now: every enabled connector with at least one eligible proxy takes `weight / total_weight`. A connector taking nothing has `excluded_reason` set to `disabled`, `traffic_limit` (blocked by its [traffic limit]({{ site.baseurl }}/traffic-limits)), `reserved_only` (it serves only requests naming a country it [reserves]({{ site.baseurl }}/routing-strategies#reserved-and-excluded-countries), so no untargeted ones) or `no_eligible_proxies`. `observed_share` is the connector's part of the requests in the window, `null` when there were none; `observed_bytes` is its traffic in the window and `cost` what that traffic costs at the connector's price per GB (`null` when unpriced). The observed figures come from the connector's own metrics history, so they survive proxy rotation. The response also carries `observed_bytes` for the whole project.
+
+#### Effective shares
+
+`reputation_sites` lists the sites with exit reputation records for the project, the most reported first, at most 20, each report counted once; with a `site`, `reputation_places` lists the places requests to it named in reports through a connector, the same way (`place`, a `label` such as `United States`, `US, NY` or `US, NY, new_york`, and `reports`; requests naming no place are the `place` left out). With a `site`, the response names the `site` and `place` it was weighed for, and every connector gains what [exit reputation]({{ site.baseurl }}/exit-reputation#routing) says of it there, read from the project's records:
+
+```json
+{
+  "name": "Oxylabs residential",
+  "weight": 3,
+  "expected_share": 75.0,
+  "reputation": 0.65,
+  "reputation_kind": "block_rate",
+  "reputation_place": "US",
+  "blocked": 70,
+  "requests": 200,
+  "usable_ips": null,
+  "eligible_ips": null,
+  "effective_weight": 1.95,
+  "effective_share": 79.59
+}
+```
+
+- `reputation` is what the connector's weight is multiplied by for the site, 1 when nothing says otherwise. A dynamic connector's (`reputation_kind` `block_rate`) is one less its recent blocked reports per recent request there, at least 0.1, in steps of 0.05, taken from the finest level of the place with 20 recent requests or more (`reputation_place`: the city, else its state, else its country; `""` for requests naming no place, whose figure is its own); `blocked` and `requests` are the recent counts behind it, faded by the project's "Connector memory" (those of the finest level with a record while no level has enough requests, `null` with none). The factor is decided once a minute and moves only once the block rate has moved a full step from it, so it can sit less than a step from what `blocked` and `requests` give. A connector with IPs (`usable_ips`) is weighed by the share of its rows eligible for requests to the site from the place (domain filters, reservations and the place applied as routing applies them) whose exit IP is not avoided for the site: `usable_ips` of `eligible_ips`, 0 when none is usable; its `blocked` and `requests` are its record for the site, for reading only.
+- `effective_weight` is the weight times the reputation of a connector serving requests to the site from the place (0 for one that serves none of them), and `effective_share` the connector's part of those requests by these weights. `reputation_applied` is true when they move routing: a site was given and the project's `exit_reputation` is `avoid`. Otherwise `effective_weight` is the weight of a connector serving the site from the place, 0 for one that does not, and `effective_share` its share by weight among them, and the reputation is shown for what it would do. `excluded_reason` stays the reason for requests naming no site and no place, so a connector reserving the place's country can have one and still take every request. Without a site, `reputation` is 1, the other reputation fields `null`, and the effective figures the configured ones.
 
 ### Hosts
 
@@ -1015,7 +1181,7 @@ The examples seen last first. `kind` keeps one kind (leave it out for all of the
 }
 ```
 
-`kind` is one of `upstream_timeout`, `upstream_unreachable`, `upstream_rejected`, `upstream_error`, `client_closed`, `interrupted`, `preflight_mismatch` (the failures the request metrics count), `no_proxy_available`, `all_proxies_quarantined`, `traffic_limit_exceeded`, `invalid_location` (refused before a proxy was used), or `intercepted_request_failed` (one request inside a TLS-intercepted connection). `status` is what the client was answered; `upstream_status` is the vendor's HTTP status when an HTTP upstream refused the request, and `upstream_message` what it said about it besides: its error headers (such as `x-brd-error`) and the text of its error page, `null` when it said nothing more. `latency_ms` is the average time until the failure. `step` is the [step]({{ site.baseurl }}/metrics#latency-where-the-time-goes) of the request it failed in (`route`, `preflight`, `connect`, `handshake` or `response`), and `steps` how long each step it went through took; both are `null` for a request refused before a proxy was chosen and inside an intercepted connection. `count` is how many identical failures the example stands for, between `first_at` and `last_at`, from every gateway; `session_id` and `steps` are the first one's. `id` stays the same while the failure recurs. `total` is how many examples are kept and `max_entries` how many are kept per kind.
+`kind` is one of `upstream_timeout`, `upstream_unreachable`, `upstream_rejected`, `upstream_error`, `client_closed`, `interrupted`, `preflight_mismatch` (the failures the request metrics count), `no_proxy_available`, `all_proxies_quarantined`, `exits_avoided` (every exit that could serve the request is avoided for its site by [exit reputation]({{ site.baseurl }}/exit-reputation#routing), or a sticky session's exit is), `traffic_limit_exceeded`, `invalid_location` (refused before a proxy was used), or `intercepted_request_failed` (one request inside a TLS-intercepted connection). `status` is what the client was answered; `upstream_status` is the vendor's HTTP status when an HTTP upstream refused the request, and `upstream_message` what it said about it besides: its error headers (such as `x-brd-error`) and the text of its error page, `null` when it said nothing more. `latency_ms` is the average time until the failure. `step` is the [step]({{ site.baseurl }}/metrics#latency-where-the-time-goes) of the request it failed in (`route`, `preflight`, `connect`, `handshake` or `response`), and `steps` how long each step it went through took; both are `null` for a request refused before a proxy was chosen and inside an intercepted connection. `count` is how many identical failures the example stands for, between `first_at` and `last_at`, from every gateway; `session_id` and `steps` are the first one's. `id` stays the same while the failure recurs. `total` is how many examples are kept and `max_entries` how many are kept per kind.
 
 `newest` marks where the log stood when the first page was read. To tell how many examples are new or have happened again since, poll the head with it:
 
@@ -1091,7 +1257,7 @@ POST /api/v1/backup/export
 | Field | Type | Notes |
 |-------|------|-------|
 | `passphrase` | string | Minimum 8 characters. Required again to import - it cannot be recovered. |
-| `include_metrics` | boolean | Include history: proxy/project metrics, exit IP observations and per-connector exit IPs. Default `false` (smaller file). |
+| `include_metrics` | boolean | Include history: proxy/project metrics, exit IP observations, per-connector exit IPs and [exit reputation]({{ site.baseurl }}/exit-reputation) records. Default `false` (smaller file). |
 | `include_database_files` | boolean | Include the bytes of uploaded and downloaded IP databases. Default `false`; a city database is tens of megabytes. Their rows are always included, so without the files the restored instance lists them without a file, ready to re-upload or refresh. |
 
 **Response:** the backup file as `application/octet-stream` with a
@@ -1104,8 +1270,8 @@ and database records, the [audit log](#audit-log), and the install's system
 settings (the audit retention and the Octoprox Enterprise license key), under
 the payload keys `audit_log` and `system_settings`. The audit log travels
 whether or not history is included. Optionally the file also
-carries the history (metrics and attribution observations) and the IP database
-files.
+carries the history (metrics, attribution observations and exit reputation
+records) and the IP database files.
 
 ### Import Backup
 
@@ -1176,6 +1342,7 @@ again with credentials that are valid in the backup.
   "geo_database_blobs": 0,
   "ip_observations": 0,
   "connector_exit_ips": 0,
+  "exit_ip_reputation": 0,
   "system_settings": 0,
   "audit_log": 48,
   "kept_current_user": true,
@@ -1321,7 +1488,7 @@ Editors and viewers receive `403`.
 | `instances` | Every live process, grouped by the role it registered with (`all`, `api`, `gateway`, `controller`, `worker`; a role with no live process is absent), each list sorted by instance id. An entry carries `instance_id`, `role`, the process's last heartbeat `snapshot` (below) and `age_seconds`, how old that snapshot is. `{}` when Redis cannot be read. Echo processes do not heartbeat and are never listed. |
 | `controller` | `leader`: the instance id holding the controller lease (`null` while none does, during a failover); `changes` and `compiled_at`: how far the leader's last compile read the change stream (an entry ID) and when it was made, from its heartbeat; `changes_head`: the change stream's newest entry ID, read now, ahead of `changes` while the leader has changes to compile (`null` while there is no stream); `standby_poll_ms` and `lease_ttl_ms`: how often a standby asks for the lease and how long a failed leader holds it, the numbers the page words the takeover from; `error` when Redis cannot be read. |
 | `feed` | The routing feed in Redis: `digest`, `changes`, `compiled_at` and `sections` of its head (all `null` while there is none), and `gateways`: per gateway the `digest` and `changes` it applied, `in_sync` (it applied the current head) and `age_seconds` since it last applied an update, which grows while nothing changes. `error` when Redis cannot be read or the head was published by another release. |
-| `streams` | `by_name`: every work stream by name, `jobs.<kind>` for each of the fourteen job kinds, then `sightings` and `observations`, each with `length` (entries queued and running, since workers delete each entry once handled), `pending` (delivered to a worker and not acknowledged yet: running, or waiting to be reclaimed), `queued` (`length` less `pending`, never below zero: the backlog), `consumers` (worker processes in the `workers` group, a stopped one until index hygiene removes it, within the hour) and `oldest_seconds` (the age of the oldest entry, queued or running, by Redis's clock; `null` when the stream is empty). A stream nobody created yet reads as zeros. `error` when Redis cannot be read. |
+| `streams` | `by_name`: every work stream by name, `jobs.<kind>` for each of the fourteen job kinds, then `sightings`, `observations` and `exit_reports`, each with `length` (entries queued and running, since workers delete each entry once handled), `pending` (delivered to a worker and not acknowledged yet: running, or waiting to be reclaimed), `queued` (`length` less `pending`, never below zero: the backlog), `consumers` (worker processes in the `workers` group, a stopped one until index hygiene removes it, within the hour) and `oldest_seconds` (the age of the oldest entry, queued or running, by Redis's clock; `null` when the stream is empty). A stream nobody created yet reads as zeros. `error` when Redis cannot be read. |
 | `inventory` | Exact counts of projects, credentials, connectors, proxies, users and providers, and `proxies_by_status` from the proxies' status column. |
 | `projects` | Per-project credential, connector and proxy counts, busiest first. |
 | `database` | Database size, per-table size (indexes included) and server connections. Each api process's own pool is in its snapshot. |
@@ -1340,7 +1507,7 @@ The answer is the same whichever api process the load balancer picked: every pro
 | `api` | An api process's Postgres pool (`pool_size`, `pool_checked_out`, `pool_overflow`). |
 | `gateway` | A gateway's proxy listener (`listener_port`, `listening`, `active_connections`); the feed it applied (`feed_digest`, `feed_changes`, `feed_applied_at`, `feed_age_seconds`); what it keeps out of routing on its own (`retired_slots`, `local_quarantines`); `in_flight` transfers; its traffic since it started (`requests`, `successes`, `failures`, `bytes_sent`, `bytes_received`, `failures_by_kind`); its buffers (`pending_metric_deltas`, `metric_flush_failures`, `rate_limit_errors`, `observations_pending`, `observations_dropped`, `sightings_pending`, `sightings_dropped`, `failure_log_dropped`, `mitm_captures_dropped`); `preflight_checks` and `preflight_rejections`; its IP databases (`geo_databases_loaded`, `geo_database_errors`, `geo_databases_missing`); and `tunnels`, one entry per tunnel protocol it terminates. |
 | `controller` | `is_leader` and `lease_terms`; the last compile (`changes`, `compiled_at`, `compiles`, `compile_ms`, `compile_error`) and publish (`publishes`, `published_at`, `publish_ms`, `publish_error`, `sections`, `sections_written`, `sections_removed`); `quarantined` proxies and `blocked_connectors` as published. A standby reports what it last saw while it led. |
-| `worker` | `jobs`: per job kind it takes, `runs`, `failures`, `consecutive_failures` (the failures in a row up to now, as for a loop), `duration_seconds` and `in_flight`; `sightings_consumed` and `sightings_dropped`, `observations_consumed` and `observations_dropped` (dropped: given up after repeated deliveries). |
+| `worker` | `jobs`: per job kind it takes, `runs`, `failures`, `consecutive_failures` (the failures in a row up to now, as for a loop), `duration_seconds` and `in_flight`; `sightings_consumed` and `sightings_dropped`, `observations_consumed` and `observations_dropped`, `exit_reports_consumed` and `exit_reports_dropped` (dropped: given up after repeated deliveries). |
 
 A process of role `all` carries all four role sections. `snapshot` is `null` for a process that could not build one, or that runs another release; it is listed anyway.
 
@@ -1388,7 +1555,7 @@ and sets `"truncated": true`.
   },
   "inventory": {
     "projects": 2, "credentials": 8, "connectors": 9, "connectors_enabled": 2,
-    "proxies": 29, "users": 1, "users_by_role": { "admin": 1 },
+    "proxies": 29, "users": 1, "users_by_role": { "admin": 1 }, "users_by_kind": { "person": 1 },
     "proxies_by_status": { "healthy": 19, "unhealthy": 10 }
   },
   "database": {
@@ -1466,11 +1633,11 @@ the leading controller, under the one `controller` lease their `lease` names;
 it is `instance` for the loops every process of a role runs. A standby
 controller's singleton loops are legitimately at `"runs": 0`. The job runners
 of a worker are named after their kind (`job_runner_health`), one per kind it
-takes, beside `sighting_ingest` and `observation_ingest`.
+takes, beside `sighting_ingest`, `observation_ingest` and `exit_report_ingest`.
 
 **How the System page reads it.**
 
-- **The work streams table** shows one row per stream: length, pending, queued, consumers and the oldest entry's age. Two hints read the numbers: *queued with no live worker: no worker takes this kind* shows when entries are queued and either the group has no consumer or none of the live workers, by their heartbeats (`worker.jobs`; every worker takes the sightings and the observations), takes the stream, so it shows within a heartbeat after the last such worker stops, while the group still lists it as a consumer until index hygiene removes it. *Queued stays above zero: too few workers for this kind* shows once every one of the page's own readings has found a backlog for a minute, since a single reading can land in a burst of periodic jobs that drains in milliseconds.
+- **The work streams table** shows one row per stream: length, pending, queued, consumers and the oldest entry's age. Two hints read the numbers: *queued with no live worker: no worker takes this kind* shows when entries are queued and either the group has no consumer or none of the live workers, by their heartbeats (`worker.jobs`; every worker takes the sightings, the observations and the exit reports), takes the stream, so it shows within a heartbeat after the last such worker stops, while the group still lists it as a consumer until index hygiene removes it. *Queued stays above zero: too few workers for this kind* shows once every one of the page's own readings has found a backlog for a minute, since a single reading can land in a burst of periodic jobs that drains in milliseconds.
 - **Positions are times.** Every "how far" is an entry ID of a stream, shown as the time it carries: the leader's compile, the feed head's, each gateway's applied feed, and each api's and worker's definitions (their **Definitions** rows: how far the process has read the change stream, and how often it read in full instead, by reason). A position at or past `changes_head` is *in sync*; one behind it reads *behind, at <time>*, where the process has read through, coloured as late only once the newest change is 30 seconds older than the process's snapshot, so the moment between a save and the next heartbeat is not flagged. `0-0` reads *before any change*. IDs compare as two numbers, milliseconds then sequence, never as text.
 - **The takeover** is worded from `standby_poll_ms` and `lease_ttl_ms`: within a poll of the leader stopping cleanly, or within the TTL and a poll of it failing, each rounded up to whole seconds.
 

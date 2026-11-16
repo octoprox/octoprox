@@ -1,11 +1,11 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Eye, EyeOff, Info, AlertTriangle, Shield, MapPin } from 'lucide-react'
+import { Eye, EyeOff, Info, AlertTriangle, Shield, ShieldCheck, MapPin } from 'lucide-react'
 import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchGeoDatabases, fetchGeoSettings, updateProject } from '../api/client'
-import type { ConflictRule, ContradictedAction, UnknownAction } from '../api/client'
+import type { ConflictRule, ContradictedAction, ExitReputationMode, UnknownAction } from '../api/client'
 import { locationExamples, scenarioSteps, ROW_KIND_FACTS } from './locationExamples'
 import type { RowKind, Ask } from './locationExamples'
 import { RichSelect, RichSelectOption } from './RichSelect'
@@ -13,6 +13,8 @@ import { AdminLink } from './AdminLink'
 import { EntityHistory } from './audit/EntityHistory'
 import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, Segmented, InfoTip } from './ui'
 import { isInUse } from '../utils/geo'
+import { DOCS_URL } from '../utils/docs'
+import { plural } from '../utils/format'
 import { useToast } from '../contexts/ToastContext'
 import { useProject } from '../contexts/ProjectContext'
 
@@ -59,7 +61,9 @@ const mitmModeInfo: Record<string, { color: string; icon: typeof Info; text: str
   },
 }
 
-type SettingsTab = 'general' | 'tls' | 'location' | 'history'
+/** A tab a link elsewhere can open the project settings on. */
+export type ProjectSettingsTab = 'general' | 'tls' | 'location' | 'reputation'
+type SettingsTab = ProjectSettingsTab | 'history'
 
 const contradictedOptions: RichSelectOption[] = [
   { value: 'evidence', label: 'Route on the evidence', description: 'Route the proxy on where the databases or the echo put the exit; the vendor\'s claim is shown as contradicted' },
@@ -79,6 +83,26 @@ const conflictOptions: RichSelectOption[] = [
   { value: 'any', label: 'Any', description: 'One independent source agreeing with the vendor confirms the claim, and routing uses that source\'s answer; none agreeing is a contradiction. Never leaves a claim open while a database answers' },
 ]
 
+const reputationModeOptions: RichSelectOption[] = [
+  { value: 'off', label: 'Off', description: 'Nothing is recorded and exit reports are refused' },
+  { value: 'record', label: 'Record', description: 'Reports and the requests they are measured against are kept and shown; routing is unchanged' },
+  { value: 'avoid', label: 'Avoid', description: 'Routing for a site skips the IPs avoided there and weighs each connector by its reputation there' },
+]
+
+/** What a sticky session whose row's IP is avoided for a site does: the Location tab's Move refused sessions, as a choice. */
+const sessionMoveOptions = [
+  { value: 'move', label: 'Move', description: 'its next request to the site moves it to another row, which it keeps from then on, for every site' },
+  { value: 'refuse', label: 'Refuse', description: 'its requests to the site get 502 until the avoid ends; its requests to other sites keep the row' },
+] as const
+
+/** Minutes as the tab's summary reads them: whole hours as hours. */
+const minutesText = (minutes: number): string =>
+  minutes % 60 === 0 ? `${minutes / 60} ${plural(minutes / 60, 'hour', 'hours')}` : `${minutes} ${plural(minutes, 'minute', 'minutes')}`
+
+/** A whole number held within its bounds as it is typed; empty while it is retyped, which the input's required check catches. */
+const boundedInt = (text: string, min: number, max: number): number | undefined =>
+  text === '' ? undefined : Math.min(max, Math.max(min, parseInt(text) || min))
+
 interface ProjectFormProps {
   project?: ProjectSummary
   onSave: (data: ProjectCreate | ProjectUpdate) => void
@@ -87,13 +111,15 @@ interface ProjectFormProps {
   formId: string
   /** Told whether the History tab is showing, so the panel can hide its Save and Delete meanwhile. */
   onHistoryChange?: (showing: boolean) => void
+  /** A tab a link asked for: shown at once, and again for each new request (a new object). */
+  tabRequest?: { tab: ProjectSettingsTab } | null
 }
 
 /**
  * Project settings form body. Rendered inside the docked Inspector opened from
  * the project switcher and on the project selection page (create and edit).
  */
-export function ProjectForm({ project, onSave, error, formId, onHistoryChange }: ProjectFormProps) {
+export function ProjectForm({ project, onSave, error, formId, onHistoryChange, tabRequest }: ProjectFormProps) {
   const isEdit = !!project
   const toast = useToast()
   // The install default the Location tab inherits, for the worked example; the form works without it.
@@ -119,13 +145,21 @@ export function ProjectForm({ project, onSave, error, formId, onHistoryChange }:
     exit_headers: project?.exit_headers ?? false,
     observation_log: project?.observation_log ?? true,
     observation_retention_days: project?.observation_retention_days ?? undefined,
+    exit_reputation: project?.exit_reputation ?? 'off',
+    exit_reputation_avoid_minutes: project?.exit_reputation_avoid_minutes ?? 60,
+    exit_reputation_half_life_hours: project?.exit_reputation_half_life_hours ?? 24,
+    exit_reputation_connector_half_life_requests: project?.exit_reputation_connector_half_life_requests ?? 100,
+    exit_reputation_bad_reports: project?.exit_reputation_bad_reports ?? 1,
+    exit_reputation_bad_share: project?.exit_reputation_bad_share ?? 50,
   })
   const [showPassword, setShowPassword] = useState(false)
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general')
+  const [activeTab, setActiveTab] = useState<SettingsTab>(tabRequest?.tab ?? 'general')
   const changeTab = (tab: SettingsTab) => {
     setActiveTab(tab)
     onHistoryChange?.(tab === 'history')
   }
+  // A link asking again while the form is open switches it there, keeping what was typed.
+  useEffect(() => { if (tabRequest) changeTab(tabRequest.tab) }, [tabRequest])
   // The worked example: what the operator has and what a client asks for.
   const [exampleKind, setExampleKind] = useState<RowKind>('pooled')
   const [exampleAsk, setExampleAsk] = useState<Ask>('country')
@@ -153,11 +187,15 @@ export function ProjectForm({ project, onSave, error, formId, onHistoryChange }:
   const modeInfo = mitmModeInfo[currentMode] || mitmModeInfo.off
   const ModeIcon = modeInfo.icon
 
+  const reputationMode: ExitReputationMode = formData.exit_reputation ?? 'off'
+  const reputationAvoids = reputationMode === 'avoid'
+
   return (
     <form id={formId} onSubmit={(e) => { e.preventDefault(); onSave(formData) }} className="space-y-4">
       <Tabs<SettingsTab>
         tabs={[
           { id: 'general', label: 'General' }, { id: 'tls', label: 'TLS' }, { id: 'location', label: 'Location' },
+          { id: 'reputation', label: 'Exit reputation' },
           ...(isEdit ? [{ id: 'history' as const, label: 'History' }] : []),
         ]}
         active={activeTab}
@@ -454,13 +492,147 @@ export function ProjectForm({ project, onSave, error, formId, onHistoryChange }:
         </div>
       )}
 
+      {activeTab === 'reputation' && (
+        <div className="space-y-3">
+          <p className="text-xs text-fg-muted leading-relaxed">
+            Clients tell Octoprox when a site blocked a request by sending an exit report through the API, naming the request by a -tag- in its proxy username or by its exit headers. A site is the exact host a request went to: www.google.com and google.com are two sites.
+          </p>
+          <div>
+            <Label className="text-xs">Mode</Label>
+            <RichSelect options={reputationModeOptions} value={reputationMode} onChange={(v) => setFormData({ ...formData, exit_reputation: v as ExitReputationMode })} className="pointer-coarse:[&>button]:min-h-11" />
+          </div>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-3">
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Avoid for (minutes)</span>
+                  <InfoTip label="About Avoid for">How long a reported exit IP stays away from a site. Each further avoid while earlier ones are remembered doubles it, never past 7 days.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={1} max={10080} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_avoid_minutes ?? ''}
+                onChange={(e) => setFormData({ ...formData, exit_reputation_avoid_minutes: boundedInt(e.target.value, 1, 10080) })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Bad reports to avoid</span>
+                  <InfoTip label="About bad reports to avoid">Fresh bad reports an exit IP needs before it is avoided for a site.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={1} max={10} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_bad_reports ?? ''}
+                onChange={(e) => setFormData({ ...formData, exit_reputation_bad_reports: boundedInt(e.target.value, 1, 10) })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Minimum bad share (%)</span>
+                  <InfoTip label="About the minimum bad share">At least this share of the site's recent reports about an IP must be bad. At 50, a bad report after two good ones avoids nothing; clients that report only failures are always at 100.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={1} max={99} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_bad_share ?? ''}
+                onChange={(e) => setFormData({ ...formData, exit_reputation_bad_share: boundedInt(e.target.value, 1, 99) })}
+              />
+            </div>
+          </div>
+          {/* The two memories side by side, stacked on a phone, where Connector memory's label would take two lines. */}
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(12rem,1fr))] gap-3">
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Remember for (hours)</span>
+                  <InfoTip label="About Remember for">For exit IPs: their reports, and the avoids a repeat avoid doubles by, count half after this many hours, so an IP that recovered comes back on its own.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={1} max={168} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_half_life_hours ?? ''}
+                onChange={(e) => setFormData({ ...formData, exit_reputation_half_life_hours: boundedInt(e.target.value, 1, 168) })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Connector memory (requests)</span>
+                  <InfoTip label="About Connector memory">A dynamic connector's block rate for a site and place counts its recent requests there: evidence counts half after this many more requests, and at least half every hour.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={20} max={10000} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_connector_half_life_requests ?? ''}
+                // Raised to 20 only on leaving the field, so 100 can be typed digit by digit.
+                onChange={(e) => setFormData({ ...formData, exit_reputation_connector_half_life_requests: boundedInt(e.target.value, 1, 10000) })}
+                onBlur={(e) => setFormData({ ...formData, exit_reputation_connector_half_life_requests: boundedInt(e.target.value, 20, 10000) })}
+              />
+            </div>
+          </div>
+          {(() => {
+            const minutes = formData.exit_reputation_avoid_minutes ?? 60
+            const hours = formData.exit_reputation_half_life_hours ?? 24
+            const memory = formData.exit_reputation_connector_half_life_requests ?? 100
+            const reports = formData.exit_reputation_bad_reports ?? 1
+            const share = formData.exit_reputation_bad_share ?? 50
+            return (
+              <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
+                <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>
+                  {reputationAvoids ? '' : 'Once the mode avoids: '}{reports} fresh bad {plural(reports, 'report keeps', 'reports keep')} an exit IP away from a site for {minutesText(minutes)}. Each further avoid doubles that while the earlier ones are remembered, counting half after {hours} {plural(hours, 'hour', 'hours')}, never past 7 days. At least {share}% of the IP's recent reports for the site must be bad, and good reports can end an avoid early. A dynamic connector is weighed for a site by the share of its recent requests there reported blocked: evidence counts half after {memory.toLocaleString()} more {plural(memory, 'request', 'requests')}, and at least half every hour.
+                </span>
+              </div>
+            )
+          })()}
+          <fieldset>
+            <legend className="text-xs font-medium text-fg-muted mb-1">
+              <span className="inline-flex items-center gap-1.5">
+                <span>Move refused sessions</span>
+                <InfoTip label="About moving refused sessions">For a sticky session (-sessid-) whose row's IP becomes avoided for a site; other strategies simply use another row. The same setting as on the Location tab.</InfoTip>
+              </span>
+            </legend>
+            {/* Both choices with what each does, a whole line to tap on touch. */}
+            <div className="space-y-1">
+              {sessionMoveOptions.map((option) => (
+                <label key={option.value} className="flex items-start gap-2 py-0.5 text-xs leading-relaxed text-fg-muted cursor-pointer pointer-coarse:min-h-11 pointer-coarse:items-center">
+                  <input
+                    type="radio" name="exit-reputation-session-move" value={option.value} className="w-4 h-4 mt-0.5 flex-none pointer-coarse:mt-0"
+                    checked={(formData.location_session_move ?? false) === (option.value === 'move')}
+                    onChange={() => setFormData({ ...formData, location_session_move: option.value === 'move' })}
+                  />
+                  <span><span className="font-medium text-fg">{option.label}</span>: {option.description}.</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <div className="rounded-lg border border-line p-3 text-xs leading-relaxed text-fg-muted space-y-1.5">
+            <div className="font-medium text-fg">What Avoid acts on</div>
+            <p><span className="text-fg">Connectors with IPs</span> (static lists, ISP and datacenter ports, cloud instances, pooled slots): an IP avoided for a site is not routed to for that site, and the connector's weight there follows its usable IPs: 12 of 20 usable gives ×0.6.</p>
+            <p><span className="text-fg">Dynamic connectors</span>: weighted for a site by their block rate there, per requested location, decided once a minute: 30% of their recent requests reported blocked gives ×0.7, never under ×0.1. Their IPs are not avoided one by one.</p>
+            <p>No preflight is needed: reports name the exit themselves.</p>
+          </div>
+          <a href={`${DOCS_URL}/exit-reputation`} target="_blank" rel="noreferrer" className="inline-flex items-center text-xs text-primary hover:brightness-110 pointer-coarse:min-h-11">
+            How exit reputation works →
+          </a>
+        </div>
+      )}
+
       {activeTab === 'history' && project && <EntityHistory entityType="project" entityId={project.id} />}
     </form>
   )
 }
 
 /** Settings of the open project in a docked panel; the shell shows it beside any project page. */
-export function ProjectPanel({ project, onClose }: { project: ProjectSummary; onClose: () => void }) {
+export function ProjectPanel({ project, onClose, tabRequest }: { project: ProjectSummary; onClose: () => void; tabRequest?: { tab: ProjectSettingsTab } | null }) {
   const queryClient = useQueryClient()
   const { refreshProject } = useProject()
   const toast = useToast()
@@ -489,7 +661,7 @@ export function ProjectPanel({ project, onClose }: { project: ProjectSummary; on
         </>
       )}
     >
-      <ProjectForm key={project.id} project={project} onSave={(data) => save.mutate(data)} error={save.error?.message} formId="project-form" onHistoryChange={(showing) => setHistoryOf(showing ? project.id : null)} />
+      <ProjectForm key={project.id} project={project} onSave={(data) => save.mutate(data)} error={save.error?.message} formId="project-form" onHistoryChange={(showing) => setHistoryOf(showing ? project.id : null)} tabRequest={tabRequest} />
     </Inspector>
   )
 }

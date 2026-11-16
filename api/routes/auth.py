@@ -113,13 +113,16 @@ async def _refuse_login(
 async def login(request: Request, login_req: LoginRequest, session: DbDep) -> LoginResponse:
     """Authenticate user against database and return JWT token.
 
-    An unknown user, a user without a password and a wrong password are refused alike; the audit log hears which.
+    An unknown user, a service account, a user without a password and a wrong password are refused alike; the audit
+    log hears which.
     """
     repo = UserRepository(session)
     user = await repo.get_by_username(login_req.username)
 
     if user is None:
         await _refuse_login(request, session, login_req, "unknown user")
+    if user.is_service:
+        await _refuse_login(request, session, login_req, "service account", user)
     if not user.password_hash:
         await _refuse_login(request, session, login_req, "no password set", user)
     if not verify_password(login_req.password, user.password_hash):

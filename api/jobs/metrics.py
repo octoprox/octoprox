@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from collections import Counter
 from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -14,14 +15,20 @@ import structlog
 
 from api.core import utc_now
 from api.core.roles import JobKind
-from api.core.stats import MetricDelta
+from api.core.stats import HOST_OVERFLOW, MetricDelta, RequestCount
 from api.db.audit_repository import AuditRepository, SystemSettingsRepository
 from api.db.geo_repository import ObservationRepository
 from api.db.redis import PROJECT_WINDOWS, PROXY_WINDOWS, TUNNEL_PEER_WINDOWS
 from api.db.repository import MetricsRepository, ProjectRepository, ProxyRepository
+from api.db.reputation_repository import ExitReputationRepository
 from api.jobs.job import Job, JobBatch
+from api.reputation.record import ConnectorSiteKey
+from api.reputation.signal import ReputationSignal
+from api.reputation.site import counted_site
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from api.db.redis import MetricWindows, RedisClient
     from api.db.session import SessionFactory
     from api.geo.service import GeoService
@@ -45,7 +52,8 @@ FLUSH_RECORD_AGE = timedelta(days=1)
 
 
 class MetricsFlushJob(Job):
-    """Moves the live metrics windows into Postgres history and totals, as one flush named by its job entry's ID.
+    """Moves the live metrics windows into Postgres history and totals, and the requests and reports exit reputation
+    measures connectors by into their records, as one flush named by its job entry's ID.
 
     The windows are taken into the flush's staging hash, committed with the ID in ``metric_flushes``, then cleared.
     """
@@ -57,6 +65,7 @@ class MetricsFlushJob(Job):
     def __init__(self, session_factory: SessionFactory, redis_client: RedisClient) -> None:
         self._session_factory = session_factory
         self._redis = redis_client
+        self._signal = ReputationSignal(redis_client)
 
     async def run(self, batch: JobBatch) -> None:
         """Take, commit and clear the flush; a delivery whose ID is recorded already only clears."""
@@ -80,6 +89,7 @@ class MetricsFlushJob(Job):
                 tunnel_peer_count=len(windows.tunnel_peers),
                 host_count=len(windows.hosts),
                 failure_count_rows=len(windows.failures),
+                site_request_count=len(windows.site_requests),
                 # A slow take is Redis or a busy event loop, a slow write Postgres.
                 take_ms=round((taken - started) * 1000),
                 write_ms=round((committed - taken) * 1000),
@@ -104,9 +114,11 @@ class MetricsFlushJob(Job):
             return await MetricsRepository(session).flush_recorded(flush_id)
 
     async def _commit(self, flush_id: str, windows: MetricWindows) -> bool:
-        """Write the windows' history rows and totals in one transaction that records the flush; False when it was recorded.
+        """Write the windows' history rows and totals, and the requests and reports into the connectors' exit reputation
+        records, in one transaction that records the flush; False when it was recorded.
 
-        A window whose entity is gone is dropped, and logged.
+        A window whose entity is gone is dropped, and logged. The records go last, so they stay locked no longer than the
+        commit takes; the runtime signal follows the commit.
         """
         statuses = await self._statuses(windows.proxies)
         async with self._session_factory() as session:
@@ -150,8 +162,48 @@ class MetricsFlushJob(Job):
                     "Dropping failure counts of projects or connectors that no longer exist",
                     row_count=len(dropped_failures),
                 )
+
+            evidence, dynamic = await self._reputation_evidence(session, windows)
+            changes = await ExitReputationRepository(session).apply_evidence(evidence, dynamic, utc_now())
             await session.commit()
+        await self._signal.send(changes)
         return True
+
+    @staticmethod
+    async def _reputation_evidence(
+        session: AsyncSession, windows: MetricWindows
+    ) -> tuple[dict[ConnectorSiteKey, RequestCount], set[str]]:
+        """What the windows carried for the connectors' exit reputation records, keyed as the records, and which of the
+        connectors are dynamic.
+
+        The site windows give every connector's blocked and good reports and a dynamic connector's requests, at every
+        level of the requested place; the host windows give a connector's with IPs requests, at no place. A dynamic
+        connector takes nothing from the host windows, which count its requests whatever their place and its tunnel
+        devices' too. It is told by the requests gateways counted for it in the site windows, else by its rows, one read
+        for the connectors the windows name besides.
+        """
+        evidence: dict[ConnectorSiteKey, RequestCount] = {}
+        dynamic: set[str] = set()
+        for entity, counts in windows.site_requests.items():
+            site = ConnectorSiteKey(*entity)
+            if counts.requests:
+                # Gateways count requests in a site window only through a dynamic connector; reports, through any.
+                dynamic.add(site.connector_id)
+            for key in site.levels():
+                evidence.setdefault(key, RequestCount()).merge(counts)
+        hosts: Counter[ConnectorSiteKey] = Counter()
+        for (project_id, connector_id, host), delta in windows.hosts.items():
+            if host == HOST_OVERFLOW or delta.request_count <= 0:
+                continue
+            host_site = counted_site(host)
+            if host_site is not None:
+                hosts[ConnectorSiteKey(project_id, connector_id, host_site, "")] += delta.request_count
+        named = {key.connector_id for key in hosts} | {key.connector_id for key in evidence}
+        dynamic |= await ProxyRepository(session).dynamic_connectors(named - dynamic)
+        for key, requests in hosts.items():
+            if key.connector_id not in dynamic:
+                evidence.setdefault(key, RequestCount()).requests += requests
+        return evidence, dynamic
 
     async def _statuses(self, proxy_ids: Iterable[str]) -> dict[str, str]:
         """Each proxy's status as its column holds it, for the status its history row records; gone proxies are absent."""
@@ -164,17 +216,25 @@ class MetricsFlushJob(Job):
 
 
 class CompactionJob(Job):
-    """Folds old metrics rows into coarser ones and applies every retention; each step is set-based and safe to repeat."""
+    """Folds old metrics rows into coarser ones and applies every retention; each step is set-based and safe to repeat.
+
+    Args:
+        reputation_retention_days: Days an exit reputation record is kept after the day it was last seen
+            (``exit_reputation_retention_days``); 0 keeps them all.
+    """
 
     kind = JobKind.COMPACTION
 
-    def __init__(self, session_factory: SessionFactory, geo_service: GeoService) -> None:
+    def __init__(
+        self, session_factory: SessionFactory, geo_service: GeoService, *, reputation_retention_days: int
+    ) -> None:
         self._session_factory = session_factory
         self._geo = geo_service
+        self._reputation_retention_days = reputation_retention_days
 
     async def run(self, batch: JobBatch) -> None:
         """Compact and retain each project's metrics, then drop gone entities' totals, old observations and records,
-        and the audit entries past the install's retention."""
+        the exit reputation records past their retention, and the audit entries past the install's retention."""
         now = utc_now()
         async with self._session_factory() as session:
             projects = await ProjectRepository(session).get_all()
@@ -199,9 +259,11 @@ class CompactionJob(Job):
             )
             flushes = await metrics.delete_flushes_older_than(now - FLUSH_RECORD_AGE)
             await session.commit()
+        reputation_ips, reputation_connectors = await self._retain_exit_reputation(now)
         audit_entries = await self._retain_audit_log(now)
 
-        if compacted or retained or totals or observed or exits or flushes or audit_entries:
+        reputation = reputation_ips + reputation_connectors
+        if compacted or retained or totals or observed or exits or flushes or reputation or audit_entries:
             logger.info(
                 "Metrics compaction complete",
                 projects=len(projects),
@@ -211,6 +273,8 @@ class CompactionJob(Job):
                 observations_deleted=observed,
                 exit_ips_deleted=exits,
                 flushes_deleted=flushes,
+                exit_ip_reputation_deleted=reputation_ips,
+                connector_reputation_deleted=reputation_connectors,
                 audit_entries_deleted=audit_entries,
             )
 
@@ -249,6 +313,20 @@ class CompactionJob(Job):
                 repo.delete_failure_metrics_older_than,
             ):
                 deleted += await delete(project.id, cutoff)
+            await session.commit()
+        return deleted
+
+    async def _retain_exit_reputation(self, now: datetime) -> tuple[int, int]:
+        """Delete the exit reputation records last seen on a day before the retention, an exit IP's only once its avoid
+        has passed, none at 0 days; the records deleted (exit IPs, connectors).
+
+        A record a writer holds is skipped rather than waited for, and goes with the next hour's sweep.
+        """
+        if self._reputation_retention_days == 0:
+            return 0, 0
+        cutoff = (now - timedelta(days=self._reputation_retention_days)).date()
+        async with self._session_factory() as session:
+            deleted = await ExitReputationRepository(session).delete_stale(cutoff, now)
             await session.commit()
         return deleted
 

@@ -560,3 +560,33 @@ class TestBatchReads:
         assert pages == [ordered[0:2], ordered[2:4], ordered[4:]]
         assert [proxy.id for proxy in await proxy_repo.page(None, 10, project_id=first.project_id)] == ordered
         assert len(await proxy_repo.page(None, 10)) == 6
+
+    async def test_dynamic_connectors_are_those_holding_a_lone_dynamic_gateway_row(
+        self, proxy_repo: ProxyRepository, db_session: AsyncSession
+    ) -> None:
+        """A synced dynamic-sessions connector holds its gateway row alone; a pool, however large, is never one."""
+        dynamic, pool, mixed, empty = [await _connector(db_session, name) for name in ("Dynamic", "Pool", "Mixed", "Empty")]
+        await proxy_repo.bulk_create([
+            Proxy(host="gw", port=1, connector_id=dynamic.id, metadata={"dynamic_sessions": "true"}),
+            *(Proxy(host=f"10.0.3.{i}", port=1, connector_id=pool.id, metadata={"discovered_ip": f"10.0.3.{i}"}) for i in range(3)),
+            # A connector in the middle of a switch, with its gateway row beside slots, is not taken for one.
+            Proxy(host="gw", port=2, connector_id=mixed.id, metadata={"dynamic_sessions": "true"}),
+            Proxy(host="10.0.4.1", port=1, connector_id=mixed.id),
+        ])
+        await db_session.commit()
+
+        assert await proxy_repo.dynamic_connectors([dynamic.id, pool.id, mixed.id, empty.id, "unknown"]) == {dynamic.id}
+        assert await proxy_repo.dynamic_connectors([]) == set()
+
+    async def test_metadata_values_among_some_read_only_those(
+        self, proxy_repo: ProxyRepository, db_session: AsyncSession
+    ) -> None:
+        pool = await _connector(db_session)
+        await proxy_repo.bulk_create([
+            Proxy(host=f"10.0.5.{i}", port=1, connector_id=pool.id, metadata={"discovered_ip": f"10.0.5.{i}"}) for i in range(3)
+        ] + [Proxy(host="10.0.5.9", port=1, connector_id=pool.id)])
+        await db_session.commit()
+
+        assert await proxy_repo.metadata_values([pool.id], "discovered_ip", among={"10.0.5.1", "10.0.5.7"}) == {pool.id: {"10.0.5.1"}}
+        assert await proxy_repo.metadata_values([pool.id], "discovered_ip") == {pool.id: {"10.0.5.0", "10.0.5.1", "10.0.5.2"}}
+        assert await proxy_repo.metadata_values([pool.id], "discovered_ip", among=set()) == {}

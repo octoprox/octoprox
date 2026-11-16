@@ -35,7 +35,7 @@ from api.geo.verifier import ExitDecision
 from api.models.project import MitmMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 from api.routing.inflight import InFlight
-from api.routing.router import Router
+from api.routing.router import AvoidedSite, Router
 from tests.gateway.doubles import QuietMetering
 
 PROJECT = Project(name="Scraping", username="proj", password="secret")
@@ -63,6 +63,7 @@ def _router(proxy: Proxy | None, *, quarantined: bool = False) -> MagicMock:
     router.select_proxy_for_project.return_value = proxy
     router.are_all_proxies_quarantined.return_value = quarantined
     router.traffic_limit_status.return_value = None
+    router.avoided_site.return_value = None
     router.reserved_by.return_value = []
     return router
 
@@ -108,11 +109,16 @@ async def listen(inflight: InFlight) -> AsyncIterator[Callable[..., Awaitable[Pr
     servers: list[ProxyServer] = []
 
     async def start(
-        proxy: Proxy | None, *, quarantined: bool = False, timeout: float = 30.0, exit_verifier: Any = None
+        proxy: Proxy | None,
+        *,
+        quarantined: bool = False,
+        timeout: float = 30.0,
+        exit_verifier: Any = None,
+        tag_notes: Any = None,
     ) -> ProxyServer:
         server = ProxyServer(
             _router(proxy, quarantined=quarantined), QuietMetering(inflight), host="127.0.0.1", port=0, timeout=timeout,
-            exit_verifier=exit_verifier,
+            exit_verifier=exit_verifier, tag_notes=tag_notes,
         )
         await server.start()
         servers.append(server)
@@ -248,6 +254,67 @@ class TestRefused:
         (failure,) = _failures(publish)
         assert (failure.kind, failure.status) == (FailureKind.TRAFFIC_LIMIT_EXCEEDED, 509)
 
+    async def test_every_exit_avoided_for_the_site_is_a_502_naming_it(self, listen: Any, publish: _Published) -> None:
+        """Told apart from "nothing serves it" in the reason phrase, a Proxy-Status error and a failure kind of its own."""
+        server = await listen(None)
+        router = server._router
+        router.avoided_site.return_value = AvoidedSite("www.google.com")  # type: ignore[attr-defined]
+        response = await _exchange(server, f"CONNECT www.google.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        status_line, headers = _head(response)
+        assert status_line == "HTTP/1.1 502 Bad Gateway (Every eligible exit is avoided for www.google.com)"
+        assert headers["proxy-status"] == 'octoprox; error=exits_avoided; details="www.google.com"'
+        project_id, target_host, session_id, location = router.avoided_site.await_args.args  # type: ignore[attr-defined]
+        assert (project_id, target_host, session_id, location.key) == (PROJECT.id, "www.google.com", "s1", "US")
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status) == (FailureKind.EXITS_AVOIDED, 502)
+        assert failure.message == "Every eligible exit is avoided for www.google.com"
+        assert (failure.target, failure.proxy) == ("www.google.com:443", None)
+        # Refused before any proxy was used: no request was completed.
+        assert _completions(publish) == []
+
+    async def test_a_session_held_to_its_avoided_exit_is_told_which(self, listen: Any, publish: _Published) -> None:
+        """A project that does not move refused sessions keeps the session on its exit: the refusal names that exit, since
+        a new session would be served, where "every eligible exit" would tell the client to wait."""
+        server = await listen(None)
+        server._router.avoided_site.return_value = AvoidedSite("www.google.com", "203.0.113.7")  # type: ignore[attr-defined]
+        response = await _exchange(server, f"CONNECT www.google.com:443 HTTP/1.1\r\n{_auth()}\r\n")
+
+        status_line, headers = _head(response)
+        assert status_line == "HTTP/1.1 502 Bad Gateway (Exit 203.0.113.7 of this session is avoided for www.google.com)"
+        assert headers["proxy-status"] == 'octoprox; error=exits_avoided; details="www.google.com"'
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status) == (FailureKind.EXITS_AVOIDED, 502)
+        assert failure.message == "Exit 203.0.113.7 of this session is avoided for www.google.com"
+
+    async def test_an_avoided_pinned_proxy_is_named(self, listen: Any, publish: _Published) -> None:
+        server = await listen(None)
+        server._router.avoided_site.return_value = AvoidedSite("www.google.com")  # type: ignore[attr-defined]
+        response = await _exchange(server, f"GET http://www.google.com/ HTTP/1.1\r\n{_auth('proj-prxy-px-7')}\r\n")
+
+        status_line, _ = _head(response)
+        assert status_line == "HTTP/1.1 502 Bad Gateway (Proxy px-7 is avoided for www.google.com)"
+        assert server._router.avoided_site.await_args.kwargs["pinned_proxy_id"] == "px-7"  # type: ignore[attr-defined]
+        (failure,) = _failures(publish)
+        assert (failure.kind, failure.status) == (FailureKind.EXITS_AVOIDED, 502)
+
+    async def test_resting_or_limited_proxies_are_answered_before_avoided_ones(
+        self, listen: Any, publish: _Published
+    ) -> None:
+        """A quarantine is retried later and a traffic limit is the connector's own answer: both go before an avoid."""
+        server = await listen(None, quarantined=True)
+        server._router.avoided_site.return_value = AvoidedSite("www.google.com")  # type: ignore[attr-defined]
+        assert (await _exchange(server, f"CONNECT www.google.com:443 HTTP/1.1\r\n{_auth()}\r\n")).startswith(b"HTTP/1.1 429")
+
+        limited = await listen(None)
+        limited._router.traffic_limit_status.return_value = 509  # type: ignore[attr-defined]
+        limited._router.avoided_site.return_value = AvoidedSite("www.google.com")  # type: ignore[attr-defined]
+        assert (await _exchange(limited, f"CONNECT www.google.com:443 HTTP/1.1\r\n{_auth()}\r\n")).startswith(b"HTTP/1.1 509")
+        assert [failure.kind for failure in _failures(publish)] == [
+            FailureKind.ALL_PROXIES_QUARANTINED,
+            FailureKind.TRAFFIC_LIMIT_EXCEEDED,
+        ]
+
     async def test_a_state_without_a_country(self, listen: Any, publish: _Published) -> None:
         server = await listen(None)
         response = await _exchange(server, f"GET http://example.com/a?b=c HTTP/1.1\r\n{_auth('proj-st-ny')}\r\n")
@@ -309,6 +376,8 @@ class TestPreflight:
         (completed,) = _completions(publish)
         assert (completed["proxy_id"], completed["project_id"], completed["success"]) == (refused.id, PROJECT.id, False)
         assert (completed["bytes_sent"], completed["bytes_received"], completed["target_host"]) == (0, 0, "example.com")
+        # The place the client asked for, which a dynamic connector's requests are counted under.
+        assert completed["location"].key == "US"
         # Its completion counts it as demand; a rejection as well would count it twice.
         assert rejected == []
 
@@ -358,6 +427,36 @@ class TestPreflight:
         assert failure.kind is FailureKind.UPSTREAM_REJECTED
         (completed,) = _completions(publish)
         assert (completed["success"], completed["target_host"]) == (False, "example.com")
+
+
+class TestTags:
+    """A request a client tagged has its exit noted after routing and preflight, for the exit reports naming the tag."""
+
+    @pytest.mark.parametrize(
+        "request_line", ["CONNECT example.com:443 HTTP/1.1", "GET http://example.com/ HTTP/1.1"], ids=["connect", "http"]
+    )
+    async def test_the_exit_a_tagged_request_goes_through_is_noted(
+        self, listen: Any, publish: _Published, request_line: str
+    ) -> None:
+        selected, verified = _upstream(_closed_port()), _upstream(_closed_port())
+        notes = MagicMock()
+        server = await listen(selected, exit_verifier=_verifier(ExitDecision(verified)), tag_notes=notes)
+
+        await _exchange(server, f"{request_line}\r\n{_auth('proj-sessid-s1-cc-us-tag-job-42')}\r\n")
+
+        (call,) = notes.note.call_args_list
+        project, tag, decision = call.args
+        # The proxy preflight let the request through on, which may be another than the one routing picked.
+        assert (project.id, tag, decision.proxy.id) == (PROJECT.id, "job-42", verified.id)
+
+    async def test_a_refused_request_notes_nothing(self, listen: Any, publish: _Published) -> None:
+        selected = _upstream(_closed_port())
+        notes = MagicMock()
+        server = await listen(selected, exit_verifier=_verifier(ExitDecision(selected, "Exit country mismatch")), tag_notes=notes)
+
+        await _exchange(server, f"CONNECT example.com:443 HTTP/1.1\r\n{_auth('proj-cc-us-tag-job-42')}\r\n")
+
+        notes.note.assert_not_called()
 
 
 class TestLatency:
@@ -434,6 +533,7 @@ class TestLatencySteps:
 
         (completed,) = _completions(publish)
         assert list(completed["steps"]) == [Step.ROUTE, Step.CONNECT, Step.HANDSHAKE]
+        assert completed["location"].key == "US"
         verifier.verify.assert_not_called()
 
     async def test_a_plain_http_request_waits_for_its_response(self, listen: Any, publish: _Published) -> None:
@@ -444,6 +544,7 @@ class TestLatencySteps:
         (completed,) = _completions(publish)
         assert list(completed["steps"]) == [Step.ROUTE, Step.CONNECT, Step.RESPONSE]
         assert sum(completed["steps"].values()) == pytest.approx(completed["latency_ms"])
+        assert completed["location"].key == "US"
 
     async def test_a_failure_names_the_step_it_failed_in(self, listen: Any, publish: _Published) -> None:
         async with _vendor(None) as port:

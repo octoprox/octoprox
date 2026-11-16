@@ -36,12 +36,15 @@ from api.models.auth import (
     AuthIdentity,
     AuthIdentityListResponse,
     AuthIdentityResponse,
+    TokenUsage,
 )
 from api.models.user import (
     InviteResponse,
+    ServiceAccountCreate,
     User,
     UserCreate,
     UserInviteCreate,
+    UserKind,
     UserResponse,
     UserSelfUpdate,
     UserUpdate,
@@ -68,6 +71,20 @@ def _require_session(user: CurrentUser, action: str) -> None:
         raise HTTPException(status_code=403, detail=f"Sign in to the UI or with a password to {action}")
 
 
+def _refuse_on_a_service_account(user: User, *, email: str | None = None, password: str | None = None) -> None:
+    """Refuse a service account a password or an email.
+
+    It authenticates with API tokens and nothing else; an email would also let
+    whoever holds that address at a sign-in provider sign in as it.
+    """
+    if not user.is_service:
+        return
+    if password is not None:
+        raise HTTPException(status_code=400, detail="A service account has no password: it uses API tokens")
+    if email:
+        raise HTTPException(status_code=400, detail="A service account has no email: nobody signs in as it")
+
+
 class UserListResponse(BaseModel):
     """Response for listing users."""
 
@@ -75,20 +92,30 @@ class UserListResponse(BaseModel):
     users: list[UserResponse]
 
 
-def _to_response(user: User, providers: list[str] | None = None) -> UserResponse:
+def _to_response(user: User, providers: list[str] | None = None, tokens: TokenUsage | None = None) -> UserResponse:
+    tokens = tokens or TokenUsage()
     return UserResponse(
         id=user.id,
         username=user.username,
         email=user.email,
         role=user.role,
+        kind=user.kind,
         is_active=user.is_active,
         has_password=user.password_hash is not None,
         sign_in_providers=providers or [],
+        token_count=tokens.count,
+        token_last_used_at=tokens.last_used_at,
         theme_preference=user.theme_preference,
         last_login_at=user.last_login_at,
         created_at=user.created_at,
         updated_at=user.updated_at,
     )
+
+
+async def _response_of(session: AsyncSession, user: User) -> UserResponse:
+    """One user's response, with its linked sign-ins and its tokens' usage read for it."""
+    usage = await ApiTokenRepository(session).usage_by_user([user.id])
+    return _to_response(user, await _providers_of(session, user.id), usage.get(user.id))
 
 
 # --- Self endpoints (any authenticated user) ---
@@ -104,7 +131,7 @@ async def get_self(session: DbDep, user: CurrentUserDep) -> UserResponse:
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return _to_response(db_user, await _providers_of(session, db_user.id))
+    return await _response_of(session, db_user)
 
 
 @router.patch("/me", response_model=UserResponse)
@@ -118,12 +145,14 @@ async def update_self(
     a session left open on a shared machine cannot quietly take the
     account. If the account has none, there is nothing to ask for: the
     person is adding a password as a second way in beside the provider,
-    and the session is the proof.
+    and the session is the proof. A service account sets neither a
+    password nor an email.
     """
     repo = UserRepository(session)
     db_user = await repo.get_by_id(user.id)
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
+    _refuse_on_a_service_account(db_user, email=data.email, password=data.password)
     before = db_user.model_copy()
 
     if data.password is not None:
@@ -152,13 +181,12 @@ async def update_self(
     await repo.update(db_user)
     await actor_of(request, user).updated(session, before, db_user)
 
-    return _to_response(db_user, await _providers_of(session, db_user.id))
+    return await _response_of(session, db_user)
 
 
 # --- Personal access tokens and linked sign-ins ---
 # A user manages their own under /me; an admin manages anyone's under
-# /{user_id}, which is also how a user that only exists to hold tokens (a
-# service account: no password, no email) gets its first one.
+# /{user_id}, which is also how a service account gets its tokens.
 
 
 def _token_response(token: ApiToken) -> ApiTokenResponse:
@@ -318,12 +346,15 @@ async def _require_user(session: AsyncSession, user_id: str) -> None:
 
 @router.get("", response_model=UserListResponse)
 async def list_users(session: DbDep, _admin: RequireAdminDep) -> UserListResponse:
-    """List all users (admin only)."""
+    """List all users, people and service accounts alike (admin only)."""
     repo = UserRepository(session)
     users = await repo.get_all()
     providers = await AuthIdentityRepository(session).providers_by_user()
+    tokens = await ApiTokenRepository(session).usage_by_user()
 
-    return UserListResponse(total=len(users), users=[_to_response(u, providers.get(u.id)) for u in users])
+    return UserListResponse(
+        total=len(users), users=[_to_response(u, providers.get(u.id), tokens.get(u.id)) for u in users]
+    )
 
 
 @router.post("", response_model=UserResponse, status_code=201)
@@ -401,6 +432,27 @@ async def invite_user(
     )
 
 
+@router.post("/service-accounts", response_model=UserResponse, status_code=201)
+async def create_service_account(
+    request: Request, session: DbDep, data: ServiceAccountCreate, admin: RequireAdminDep
+) -> UserResponse:
+    """Create a service account (admin only): a name and a role, with no email, password or invite link.
+
+    It authenticates with the tokens an admin issues it, which needs a session; the account alone is no way in, so
+    an admin's token may create one.
+    """
+    repo = UserRepository(session)
+    if await repo.get_by_username(data.username):
+        raise HTTPException(status_code=400, detail=f"Username '{data.username}' already exists")
+
+    user = User(username=data.username, role=data.role, kind=UserKind.SERVICE)
+    await repo.create(user)
+    await actor_of(request, admin).created(session, user)
+
+    logger.info("Service account created", username=user.username, role=user.role.value)
+    return _to_response(user)
+
+
 @router.post("/{user_id}/reinvite", response_model=InviteResponse)
 async def reinvite_user(
     request: Request, session: DbDep, user_id: str, admin: RequireAdminDep
@@ -411,6 +463,8 @@ async def reinvite_user(
     user = await repo.get_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if user.is_service:
+        raise HTTPException(status_code=400, detail="A service account has no password: it uses API tokens")
     if user.password_hash is not None:
         raise HTTPException(
             status_code=400, detail="User already has a password set"
@@ -425,7 +479,7 @@ async def reinvite_user(
 
     logger.info("User reinvited", user_id=user_id, username=user.username)
     return InviteResponse(
-        user=_to_response(user),
+        user=await _response_of(session, user),
         invite_url=_build_invite_url(request, token),
     )
 
@@ -441,20 +495,22 @@ async def get_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return _to_response(user, await _providers_of(session, user.id))
+    return await _response_of(session, user)
 
 
 @router.patch("/{user_id}", response_model=UserResponse)
 async def update_user(
     request: Request, session: DbDep, user_id: str, data: UserUpdate, admin: RequireAdminDep
 ) -> UserResponse:
-    """Update a user (admin only). Setting a password needs a session, as for /me."""
+    """Update a user (admin only). Setting a password needs a session, as for /me; a service account takes neither a
+    password nor an email, and no user changes kind."""
     if data.password is not None:
         _require_session(admin, "set a password")
     repo = UserRepository(session)
     user = await repo.get_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    _refuse_on_a_service_account(user, email=data.email, password=data.password)
     before = user.model_copy()
 
     if data.username is not None:
@@ -486,7 +542,7 @@ async def update_user(
     await actor_of(request, admin).updated(session, before, user)
 
     logger.info("User updated", user_id=user_id)
-    return _to_response(user, await _providers_of(session, user.id))
+    return await _response_of(session, user)
 
 
 @router.delete("/{user_id}", status_code=204)

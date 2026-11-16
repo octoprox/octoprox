@@ -48,6 +48,12 @@ class FailureExample:
 # and the host as ``normalize_host`` gives it (or ``HOST_OVERFLOW``).
 type HostKey = tuple[str, str, str]
 
+# What exit reputation counts a dynamic connector's requests, and the reports
+# on any connector, under: project, connector, site and the requested place (a
+# LocationTarget key, "" for none), the key of the connector's records the
+# metrics flush adds them to.
+type SitePlaceKey = tuple[str, str, str, str]
+
 # What one demand count is kept under (the demand hashes): project, the epoch
 # minute it fell in, and the hash field (completed requests or refusals, see
 # api.core.demand_tracker).
@@ -74,6 +80,9 @@ class FailureKind(StrEnum):
     # request that already had one, and is then counted).
     NO_PROXY_AVAILABLE = "no_proxy_available"
     ALL_PROXIES_QUARANTINED = "all_proxies_quarantined"
+    # Every exit that could serve the request is avoided for its site (exit reputation), or a
+    # sticky session is held to its exit avoided there.
+    EXITS_AVOIDED = "exits_avoided"
     TRAFFIC_LIMIT_EXCEEDED = "traffic_limit_exceeded"
     INVALID_LOCATION = "invalid_location"
     # One request inside an intercepted (MITM) connection.
@@ -298,6 +307,22 @@ class FailureCount(WindowCounts):
     """How many requests failed under one failure count key (``FailureCountKey``) in a window."""
 
     failure_count: int = 0
+
+
+@dataclass(slots=True)
+class RequestCount(WindowCounts):
+    """What a site window counted under one key (``SitePlaceKey``): the requests gateways carried through a dynamic
+    connector, and the blocked and good reports the workers took on any connector."""
+
+    requests: int = 0
+    blocked: int = 0
+    good: int = 0
+
+    def merge(self, other: "RequestCount") -> None:
+        """Add ``other`` into this count, field by field."""
+        self.requests += other.requests
+        self.blocked += other.blocked
+        self.good += other.good
 
 
 def fold_host_tail(host_deltas: dict[HostKey, MetricDelta], max_hosts: int) -> dict[HostKey, MetricDelta]:

@@ -48,7 +48,7 @@ class LeastUsedStrategy(RoutingStrategy):
         return random.choice([proxy for proxy, count in zip(proxies, counts, strict=True) if count == fewest])
 
     def pick_group(self, groups: list[ProxyGroup], session_id: str | None) -> ProxyGroup:
-        loads = [Fraction(self._inflight.of_connector(group.key), max(group.weight, 1)) for group in groups]
+        loads = [Fraction(self._inflight.of_connector(group.key)) / Fraction(group.weight) for group in groups]
         lightest = min(loads)
         tied = [group for group, load in zip(groups, loads, strict=True) if load == lightest]
         return tied[0] if len(tied) == 1 else weighted_random_group(tied)

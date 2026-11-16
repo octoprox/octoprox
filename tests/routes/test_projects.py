@@ -183,6 +183,100 @@ class TestProjectEndpoints:
         assert authenticated_client.patch(url, json={"observation_retention_days": 3651}).status_code == 422
         assert authenticated_client.patch(url, json={"observation_retention_days": 3650}).status_code == 200
 
+    def test_exit_reputation_is_off_with_its_defaults_until_set_and_its_settings_round_trip(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+    ) -> None:
+        url = f"/api/v1/projects/{created_project['id']}"
+        fields = (
+            "exit_reputation",
+            "exit_reputation_avoid_minutes",
+            "exit_reputation_half_life_hours",
+            "exit_reputation_connector_half_life_requests",
+            "exit_reputation_bad_reports",
+            "exit_reputation_bad_share",
+        )
+        assert tuple(created_project[field] for field in fields) == ("off", 60, 24, 100, 1, 50)
+
+        edited = authenticated_client.patch(
+            url,
+            json={
+                "exit_reputation": "record",
+                "exit_reputation_avoid_minutes": 30,
+                "exit_reputation_half_life_hours": 12,
+                "exit_reputation_connector_half_life_requests": 500,
+                "exit_reputation_bad_reports": 3,
+                "exit_reputation_bad_share": 25,
+            },
+        )
+        assert edited.status_code == 200
+        assert tuple(edited.json()[field] for field in fields) == ("record", 30, 12, 500, 3, 25)
+        # An edit that leaves them out keeps them, and the list carries them: the project page edits from it.
+        kept = authenticated_client.patch(url, json={"description": "kept", "exit_reputation": "avoid"})
+        assert tuple(kept.json()[field] for field in fields) == ("avoid", 30, 12, 500, 3, 25)
+        listed = {p["id"]: p for p in authenticated_client.get("/api/v1/projects").json()["projects"]}
+        assert tuple(listed[created_project["id"]][field] for field in fields) == ("avoid", 30, 12, 500, 3, 25)
+        assert tuple(authenticated_client.get(url).json()[field] for field in fields) == ("avoid", 30, 12, 500, 3, 25)
+
+    @pytest.mark.parametrize(
+        ("field", "refused", "taken"),
+        [
+            ("exit_reputation_avoid_minutes", (0, 10_081), (1, 10_080)),
+            ("exit_reputation_half_life_hours", (0, 169), (1, 168)),
+            # Below 20 a busy connector's weighted requests would never reach the 20 a factor needs.
+            ("exit_reputation_connector_half_life_requests", (19, 10_001), (20, 10_000)),
+            ("exit_reputation_bad_reports", (0, 11), (1, 10)),
+            ("exit_reputation_bad_share", (0, 100), (1, 99)),
+            # Prefer was dropped: the modes are off, record and avoid.
+            ("exit_reputation", ("prefer", ""), ("off", "avoid")),
+        ],
+    )
+    def test_exit_reputation_settings_are_bounded(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        field: str,
+        refused: tuple[Any, Any],
+        taken: tuple[Any, Any],
+    ) -> None:
+        """A half-life past a week changes nothing (an avoid never lasts longer), so it is refused rather than kept."""
+        url = f"/api/v1/projects/{created_project['id']}"
+        for value in refused:
+            assert authenticated_client.patch(url, json={field: value}).status_code == 422
+        for value in taken:
+            answer = authenticated_client.patch(url, json={field: value})
+            assert answer.status_code == 200 and answer.json()[field] == value
+
+    def test_a_project_is_created_with_its_exit_reputation(
+        self,
+        authenticated_client: TestClient,
+        sample_project_data: dict[str, Any],
+    ) -> None:
+        created = authenticated_client.post(
+            "/api/v1/projects",
+            json={
+                **sample_project_data,
+                "exit_reputation": "record",
+                "exit_reputation_half_life_hours": 48,
+                "exit_reputation_connector_half_life_requests": 250,
+            },
+        )
+        assert created.status_code == 201
+        body = created.json()
+        assert (
+            body["exit_reputation"],
+            body["exit_reputation_half_life_hours"],
+            body["exit_reputation_connector_half_life_requests"],
+        ) == ("record", 48, 250)
+
+        for refused_field in ({"exit_reputation_bad_share": 0}, {"exit_reputation_connector_half_life_requests": 10}):
+            refused = authenticated_client.post(
+                "/api/v1/projects",
+                json={**sample_project_data, "name": "other", "username": "other-user", **refused_field},
+            )
+            assert refused.status_code == 422
+
     def test_a_save_from_the_project_list_keeps_the_metrics_retention(
         self,
         authenticated_client: TestClient,
@@ -505,7 +599,9 @@ class TestConnectInfo:
         # A delimiter formed with the dash around a value: "-sessid-st-ny" would read as state NY with no session.
         assert "cannot contain -cc-" in self._get(authenticated_client, created_project, country="us", sessid="st-ny")["error"]
         assert "cannot contain -cc-" in self._get(authenticated_client, created_project, country="us", city="paris-st", sessid="1")["error"]
-        assert "or -prxy-" in self._get(authenticated_client, created_project, sessid="a-prxy-b")["error"]
+        assert "-prxy- or -tag-" in self._get(authenticated_client, created_project, sessid="a-prxy-b")["error"]
+        # A tag names a request for exit reports: a session ID holding one would lose part of itself to it.
+        assert "-prxy- or -tag-" in self._get(authenticated_client, created_project, sessid="a-tag-b")["error"]
         # At the end of the username nothing follows, so a trailing "-cc" is only part of the session ID.
         data = self._get(authenticated_client, created_project, sessid="job-cc")
         assert data["error"] is None and data["username"] == f"{username}-sessid-job-cc"

@@ -30,7 +30,7 @@ import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { StatusCodeBadge } from '../components/mitm/RequestDetail'
 import {
-  FailurePanel, GROUP_INFO, GROUP_ORDER, KindBadge, formatWhen, kindInfo, type FailureGroup,
+  FailurePanel, GROUP_INFO, GROUP_ORDER, KindBadge, REFUSED_GROUP_NOTE, formatWhen, kindInfo, type FailureGroup,
 } from '../components/failures/FailureDetail'
 import { Alert, Button, Card, ConfirmDialog, InfoTip, LogoLoader, Reloading, Segmented } from '../components/ui'
 import { compact, formatDateTime, parseApiDate, plural } from '../utils/format'
@@ -403,7 +403,7 @@ function WhatFailed({ summary, updatedAt, loading, reloading, failed, range, onR
         <div className="flex items-center gap-1.5 min-w-0">
           <h2 className="text-sm font-semibold text-fg flex-none">What failed</h2>
           <InfoTip>
-            Every failure is counted, from the metrics history, so the numbers trail live traffic by up to a minute. Upstream failures are what Overview counts as failures; requests refused by Octoprox are not counted there. Click a kind to see its examples.
+            Every failure is counted, from the metrics history, so the numbers trail live traffic by up to a minute. Upstream failures are what Overview counts as failures; requests refused by Octoprox are not counted there, except a traffic limit that cut a request under way, which came after a proxy was used. Click a kind to see its examples.
           </InfoTip>
         </div>
         <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={onRange} size="sm" className="flex-none" />
@@ -422,7 +422,7 @@ function WhatFailed({ summary, updatedAt, loading, reloading, failed, range, onR
             </div>
             {groups.map(({ group, kinds }) => (
               <div key={group} className="min-w-0">
-                <div className="flex items-baseline justify-between gap-2 mb-0.5" title={GROUP_INFO[group].note}>
+                <div className="flex items-baseline justify-between gap-2 mb-0.5" title={group === 'refused' ? REFUSED_GROUP_NOTE : GROUP_INFO[group].note}>
                   <h3 className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle truncate">
                     {GROUP_INFO[group].heading}
                     {group === 'upstream' && <span className="normal-case tracking-normal font-normal"> · counted on Overview</span>}

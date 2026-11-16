@@ -17,7 +17,9 @@ from blinker import signal
 #       peer_id (str | None): the tunnel device the request came from, when it
 #       arrived through a tunnel rather than the proxy port,
 #       target_host (str | None): the destination the request was for (the
-#       CONNECT target or the URL host), counted per host under the connector
+#       CONNECT target or the URL host), counted per host under the connector,
+#       location (LocationTarget | None): the place the client asked for, which
+#       exit reputation counts a dynamic connector's requests under
 request_completed = signal("request-completed")
 
 # Emitted when a request is refused before it reaches an upstream proxy (no

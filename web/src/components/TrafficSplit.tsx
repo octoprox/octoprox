@@ -1,12 +1,19 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ConnectorTrafficShare, HISTORY_RANGES, TrafficSplitResponse, fetchProjectTrafficSplit } from '../api/client'
+import {
+  ConnectorTrafficShare, HISTORY_RANGES, TrafficSplitResponse, fetchProjectTrafficSplit,
+  type ExitReputationMode, type ReputationPlace,
+} from '../api/client'
 import { useTimeRange } from '../contexts/TimeRangeContext'
+import { useProject } from '../contexts/ProjectContext'
 import { formatBytesDecimal, formatMoney } from '../utils/format'
+import { cn } from '../utils/cn'
 import { ProviderLogo } from './ProviderLogo'
-import { Card, CardHeader, InfoTip, LogoLoader, Reloading, Segmented } from './ui'
+import { ReputationFactor, placeLabel, reputationReason, reputationTitle, weightText, wouldBe } from './ConnectorReputation'
+import { Card, CardHeader, InfoTip, LogoLoader, Reloading, Segmented, Select } from './ui'
 
 // One hue per connector position, cycling, so the bar and the rows agree: the chart palette the latency chart
 // uses (blue, orange, aqua, yellow, magenta, green, violet, red), stepped for each theme. Neighbours stay apart
@@ -67,18 +74,30 @@ interface TrafficSplitPanelProps {
 
 export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector, className }: TrafficSplitPanelProps) {
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
+  // The site, and the place its requests name (a LocationTarget key), the effective weights are shown for: none
+  // shows the configured split alone.
+  const [site, setSite] = useState('')
+  const [place, setPlace] = useState('')
+  const { selectedProject } = useProject()
+  const mode = selectedProject?.id === projectId ? selectedProject.exit_reputation : undefined
   const { data: split, isPlaceholderData, isError, error } = useQuery({
-    queryKey: ['traffic-split', projectId, range],
-    queryFn: () => fetchProjectTrafficSplit(projectId, range),
+    // Without a site the key is the one the Connectors page reads its weights from, so the two share one answer.
+    queryKey: site ? ['traffic-split', projectId, range, site, place] : ['traffic-split', projectId, range],
+    queryFn: () => fetchProjectTrafficSplit(projectId, range, site || undefined, place || undefined),
     enabled: !!projectId,
     refetchInterval: 15000,
-    // Another range keeps the last split up, dimmed, until its own arrives, so the card keeps its height; another
-    // project's split is not shown under this one.
+    // Another range or site keeps the last split up, dimmed, until its own arrives, so the card keeps its height;
+    // another project's split is not shown under this one.
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === projectId ? previous : undefined),
   })
 
+  const pickSite = (value: string) => {
+    setSite(value)
+    setPlace('')
+  }
+  const picker = split && <SitePicker split={split} site={site} place={place} onSite={pickSite} onPlace={setPlace} />
   const body = split
-    ? <Reloading active={isPlaceholderData}><TrafficSplitBody split={split} onOpenConnector={onOpenConnector} /></Reloading>
+    ? <Reloading active={isPlaceholderData}><TrafficSplitBody split={split} mode={mode} onOpenConnector={onOpenConnector} /></Reloading>
     : isError
       ? <p className="text-xs text-danger py-3">Could not load the traffic split{error instanceof Error && error.message ? `: ${error.message}` : ''}.</p>
       : <LogoLoader size="sm" className="py-3" />
@@ -91,6 +110,7 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
           <span className="text-xs text-fg-muted">Observed over</span>
           {rangePicker}
         </div>
+        {picker}
         {body}
       </div>
     )
@@ -109,8 +129,53 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
         action={rangePicker}
         className="mb-2"
       />
+      {picker}
       {body}
     </Card>
+  )
+}
+
+// A picker in the card: compact under a mouse, 16 px text and 44 px tall on touch so a phone neither zooms nor misses.
+const PICKER = 'w-auto min-w-0 max-w-[14rem] h-7 py-0 pl-2 pr-7 rounded-md text-[12.5px] pointer-coarse:h-11 pointer-coarse:text-base'
+
+/**
+ * Which requests the split is for: a site with exit reputation data (busiest first, or none), and once one is picked
+ * the place its requests name. Shown only while the project has such sites, so the card is as it always was without.
+ */
+function SitePicker({ split, site, place, onSite, onPlace }: {
+  split: TrafficSplitResponse
+  site: string
+  place: string
+  onSite: (site: string) => void
+  onPlace: (place: string) => void
+}) {
+  const sites = split.reputation_sites ?? []
+  if (sites.length === 0 && !site) return null
+  // A picked site or place that dropped out of the lists stays picked, and listed.
+  const siteOptions = !site || sites.some((s) => s.site === site) ? sites.map((s) => s.site) : [site, ...sites.map((s) => s.site)]
+  // The places are the picked site's once its answer is in; meanwhile the last site's are not offered.
+  const places: ReputationPlace[] = split.site === site ? split.reputation_places ?? [] : []
+  const placeOptions = !place || places.some((p) => p.place === place) ? places : [{ place, label: placeLabel(place), reports: 0 }, ...places]
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mb-3 text-xs text-fg-muted">
+      {/* A picker that does not fit beside its label goes under it rather than cutting its text. */}
+      <label className="flex flex-wrap items-center gap-x-1.5 gap-y-1 min-w-0 max-w-full">
+        <span className="flex-none">Requests to</span>
+        <Select value={site} onChange={(e) => onSite(e.target.value)} className={PICKER} aria-label="Requests to site">
+          <option value="">No particular site</option>
+          {siteOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+        </Select>
+      </label>
+      {site && (
+        <label className="flex flex-wrap items-center gap-x-1.5 gap-y-1 min-w-0 max-w-full">
+          <span className="flex-none">from</span>
+          <Select value={place} onChange={(e) => onPlace(e.target.value)} className={PICKER} aria-label="Requests from location">
+            <option value="">No location</option>
+            {placeOptions.map((p) => <option key={p.place} value={p.place}>{p.label}</option>)}
+          </Select>
+        </label>
+      )}
+    </div>
   )
 }
 
@@ -123,9 +188,39 @@ export function totalSpend(connectors: { cost: number | null; currency: string |
   return { amount: priced.reduce((a, c) => a + (c.cost ?? 0), 0), currency }
 }
 
-function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitResponse; onOpenConnector?: (id: string) => void }) {
-  const active = split.connectors.filter((c) => !c.excluded_reason)
+/** One stacked bar of the connectors' shares, in their row colours. */
+function ShareBar({ connectors, share, className }: { connectors: ConnectorTrafficShare[]; share: (c: ConnectorTrafficShare) => number; className?: string }) {
+  return (
+    <div className={cn('flex h-2 rounded-full overflow-hidden bg-surface-raised', className)}>
+      {connectors.map((c, i) => share(c) > 0 && (
+        <span key={c.connector_id} className={`${swatch(i)} h-full`} style={{ flex: share(c) }} title={`${c.name}: ${formatShare(share(c))}`} />
+      ))}
+    </div>
+  )
+}
+
+/**
+ * A connector's dot colour, logo, name and the tags that explain its row. ``off``: the row takes none of the requests
+ * shown, so "no healthy proxy", which says so of requests naming no country, is not set beside a share.
+ */
+function ConnectorName({ c, off }: { c: ConnectorTrafficShare; off: boolean }) {
+  return (
+    <span className={`flex items-center gap-2 min-w-0 ${off ? 'text-fg-subtle' : ''}`}>
+      <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px] flex-none" />
+      <span className="truncate">{c.name}</span>
+      {c.dynamic && <span className="text-fg-subtle text-[11px] flex-none">dynamic</span>}
+      {c.excluded_reason === 'disabled' && <span className="text-fg-subtle text-[11px] flex-none">disabled</span>}
+      {c.excluded_reason === 'traffic_limit' && <span className="text-orange-500 text-[11px] flex-none">over traffic limit</span>}
+      {c.excluded_reason === 'reserved_only' && <span className="text-primary text-[11px] flex-none">reserved countries only</span>}
+      {c.excluded_reason === 'no_eligible_proxies' && off && <span className="text-warning text-[11px] flex-none">no healthy proxy</span>}
+    </span>
+  )
+}
+
+function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSplitResponse; mode?: ExitReputationMode; onOpenConnector?: (id: string) => void }) {
   if (split.connectors.length === 0) return <p className="text-xs text-fg-muted py-3">No connectors yet.</p>
+  if (split.site) return <SiteSplitBody split={split} site={split.site} mode={mode} onOpenConnector={onOpenConnector} />
+  const active = split.connectors.filter((c) => !c.excluded_reason)
   const priced = split.connectors.some((c) => c.cost != null)
   const spend = totalSpend(split.connectors)
   // Wide containers lay each connector out as one row of six columns. Below @xs
@@ -141,11 +236,7 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
           <span>Expected, untargeted requests</span>
           <span>{active.length} of {split.connectors.length} connectors eligible</span>
         </div>
-        <div className="flex h-2 rounded-full overflow-hidden bg-surface-raised">
-          {split.connectors.map((c, i) => c.expected_share > 0 && (
-            <span key={c.connector_id} className={`${swatch(i)} h-full`} style={{ flex: c.expected_share }} title={`${c.name}: ${formatShare(c.expected_share)}`} />
-          ))}
-        </div>
+        <ShareBar connectors={split.connectors} share={(c) => c.expected_share} />
       </div>
 
       {/* Per connector rows: weight, expected, observed, spend */}
@@ -169,15 +260,7 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
               title={describeShare(c, split)}
             >
               <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
-              <span className={`flex items-center gap-2 min-w-0 ${off ? 'text-fg-subtle' : ''}`}>
-                <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px] flex-none" />
-                <span className="truncate">{c.name}</span>
-                {c.dynamic && <span className="text-fg-subtle text-[11px] flex-none">dynamic</span>}
-                {c.excluded_reason === 'disabled' && <span className="text-fg-subtle text-[11px] flex-none">disabled</span>}
-                {c.excluded_reason === 'traffic_limit' && <span className="text-orange-500 text-[11px] flex-none">over traffic limit</span>}
-                {c.excluded_reason === 'reserved_only' && <span className="text-primary text-[11px] flex-none">reserved countries only</span>}
-                {c.excluded_reason === 'no_eligible_proxies' && <span className="text-warning text-[11px] flex-none">no healthy proxy</span>}
-              </span>
+              <ConnectorName c={c} off={off} />
               {/* Stacked: one line under the name. Wide: `contents` hands the three cells to the row grid. */}
               <span className="col-start-2 col-span-2 row-start-2 flex items-center flex-wrap gap-x-3 gap-y-0.5 min-w-0 @xs:contents">
                 <span className="tabular-nums text-fg-muted whitespace-nowrap @xs:text-right">
@@ -208,6 +291,136 @@ function TrafficSplitBody({ split, onOpenConnector }: { split: TrafficSplitRespo
         {strategyExplanation(split.strategy)}
         {split.observed_requests === 0 && ' No requests in this window yet.'}
         {split.observed_requests > 0 && ` Observed over ${split.range}: ${split.observed_requests.toLocaleString()} requests, ${formatBytesDecimal(split.observed_bytes)}${spend ? `, ${formatMoney(spend.amount, spend.currency)} at the current rates` : ''}. Requests with a country or a filtered domain see a narrower set of connectors, so the observed split can differ from the expected one.`}
+      </p>
+    </div>
+  )
+}
+
+const MODE_NAMES: Record<ExitReputationMode, string> = { off: 'Off', record: 'Record', avoid: 'Avoid' }
+
+/**
+ * The split for requests to one site (from one place): each connector's configured weight, its reputation there, the
+ * weight that makes and the share of the site's requests it gets, the configured split faint above that one. While the
+ * project does not avoid, the numbers are what Avoid would do, and say so.
+ */
+function SiteSplitBody({ split, site, mode, onOpenConnector }: {
+  split: TrafficSplitResponse
+  site: string
+  mode?: ExitReputationMode
+  onOpenConnector?: (id: string) => void
+}) {
+  const place = split.place ?? ''
+  const places = split.reputation_places ?? []
+  const from = place ? ` from ${placeLabel(place, places)}` : ''
+  const applied = split.reputation_applied
+  // Whether a connector serves the site's requests from the place, by the answer for that request: a connector with IPs
+  // has rows eligible for it (every one avoided keeps its ×0 row), a dynamic one an effective weight; one its domain
+  // filter, a reservation or the place keeps off has neither. ``excluded_reason`` is the reason for requests naming no
+  // site and no place, so a connector reserving the place's country takes them although it has one.
+  const takes = (c: ConnectorTrafficShare) =>
+    c.reputation_kind === 'usable_ips' ? (c.eligible_ips ?? 0) > 0 : c.effective_weight > 0
+  // Where the project does not avoid the API answers the configured weights, so what Avoid would make is worked out
+  // here, by the same rule: weight times reputation among the connectors that take the requests.
+  const would = wouldBe(split.connectors, takes)
+  const effective = new Map(split.connectors.map((c, i) => [c.connector_id, applied ? { weight: c.effective_weight, share: c.effective_share } : would[i]]))
+  const active = split.connectors.filter(takes)
+  const effectiveTotal = active.reduce((sum, c) => sum + (effective.get(c.connector_id)?.weight ?? 0), 0)
+  // The reason line names the connector reputation lowers most among those that take requests.
+  const lowest = active.filter((c) => c.reputation < 1).sort((a, b) => a.reputation - b.reputation)[0]
+  // Round robin draws a request whose weights reputation lowered at random by them, out of its fixed order; a connector
+  // with every row avoided only drops out, which lowers no weight.
+  const drawn = split.strategy === 'round_robin' && applied && active.some((c) => c.reputation > 0 && c.reputation < 1)
+  const spend = totalSpend(split.connectors)
+  // Six columns need more room than the configured split's: below @lg (512px) the numbers stack under the name.
+  const wideCols = '@lg:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto_auto]'
+
+  return (
+    <div className="space-y-3">
+      {!applied && (
+        <p className="text-xs rounded-md border border-warning/30 bg-warning-soft text-warning px-2.5 py-1.5">
+          Not applied: {mode && mode !== 'avoid' ? `the project's exit reputation mode is ${MODE_NAMES[mode]}, not Avoid` : 'the project\'s exit reputation does not avoid'}, so routing keeps the configured weights. The numbers below are what Avoid would do.
+        </p>
+      )}
+
+      {/* The configured split, faint, above the split for the site. */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between flex-wrap gap-x-3 text-[11px] text-fg-subtle">
+          <span>Configured</span>
+          <span>{applied ? 'For' : 'If avoided, for'} {site}{from}</span>
+        </div>
+        <ShareBar connectors={split.connectors} share={(c) => c.expected_share} className="h-1 opacity-50" />
+        <ShareBar connectors={split.connectors} share={(c) => effective.get(c.connector_id)?.share ?? 0} className={applied ? undefined : 'opacity-60'} />
+      </div>
+
+      <div className="@container -mx-1.5">
+        <div className={`hidden @lg:grid ${wideCols} gap-x-3 px-1.5 text-[11px] text-fg-subtle`}>
+          <span />
+          <span>Connector</span>
+          <span className="text-right">Weight</span>
+          <span className="text-right">Reputation</span>
+          <span className="text-right">Effective</span>
+          <span className="text-right">Expected</span>
+          <span className="text-right">Observed</span>
+        </div>
+        {split.connectors.map((c, i) => {
+          const off = !takes(c)
+          const lowered = c.reputation < 1
+          const { weight: effectiveWeight, share: effectiveShare } = effective.get(c.connector_id) ?? { weight: 0, share: 0 }
+          const Row = onOpenConnector ? 'button' : 'div'
+          // A connector off every request says why; one kept off this site's requests from the place, what can.
+          const offTitle = c.excluded_reason === 'disabled' || c.excluded_reason === 'traffic_limit'
+            ? describeShare(c, split)
+            : `${c.name} takes none of the requests to ${site}${from}: no healthy row of it serves them, or its domain filter or a country another connector reserves keeps it off.`
+          return (
+            <Row
+              key={c.connector_id}
+              {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
+              className={`w-full grid grid-cols-[auto_minmax(0,1fr)] ${wideCols} items-center gap-x-3 gap-y-0.5 py-1.5 @lg:py-0 @lg:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
+              title={off ? offTitle : reputationTitle(c.name, c, site, place, places)}
+            >
+              <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
+              <ConnectorName c={c} off={off} />
+              {/* Stacked: under the name, the weight as a sum ("Weight 3 ×0.65 = 1.95"), then the shares. Wide:
+                  `contents` hands the five cells to the row grid. A connector that takes none of the requests has
+                  no sum: a dash and 0 on a wide card, its weight alone stacked. */}
+              <span className="col-start-2 row-start-2 flex items-center flex-wrap gap-x-3 gap-y-0.5 min-w-0 @lg:contents">
+                <span className="inline-flex items-center gap-x-1.5 whitespace-nowrap @lg:contents">
+                  <span className="tabular-nums text-fg-muted whitespace-nowrap @lg:text-right">
+                    <span className="text-fg-subtle @lg:hidden">Weight </span>{c.weight}
+                  </span>
+                  <span className={cn('items-center whitespace-nowrap @lg:inline-flex @lg:justify-end', off ? 'hidden' : 'inline-flex')}>
+                    {off ? <span className="text-fg-subtle">-</span> : <ReputationFactor facts={c} place={place} />}
+                  </span>
+                  <span className={cn('tabular-nums whitespace-nowrap @lg:block @lg:text-right', off && 'hidden', lowered && !off ? 'font-medium' : 'text-fg-muted')}>
+                    <span className="text-fg-subtle font-normal @lg:hidden">= </span>{weightText(effectiveWeight)}
+                  </span>
+                </span>
+                <span className={cn('tabular-nums whitespace-nowrap @lg:text-right', off ? 'text-fg-subtle' : applied ? 'font-medium' : 'text-fg-muted')}>
+                  <span className="text-fg-subtle font-normal @lg:hidden">Expected </span>{formatShare(effectiveShare)}
+                </span>
+                <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @lg:justify-end @lg:min-w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}, to every site`}>
+                  <span className="text-fg-subtle @lg:hidden">Observed</span>
+                  <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
+                    <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
+                  </span>
+                  {formatShare(c.observed_share)}
+                </span>
+              </span>
+            </Row>
+          )
+        })}
+      </div>
+
+      <p className="text-xs text-fg-muted">
+        {lowest
+          ? `${lowest.name}: ${reputationReason(lowest, site, place, places)}. Effective weights total ${weightText(effectiveTotal)} of ${split.total_weight}.`
+          : `Nothing lowers a connector's weight for ${site}${from}: every connector keeps its weight.`}
+      </p>
+      <p className="text-xs text-fg-muted">
+        {strategyExplanation(split.strategy)}
+        {drawn && ' Requests to this site are drawn at random by the effective weights, since reputation lowers a weight here; the fixed order holds for the other requests.'}
+        {split.observed_requests === 0 && ' No requests in this window yet.'}
+        {split.observed_requests > 0 && ` Observed over ${split.range}: ${split.observed_requests.toLocaleString()} requests to every site, ${formatBytesDecimal(split.observed_bytes)}${spend ? `, ${formatMoney(spend.amount, spend.currency)} at the current rates` : ''}.`}
       </p>
     </div>
   )

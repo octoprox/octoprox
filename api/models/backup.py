@@ -89,6 +89,8 @@ class BackupPayload(BaseModel):
     geo_database_blobs: list[dict[str, Any]] = Field(default_factory=list)
     ip_observations: list[dict[str, Any]] = Field(default_factory=list)
     connector_exit_ips: list[dict[str, Any]] = Field(default_factory=list)
+    exit_ip_reputation: list[dict[str, Any]] = Field(default_factory=list)
+    connector_site_reputation: list[dict[str, Any]] = Field(default_factory=list)
     wireguard_settings: list[dict[str, Any]] = Field(default_factory=list)
     wireguard_peers: list[dict[str, Any]] = Field(default_factory=list)
     openvpn_settings: list[dict[str, Any]] = Field(default_factory=list)
@@ -102,7 +104,7 @@ class ExportRequest(BaseModel):
     """Request body for the export endpoint."""
 
     passphrase: str = Field(min_length=8)
-    # History: proxy and project metrics, plus IP attribution observations and aggregates.
+    # History: proxy and project metrics, IP attribution observations and aggregates, and exit reputation records.
     include_metrics: bool = False
     # The bytes of uploaded and downloaded IP databases. Their rows are always included.
     include_database_files: bool = False
@@ -145,6 +147,8 @@ class ImportSummary(BaseModel):
     geo_database_blobs: int = 0
     ip_observations: int = 0
     connector_exit_ips: int = 0
+    exit_ip_reputation: int = 0
+    connector_site_reputation: int = 0
     wireguard_settings: int = 0
     wireguard_peers: int = 0
     openvpn_settings: int = 0

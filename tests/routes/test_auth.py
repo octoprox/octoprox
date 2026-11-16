@@ -405,6 +405,26 @@ class TestSignInHooks:
         ]
         assert hooks.calls[-1] == ("signed_in", {"user": name, "method": "password", "provider": None, "linked": False})
 
+    def test_a_service_account_is_refused_like_any_other_password_sign_in(
+        self, authenticated_client: TestClient, hooks: HookRecorder
+    ) -> None:
+        """It authenticates with API tokens only; the answer says no more than for a wrong password."""
+        client = authenticated_client
+        name = f"bot-{uuid4().hex[:8]}"
+        account = client.post("/api/v1/users/service-accounts", json={"username": name})
+        assert account.status_code == 201, account.text
+
+        response = client.post("/api/v1/auth/login", json={"username": name, "password": "any-pass-1"})
+
+        assert (response.status_code, response.json()["detail"]) == (401, "Invalid username or password")
+        assert hooks.told("sign_in_failed", "signed_in") == [
+            (
+                "sign_in_failed",
+                {"method": "password", "reason": "service account", "user": name, "username": None, "provider": None},
+            )
+        ]
+        client.request("DELETE", f"/api/v1/users/{account.json()['id']}")
+
     def test_an_invite_link_signs_in_or_is_refused_with_its_reason(
         self, authenticated_client: TestClient, hooks: HookRecorder, monkeypatch: pytest.MonkeyPatch
     ) -> None:

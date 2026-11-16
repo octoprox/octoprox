@@ -11,7 +11,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from functools import cached_property
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
@@ -21,7 +21,7 @@ import structlog
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from sqlalchemy import DateTime, LargeBinary, and_, delete, func, inspect, or_, select, update
+from sqlalchemy import Date, DateTime, LargeBinary, and_, delete, func, inspect, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import TypeEngine
@@ -37,7 +37,9 @@ from api.db.models import (
     ConnectorExitIpModel,
     ConnectorMetricsModel,
     ConnectorModel,
+    ConnectorSiteReputationModel,
     CredentialModel,
+    ExitIpReputationModel,
     FailureMetricsModel,
     GeoDatabaseBlobModel,
     GeoDatabaseModel,
@@ -130,11 +132,11 @@ class _EntitySpec:
         return (include_metrics or not self.is_metric) and (include_database_files or not self.is_database_file)
 
     def dump(self, instance: Base) -> dict[str, Any]:
-        """A row as JSON-safe values by attribute name: datetimes as ISO strings, bytes as base64."""
+        """A row as JSON-safe values by attribute name: datetimes and days as ISO strings, bytes as base64."""
         row: dict[str, Any] = {}
         for name in self._columns:
             value = getattr(instance, name)
-            if isinstance(value, datetime):
+            if isinstance(value, date):
                 value = value.isoformat()
             elif isinstance(value, bytes | memoryview):
                 value = base64.b64encode(bytes(value)).decode("ascii")
@@ -154,6 +156,8 @@ class _EntitySpec:
                 continue
             if isinstance(value, str) and isinstance(sql_type, DateTime):
                 value = datetime.fromisoformat(value)
+            elif isinstance(value, str) and isinstance(sql_type, Date):
+                value = date.fromisoformat(value)
             elif isinstance(value, str) and isinstance(sql_type, LargeBinary):
                 value = base64.b64decode(value)
             values[name] = value
@@ -226,6 +230,11 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("geo_database_blobs", GeoDatabaseBlobModel, is_database_file=True),
     _EntitySpec("ip_observations", IpObservationModel, is_metric=True, preserve_id=False),
     _EntitySpec("connector_exit_ips", ConnectorExitIpModel, is_metric=True),
+    # Exit reputation: what clients reported about each exit IP and each
+    # connector on each site. History, so it rides the metrics flag like the
+    # exits; the connectors' records reference connectors, after them.
+    _EntitySpec("exit_ip_reputation", ExitIpReputationModel, is_metric=True),
+    _EntitySpec("connector_site_reputation", ConnectorSiteReputationModel, is_metric=True),
     # WireGuard: the install's key pair and the devices allowed in. Peers
     # reference projects, so they come after them (and here is after).
     _EntitySpec("wireguard_settings", WireGuardSettingsModel),

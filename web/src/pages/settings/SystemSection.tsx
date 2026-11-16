@@ -206,7 +206,7 @@ const ROLE_INFO: Record<string, { label: string; one: string; description: strin
   worker: {
     label: 'Workers',
     one: 'Worker',
-    description: 'Run every job (health checks, syncs, scaling, metrics, housekeeping) and ingest sightings and observations',
+    description: 'Run every job (health checks, syncs, scaling, metrics, housekeeping) and ingest sightings, observations and exit reports',
   },
 }
 
@@ -796,6 +796,7 @@ function WorkerSection({ worker }: { worker: SystemWorkerSnapshot }) {
       <div>
         <IngestRow label="Preflight sightings" done="attributed" consumed={worker.sightings_consumed} dropped={worker.sightings_dropped} />
         <IngestRow label="IP observations" done="ingested" consumed={worker.observations_consumed} dropped={worker.observations_dropped} />
+        <IngestRow label="Exit reports" done="applied" consumed={worker.exit_reports_consumed} dropped={worker.exit_reports_dropped} />
       </div>
     </InspectorSection>
   )
@@ -1312,6 +1313,7 @@ const JOB_INFO: Record<JobKind, { label: string; description: string }> = {
 const INGEST_INFO: Record<string, { label: string; description: string }> = {
   sightings: { label: 'Preflight sightings', description: 'Exits preflight saw on pooled session slots, for the workers to attribute' },
   observations: { label: 'IP observations', description: 'IP observations and exit judgements from every process, for the workers to write to Postgres' },
+  exit_reports: { label: 'Exit reports', description: 'Exit reports clients sent through the api, for the workers to apply to the exit reputation records' },
 }
 
 const JOB_STREAM_PREFIX = 'jobs.'
@@ -1355,8 +1357,9 @@ function liveWorkers(data: SystemTopology): SystemWorkerSnapshot[] {
 /**
  * How many live workers take a work stream: for a job kind's stream those whose
  * heartbeat lists the kind, for any other every one, since each worker ingests
- * the sightings and the observations. A worker that stops leaves the count when
- * its heartbeat ends, while the group keeps it as a consumer until it is pruned.
+ * the sightings, the observations and the exit reports. A worker that stops
+ * leaves the count when its heartbeat ends, while the group keeps it as a
+ * consumer until it is pruned.
  */
 function takersOf(workers: SystemWorkerSnapshot[], name: string): number {
   if (!name.startsWith(JOB_STREAM_PREFIX)) return workers.length
@@ -2214,7 +2217,7 @@ function topologyEdges(
       'Bytes sent and received through the upstreams, all gateways',
       carrying,
     )),
-    edge('run-now', quiet('Runs asked for after a save: syncs, scale checks, health checks of new proxies')),
+    edge('run-now', quiet('Runs asked for after a save (syncs, scale checks, health checks of new proxies) and the exit reports clients send')),
     edge('periodic', {
       tone: data.controller.leader ? 'quiet' : 'danger',
       title: 'The periodic jobs, which the leading controller publishes on its timers',
@@ -2265,7 +2268,11 @@ function connectorSub(inventory: SystemInventory): string {
 function roleSummary(inventory: SystemInventory): string {
   const roles = Object.entries(inventory.users_by_role)
   if (roles.length === 0) return ''
-  return roles.map(([role, n]) => `${n} ${role}`).join(' · ')
+  const parts = roles.map(([role, n]) => `${n} ${role}`)
+  // The roles count service accounts too; say how many of the users they are.
+  const service = inventory.users_by_kind?.service ?? 0
+  if (service > 0) parts.push(`${service} ${plural(service, 'service account', 'service accounts')}`)
+  return parts.join(' · ')
 }
 
 function Tile({ label, value, sub }: { label: string; value: number; sub?: string }) {

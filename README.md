@@ -14,6 +14,7 @@ It is an alternative to Scrapoxy, which was discontinued in February 2026, and a
 - **Routing Strategies**: Round-robin, least-used, random, sticky session, and health-based routing
 - **Per-request Targeting**: Pick a sticky session (`-sessid-`) or an exit country (`-cc-`) from the proxy username, so one project can serve many locations
 - **IP Attribution**: Resolve exit locations from your own MaxMind, DB-IP, IPinfo or IP2Location databases, verify vendor claims, track each provider's accuracy, and optionally reject sessions that exit in the wrong country (see [docs/ip-attribution.md](docs/ip-attribution.md))
+- **Exit Reputation**: Clients report which requests a site blocked: an exit IP it blocked is kept away from that site alone for a while, and each connector's weight for the site follows its record there (a dynamic connector's block rate, the IPs a static pool still has), so a site's traffic shifts to the vendors that work for it (see [docs/exit-reputation.md](docs/exit-reputation.md))
 - **Traffic Limits & Billing**: Cap the bytes a connector carries per billing period, alert, block or cut transfers at the cap, and see spend from the price you pay per GB (see [docs/traffic-limits.md](docs/traffic-limits.md))
 - **Tunnel Devices**: Routers, TVs, consoles and phones with no proxy settings join a project's pool through a WireGuard or OpenVPN tunnel Octoprox terminates; one config, QR code or profile per device, names resolved at the exit (see [docs/wireguard.md](docs/wireguard.md) and [docs/openvpn.md](docs/openvpn.md))
 - **Health Monitoring**: Automatic health checks with configurable intervals and timeouts, run by workers that scale with the pool
@@ -23,7 +24,8 @@ It is an alternative to Scrapoxy, which was discontinued in February 2026, and a
 - **Failure Log**: A per-project Failures page saying why requests failed or were refused: every failure counted by kind, vendor status and connector over time, with examples of each kind (the vendor's answer, timeouts, unreachable proxies, no proxy for the location) (see [docs/metrics.md](docs/metrics.md#failures-why-requests-failed))
 - **REST API**: Full CRUD operations for managing projects, credentials, connectors, and proxies
 - **Web Dashboard**: React-based UI for monitoring and configuration
-- **Single Sign-On & API Tokens**: The people you add sign in with their Google, Microsoft or GitHub account instead of a password; scripts authenticate with personal access tokens (see [docs/sso.md](docs/sso.md))
+- **Single Sign-On & API Tokens**: The people you add sign in with their Google, Microsoft or GitHub account instead of a password; scripts authenticate with personal access tokens, a person's or a service account's (see [docs/sso.md](docs/sso.md))
+- **Service Accounts**: Accounts for scrapers, CI jobs and scripts rather than people: a name, a role and the API tokens an admin issues, with no password, email or sign-in, and each token's last use shown; a viewer service account can send exit reports and change nothing else (see [docs/sso.md](docs/sso.md#service-accounts))
 - **Backup & Migration**: Export the entire setup as an encrypted file and restore it on another instance
 - **Scrapoxy Replacement**: Scrapoxy was discontinued in February 2026; a step-by-step guide recreates its projects, credentials, connectors and proxy lists in Octoprox, and any vendor it had that Octoprox lacks can be added as a YAML descriptor (see [docs/scrapoxy-migration.md](docs/scrapoxy-migration.md))
 
@@ -404,7 +406,7 @@ Octoprox requires authentication for all web UI and API access. Users sign in wi
 There are three roles:
 - **Admin** - Full access including user management
 - **Editor** - Can manage projects, proxies, credentials, and connectors (no user management)
-- **Viewer** - Read-only access to all data
+- **Viewer** - Read-only access to all data, except exit reports: a viewer can send them to any project, and they steer routing where the project's exit reputation avoids (see [docs/exit-reputation.md](docs/exit-reputation.md#reporting-exits))
 
 #### Configuration
 

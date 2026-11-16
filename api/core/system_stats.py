@@ -94,7 +94,7 @@ _INVENTORY_SQL = text(
     """
 )
 
-_USER_ROLES_SQL = text("SELECT role, count(*) FROM users GROUP BY role")
+_USER_GROUPS_SQL = text("SELECT role, kind, count(*) FROM users GROUP BY role, kind")
 
 # count(DISTINCT ...) because joining credentials and connectors off the same
 # project multiplies the proxy rows.
@@ -426,7 +426,11 @@ class SystemReader:
         """Exact entity counts from Postgres, proxies per status from their column, and the provider types known."""
         session = self._session
         row = (await session.execute(_INVENTORY_SQL)).one()
-        roles = {str(r[0]): int(r[1]) for r in (await session.execute(_USER_ROLES_SQL)).all()}
+        roles: dict[str, int] = {}
+        kinds: dict[str, int] = {}
+        for role, kind, count in (await session.execute(_USER_GROUPS_SQL)).all():
+            roles[str(role)] = roles.get(str(role), 0) + int(count)
+            kinds[str(kind)] = kinds.get(str(kind), 0) + int(count)
         statuses = await ProxyRepository(session).count_by_status()
         registry = self._registry
         builtin = 0 if registry is None else sum(1 for ptype in registry.list() if ptype.source != "custom")
@@ -442,6 +446,7 @@ class SystemReader:
             users=int(row.users),
             users_active=int(row.users_active),
             users_by_role=roles,
+            users_by_kind=kinds,
             providers_total=builtin + custom,
             providers_builtin=builtin,
             providers_custom=custom,

@@ -22,6 +22,7 @@ from api.core.telemetry import Telemetry
 from api.core.timing import Step
 from api.db.streams import FullRead
 from api.gateway.latency import RequestLatencies
+from api.models.exit_reports import ExitVerdict
 from api.models.system import (
     ApiSnapshot,
     ControllerSnapshot,
@@ -34,6 +35,7 @@ from api.models.system import (
     WorkerTask,
 )
 from api.models.tunnel import TunnelEndpointState
+from api.reputation.ingest import ExitReportCounts
 
 # A scrape as (family name, label set without role) -> value, plus the families' types.
 Samples = dict[tuple[str, frozenset[tuple[str, str]]], float]
@@ -42,9 +44,16 @@ Samples = dict[tuple[str, frozenset[tuple[str, str]]], float]
 COMPILED_THROUGH = "1792281600000-0"
 
 
-def scrape(snapshot: InstanceSnapshot, latencies: RequestLatencies | None = None) -> tuple[Samples, dict[str, str]]:
-    """Render ``snapshot`` and the gateway's ``latencies`` and parse them back; every sample must carry the process's role."""
-    text = Telemetry(lambda: snapshot, latencies.snapshot if latencies else tuple).render().decode()
+def scrape(
+    snapshot: InstanceSnapshot, latencies: RequestLatencies | None = None, exit_reports: ExitReportCounts | None = None
+) -> tuple[Samples, dict[str, str]]:
+    """Render ``snapshot``, the gateway's ``latencies`` and the worker's ``exit_reports`` and parse them back; every sample
+    must carry the process's role."""
+    text = Telemetry(
+        lambda: snapshot,
+        latencies.snapshot if latencies else tuple,
+        exit_reports.snapshot if exit_reports else tuple,
+    ).render().decode()
     samples: Samples = {}
     types: dict[str, str] = {}
     for family in text_string_to_metric_families(text):
@@ -404,6 +413,8 @@ class TestWorker:
             sightings_dropped=2,
             observations_consumed=5000,
             observations_dropped=7,
+            exit_reports_consumed=40,
+            exit_reports_dropped=3,
         )
 
         samples, types = scrape(snapshot_of(Role.WORKER, worker=worker))
@@ -420,6 +431,8 @@ class TestWorker:
         assert value(samples, "octoprox_worker_sightings_dropped_total") == 2
         assert value(samples, "octoprox_worker_observations_consumed_total") == 5000
         assert value(samples, "octoprox_worker_observations_dropped_total") == 7
+        assert value(samples, "octoprox_worker_exit_reports_consumed_total") == 40
+        assert value(samples, "octoprox_worker_exit_reports_dropped_total") == 3
         assert types["octoprox_worker_job_duration_seconds"] == "counter"
         assert types["octoprox_worker_observations_consumed"] == "counter"
         assert types["octoprox_worker_observations_dropped"] == "counter"
@@ -433,8 +446,45 @@ class TestWorker:
             "octoprox_worker_sightings_dropped_total",
             "octoprox_worker_observations_consumed_total",
             "octoprox_worker_observations_dropped_total",
+            "octoprox_worker_exit_reports_consumed_total",
+            "octoprox_worker_exit_reports_dropped_total",
         ):
             assert value(samples, counter) == 0, counter
+
+    def test_the_exit_reports_applied_by_connector_and_verdict(self) -> None:
+        """Read from the ingest on each scrape; every verdict of a connector seen counts from zero."""
+        counts = ExitReportCounts()
+        counts.add("c-1", "Residential", ExitVerdict.BAD)
+        counts.add("c-1", "Residential", ExitVerdict.BAD)
+        counts.add("", "", ExitVerdict.GOOD)
+
+        samples, types = scrape(snapshot_of(Role.WORKER, worker=WorkerSnapshot(jobs={})), exit_reports=counts)
+
+        assert _exit_reports(samples, "c-1", "Residential", "bad") == 2
+        assert _exit_reports(samples, "c-1", "Residential", "good") == 0
+        assert _exit_reports(samples, "", "", "good") == 1
+        assert _exit_reports(samples, "", "", "bad") == 0
+        assert types["octoprox_worker_exit_reports"] == "counter"
+
+    def test_a_renamed_connector_keeps_one_series(self) -> None:
+        counts = ExitReportCounts()
+        counts.add("c-1", "Residential", ExitVerdict.BAD)
+        counts.add("c-1", "Residential EU", ExitVerdict.BAD)
+
+        samples, _ = scrape(snapshot_of(Role.WORKER, worker=WorkerSnapshot(jobs={})), exit_reports=counts)
+
+        assert _exit_reports(samples, "c-1", "Residential EU", "bad") == 2
+        assert _exit_reports(samples, "c-1", "Residential", "bad") is None
+
+    def test_no_exit_report_applied_yet_exports_no_series(self) -> None:
+        samples, _ = scrape(snapshot_of(Role.WORKER, worker=WorkerSnapshot(jobs={})), exit_reports=ExitReportCounts())
+        assert "octoprox_worker_exit_reports_total" not in names(samples)
+
+
+def _exit_reports(samples: Samples, connector: str, name: str, verdict: str) -> float | None:
+    """The exit reports counted for one connector (by id and name) and verdict; None when there is no such series."""
+    labels = frozenset({("connector", connector), ("name", name), ("verdict", verdict)})
+    return samples.get(("octoprox_worker_exit_reports_total", labels))
 
 
 def test_a_process_of_role_all_exports_every_section_under_its_role() -> None:

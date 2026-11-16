@@ -38,6 +38,8 @@ from api.core.stats import (
     FailureKind,
     HostKey,
     MetricDelta,
+    RequestCount,
+    SitePlaceKey,
     StepMetricDelta,
     TunnelPeerMetricDelta,
     WindowCounts,
@@ -91,6 +93,15 @@ FAILURE_LOG_DATA_KEY = FAILURE_LOG_KEY + ":data"
 # connector (refused before a proxy was chosen) and for no vendor status.
 FAILURE_METRICS_PREFIX = KEY_PREFIX + "failure:metrics:"
 FAILURE_METRICS_KEY = FAILURE_METRICS_PREFIX + "{project_id}:{connector_id}:{kind}:{upstream_status}"
+# Exit reputation's site windows by (project, connector, site, requested
+# place), the seventh hash in the metrics pipeline: the requests gateways
+# count through dynamic connectors for projects whose exit reputation
+# records, and the blocked and good reports the workers take on any
+# connector, added by the metrics flush to the connectors' records at every
+# level of the place. A place (a LocationTarget key, empty for none) holds no
+# colon; an IPv6 site does, so the site comes last.
+SITE_REQUESTS_PREFIX = KEY_PREFIX + "reputation:requests:"
+SITE_REQUESTS_KEY = SITE_REQUESTS_PREFIX + "{project_id}:{connector_id}:{place}:{site}"
 # One set per kind of metrics hash (METRIC_WINDOW_KINDS), listing its keys,
 # so the metrics flush takes the hashes without walking the keyspace. A walk
 # costs a round trip per few hundred keys of the whole keyspace (sticky
@@ -147,6 +158,15 @@ TUNNEL_STATUS_INTERVAL = 10
 TUNNEL_STATUS_TTL_SECONDS = 30
 # IP attribution: one preflight verdict per proxy, shared by its sessions.
 GEO_PREFLIGHT_KEY = KEY_PREFIX + "geo:preflight:{project_id}:{proxy_id}"
+# Exit reputation (api.reputation). What a request named by ``-tag-`` went
+# through, per project and tag (the tag last, since a client may put a colon
+# in it): JSON {connector_id, proxy_id, ip}, what an exit report naming the
+# tag resolves to. Gateways write it when a tag's exit changes and once half
+# its TTL has passed, so a tag a busy session reuses costs about one write per
+# gateway a minute and a tag per request one write; it goes
+# TAG_NOTE_TTL_SECONDS after the last write.
+TAG_NOTE_KEY = KEY_PREFIX + "exit:tag:{project_id}:{tag}"
+TAG_NOTE_TTL_SECONDS = 120
 # Sign-in through an identity provider (api.sso). The state key holds what a
 # login that left for the provider needs when the browser comes back: which
 # provider, the nonce and the PKCE verifier. The login code entry holds the
@@ -297,12 +317,17 @@ SIGHTING_STREAM_MAXLEN = 50_000
 # with no worker.
 OBSERVATION_STREAM_KEY = KEY_PREFIX + "stream:observations"
 OBSERVATION_STREAM_MAXLEN = 100_000
+# Exit reports the api accepted (api.jobs.messages.ExitReportMessage, field
+# ``item``, JSON), one entry per report, for the workers to apply.
+EXIT_REPORT_STREAM_KEY = KEY_PREFIX + "stream:exit_reports"
+EXIT_REPORT_STREAM_MAXLEN = 100_000
 # Every work stream by the name the System view shows it under: each job
-# kind's, then the sightings and the observations.
+# kind's, then the sightings, the observations and the exit reports.
 WORK_STREAMS: dict[str, str] = {
     **{f"jobs.{kind}": JOB_STREAM_KEY.format(kind=kind) for kind in JobKind},
     "sightings": SIGHTING_STREAM_KEY,
     "observations": OBSERVATION_STREAM_KEY,
+    "exit_reports": EXIT_REPORT_STREAM_KEY,
 }
 # The same names by stream key: what a log line about a work stream calls it.
 WORK_STREAM_NAMES: dict[str, str] = {key: name for name, key in WORK_STREAMS.items()}
@@ -328,6 +353,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     (_literal_prefix(TUNNEL_PEER_METRICS_KEY), "Tunnel device metrics"),
     (HOST_METRICS_PREFIX, "Host metrics"),
     (FAILURE_METRICS_PREFIX, "Failure metrics"),
+    (SITE_REQUESTS_PREFIX, "Exit reputation requests"),
     (_literal_prefix(METRICS_INDEX_KEY), "Metrics indexes"),
     (_literal_prefix(STICKY_BINDING_KEY), "Sticky bindings"),
     (_literal_prefix(MITM_REQUESTS_KEY), "MITM captures"),
@@ -342,6 +368,7 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     (TRAFFIC_PENDING_KEY, "Traffic blocks"),
     (_literal_prefix(METRICS_TAKEN_KEY), "Metrics staging"),
     (_literal_prefix(GEO_PREFLIGHT_KEY), "IP attribution"),
+    (_literal_prefix(TAG_NOTE_KEY), "Exit reputation tags"),
     # TUNNEL_PEER_STATUS_KEY and its index, per protocol.
     (KEY_PREFIX + "wireguard:", "WireGuard"),
     (KEY_PREFIX + "openvpn:", "OpenVPN"),
@@ -352,10 +379,11 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     (KEY_PREFIX + "feed:", "Routing feed"),
     (_literal_prefix(JOB_STREAM_KEY), "Job streams"),
     (_literal_prefix(DEMAND_KEY), "Demand"),
-    # The two work streams that are no job kind's, as the System page groups them, before the event streams' row,
+    # The work streams that are no job kind's, as the System page groups them, before the event streams' row,
     # which their keys also match.
     (SIGHTING_STREAM_KEY, "Ingest streams"),
     (OBSERVATION_STREAM_KEY, "Ingest streams"),
+    (EXIT_REPORT_STREAM_KEY, "Ingest streams"),
     (KEY_PREFIX + "stream:", "Event streams"),
     (_literal_prefix(APPLIED_BATCHES_KEY), "Batch marks"),
 )
@@ -951,6 +979,34 @@ class FailureWindows(MetricWindowKind[FailureCountKey, FailureCount]):
         pipe.sadd(self.index, key)
 
 
+class SiteRequestWindows(MetricWindowKind[SitePlaceKey, RequestCount]):
+    """Exit reputation's site windows, keyed by (project_id, connector_id, site, place): a project's requests through one
+    dynamic connector to one site, and the reports on any of its connectors there, for one requested place ("" for
+    none)."""
+
+    def key(self, entity: SitePlaceKey) -> str:
+        """The key of the window of ``entity``."""
+        project_id, connector_id, site, place = entity
+        return self.key_format.format(project_id=project_id, connector_id=connector_id, place=place, site=site)
+
+    def entity(self, key: str) -> SitePlaceKey | None:
+        """(project_id, connector_id, site, place) from ``key``, the place empty for none; None for a key without the
+        other three."""
+        if not key.startswith(self.prefix):
+            return None
+        parts = key.removeprefix(self.prefix).split(":", 3)
+        if len(parts) != 4:
+            return None
+        project_id, connector_id, place, site = parts
+        if not (project_id and connector_id and site):
+            return None
+        return project_id, connector_id, site, place
+
+    def flushes(self, counts: RequestCount) -> bool:
+        """Whether a request or a report is counted: a window of none has nothing to add to a record."""
+        return bool(counts.requests or counts.blocked or counts.good)
+
+
 # The kinds of metrics window, in the order a flush takes them.
 PROXY_WINDOWS = TotalledWindows("proxy", PROXY_METRICS_KEY, MetricDelta)
 PROJECT_WINDOWS = TotalledWindows("project", PROJECT_METRICS_KEY, StepMetricDelta)
@@ -958,6 +1014,7 @@ CONNECTOR_WINDOWS = EntityWindows("connector", CONNECTOR_METRICS_KEY, StepMetric
 TUNNEL_PEER_WINDOWS = TotalledWindows("tunnel_peer", TUNNEL_PEER_METRICS_KEY, TunnelPeerMetricDelta)
 HOST_WINDOWS = HostWindows("host", HOST_METRICS_KEY, MetricDelta)
 FAILURE_WINDOWS = FailureWindows("failure", FAILURE_METRICS_KEY, FailureCount)
+SITE_REQUEST_WINDOWS = SiteRequestWindows("site_requests", SITE_REQUESTS_KEY, RequestCount)
 METRIC_WINDOW_KINDS: tuple[MetricWindowKind[Any, Any], ...] = (
     PROXY_WINDOWS,
     PROJECT_WINDOWS,
@@ -965,6 +1022,7 @@ METRIC_WINDOW_KINDS: tuple[MetricWindowKind[Any, Any], ...] = (
     TUNNEL_PEER_WINDOWS,
     HOST_WINDOWS,
     FAILURE_WINDOWS,
+    SITE_REQUEST_WINDOWS,
 )
 
 
@@ -975,7 +1033,8 @@ def window_kind(key: str) -> MetricWindowKind[Any, Any] | None:
 
 @dataclass
 class MetricWindows:
-    """Metrics windows by kind and entity: what a gateway's metering and failure log add to Redis, and what a flush takes."""
+    """Metrics windows by kind and entity: what a gateway's metering and failure log, and the exit report ingest, add to
+    Redis, and what a flush takes."""
 
     proxies: dict[str, MetricDelta] = field(default_factory=dict)
     projects: dict[str, StepMetricDelta] = field(default_factory=dict)
@@ -984,6 +1043,9 @@ class MetricWindows:
     # Keyed by (project_id, connector_id, host).
     hosts: dict[HostKey, MetricDelta] = field(default_factory=dict)
     failures: dict[FailureCountKey, FailureCount] = field(default_factory=dict)
+    # Keyed by (project_id, connector_id, site, place): exit reputation's requests through dynamic connectors, and the
+    # reports on every connector.
+    site_requests: dict[SitePlaceKey, RequestCount] = field(default_factory=dict)
 
     @classmethod
     def of(cls, staged: Mapping[str, str]) -> "MetricWindows":
@@ -1014,6 +1076,7 @@ class MetricWindows:
             (TUNNEL_PEER_WINDOWS, self.tunnel_peers),
             (HOST_WINDOWS, self.hosts),
             (FAILURE_WINDOWS, self.failures),
+            (SITE_REQUEST_WINDOWS, self.site_requests),
         )
 
     def keyed(self) -> Iterator[tuple[MetricWindowKind[Any, Any], str, WindowCounts]]:
@@ -1591,6 +1654,19 @@ class RedisClient:
     async def clear_metric_windows(self, message_id: str) -> None:
         """Delete the staging hash of flush ``message_id``, once Postgres holds what it took."""
         await self.client.delete(METRICS_TAKEN_KEY.format(message_id=message_id))
+
+    async def add_site_reports(self, counts: Mapping[SitePlaceKey, RequestCount]) -> None:
+        """Add a batch of exit reports, as counts per site window, onto the live windows for the next flush to take.
+
+        One MULTI, each window written as metering writes one and listed in its index.
+        """
+        if not counts:
+            return
+        now = utc_now().isoformat()
+        pipe = self.client.pipeline(transaction=True)
+        for entity, window in counts.items():
+            SITE_REQUEST_WINDOWS.add(pipe, SITE_REQUEST_WINDOWS.key(entity), window, now)
+        await pipe.execute()
 
     async def delete_tunnel_peer_window(self, peer_id: str) -> None:
         """Delete a tunnel device's live metrics window, once the device is gone."""

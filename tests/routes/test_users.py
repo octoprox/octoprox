@@ -3,6 +3,7 @@
 
 """Tests for user management endpoints, and the audit entries of each change to a user."""
 
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -781,6 +782,7 @@ class TestHistory:
             "username": [None, name],
             "email": [None, f"{name}@example.com"],
             "role": [None, "viewer"],
+            "kind": [None, "person"],
             "is_active": [None, True],
             "password": [None, "********"],
         }
@@ -790,6 +792,7 @@ class TestHistory:
             "username": [name, None],
             "email": [f"{name}@example.com", None],
             "role": ["editor", None],
+            "kind": ["person", None],
             "is_active": [True, None],
             "password": ["********", None],
         }
@@ -883,3 +886,161 @@ class TestLinkedSignIns:
         ).json()
         assert authenticated_client.delete(f"/api/v1/users/{user['id']}/identities/nope").status_code == 404
         assert authenticated_client.delete("/api/v1/users/me/identities/nope").status_code == 404
+
+
+def _service_account(client: TestClient, role: str = "viewer", headers: dict[str, str] | None = None) -> dict[str, Any]:
+    """A new service account with a name of its own, as the admin endpoint answers it."""
+    response = client.post(
+        "/api/v1/users/service-accounts", json={"username": f"bot-{uuid4().hex[:8]}", "role": role}, headers=headers
+    )
+    assert response.status_code == 201, response.text
+    return dict(response.json())
+
+
+class TestServiceAccounts:
+    """A service account has a name, a role and the tokens an admin issues it: never a password, an email or an
+    invite link, and it stays a service account."""
+
+    def test_an_admin_creates_one_from_a_name_and_a_role(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        name = f"bot-{uuid4().hex[:8]}"
+
+        created = client.post("/api/v1/users/service-accounts", json={"username": name, "role": "editor"})
+
+        assert created.status_code == 201, created.text
+        account = created.json()
+        fields = ("username", "email", "role", "kind", "is_active", "has_password", "sign_in_providers", "token_count")
+        assert {field: account[field] for field in fields} == {
+            "username": name,
+            "email": "",
+            "role": "editor",
+            "kind": "service",
+            "is_active": True,
+            "has_password": False,
+            "sign_in_providers": [],
+            "token_count": 0,
+        }
+        assert account["token_last_used_at"] is None
+        assert client.get(f"/api/v1/users/{account['id']}").json()["kind"] == "service"
+        client.delete(f"/api/v1/users/{account['id']}")
+
+    def test_the_role_defaults_to_viewer_and_a_taken_name_is_refused(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        name = f"bot-{uuid4().hex[:8]}"
+        person = client.post("/api/v1/users", json={"username": f"person-{uuid4().hex[:8]}", "password": "pass12345"}).json()
+
+        first = client.post("/api/v1/users/service-accounts", json={"username": name})
+        again = client.post("/api/v1/users/service-accounts", json={"username": name})
+        a_persons = client.post("/api/v1/users/service-accounts", json={"username": person["username"]})
+
+        assert (first.status_code, first.json()["role"]) == (201, "viewer")
+        assert [(r.status_code, r.json()["detail"]) for r in (again, a_persons)] == [
+            (400, f"Username '{name}' already exists"),
+            (400, f"Username '{person['username']}' already exists"),
+        ]
+        client.delete(f"/api/v1/users/{first.json()['id']}")
+        client.delete(f"/api/v1/users/{person['id']}")
+
+    def test_only_an_admin_creates_one(
+        self, authenticated_client: TestClient, editor_auth_headers: dict[str, str], viewer_auth_headers: dict[str, str]
+    ) -> None:
+        for headers in (editor_auth_headers, viewer_auth_headers):
+            response = authenticated_client.post(
+                "/api/v1/users/service-accounts", json={"username": f"bot-{uuid4().hex[:8]}"}, headers=headers
+            )
+            assert response.status_code == 403
+
+    def test_an_admins_token_may_create_one_but_not_issue_its_token(self, authenticated_client: TestClient) -> None:
+        """The account alone is no way in; its first token is, and that needs a session."""
+        client = authenticated_client
+        admin = client.post(
+            "/api/v1/users/invite", json={"username": f"provisioner-{uuid4().hex[:8]}", "role": "admin"}
+        ).json()["user"]
+        token = client.post(f"/api/v1/users/{admin['id']}/tokens", json={"name": "provisioning"}).json()
+        headers = {"Authorization": f"Bearer {token['token']}"}
+
+        account = _service_account(client, headers=headers)
+
+        assert client.post(f"/api/v1/users/{account['id']}/tokens", json={"name": "t"}, headers=headers).status_code == 403
+        [entry] = history(client, "user", account["id"])
+        assert (entry["action"], entry["actor"], entry["details"]) == (
+            "created", admin["username"], {"auth_token": "provisioning", "auth_token_id": token["api_token"]["id"]}
+        )
+        client.delete(f"/api/v1/users/{account['id']}")
+        client.delete(f"/api/v1/users/{admin['id']}")
+
+    def test_it_never_takes_a_password_an_email_or_an_invite_link(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        account = _service_account(client)
+        url = f"/api/v1/users/{account['id']}"
+
+        with recorded(client) as added:
+            password = client.patch(url, json={"password": "sneaky-pass-1"})
+            email = client.patch(url, json={"email": "bot@example.com"})
+            link = client.post(f"{url}/reinvite")
+
+        assert [(r.status_code, r.json()["detail"]) for r in (password, email, link)] == [
+            (400, "A service account has no password: it uses API tokens"),
+            (400, "A service account has no email: nobody signs in as it"),
+            (400, "A service account has no password: it uses API tokens"),
+        ]
+        assert added == []
+        client.delete(url)
+
+    def test_its_name_role_and_active_flag_change_and_its_kind_does_not(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        account = _service_account(client)
+        renamed = f"bot-{uuid4().hex[:8]}"
+
+        # The empty email it already has is no change; a kind sent along is not a field of the edit.
+        edited = client.patch(
+            f"/api/v1/users/{account['id']}",
+            json={"username": renamed, "role": "editor", "is_active": False, "email": "", "kind": "person"},
+        )
+
+        assert edited.status_code == 200, edited.text
+        fields = ("username", "role", "is_active", "email", "kind")
+        assert {field: edited.json()[field] for field in fields} == {
+            "username": renamed, "role": "editor", "is_active": False, "email": "", "kind": "service",
+        }
+        assert client.get(f"/api/v1/users/{account['id']}").json()["kind"] == "service"
+        client.delete(f"/api/v1/users/{account['id']}")
+
+    def test_the_list_tells_the_kinds_apart_and_counts_each_ones_tokens(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        account = _service_account(client)
+        person = client.post("/api/v1/users", json={"username": f"person-{uuid4().hex[:8]}", "password": "pass12345"}).json()
+        secrets = [
+            client.post(f"/api/v1/users/{account['id']}/tokens", json={"name": name}).json()["token"]
+            for name in ("scraper", "spare")
+        ]
+        assert client.get("/api/v1/users/me", headers={"Authorization": f"Bearer {secrets[0]}"}).status_code == 200
+
+        listed = {user["id"]: user for user in client.get("/api/v1/users").json()["users"]}
+
+        bot, someone = listed[account["id"]], listed[person["id"]]
+        assert (bot["kind"], bot["token_count"]) == ("service", 2)
+        assert bot["token_last_used_at"] is not None
+        assert (someone["kind"], someone["token_count"], someone["token_last_used_at"]) == ("person", 0, None)
+        # One user's answer counts them the same way.
+        alone = client.get(f"/api/v1/users/{account['id']}").json()
+        assert (alone["token_count"], alone["token_last_used_at"]) == (2, bot["token_last_used_at"])
+        client.delete(f"/api/v1/users/{account['id']}")
+        client.delete(f"/api/v1/users/{person['id']}")
+
+    def test_its_creation_and_deletion_are_recorded_with_its_kind(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        account = _service_account(client)
+        name = account["username"]
+        assert client.delete(f"/api/v1/users/{account['id']}").status_code == 204
+
+        entries = history(client, "user", account["id"])
+
+        assert [(e["action"], e["actor"]) for e in entries] == [("created", "testadmin"), ("deleted", "testadmin")]
+        born, gone = (e["changes"] for e in entries)
+        assert born == {
+            "username": [None, name], "role": [None, "viewer"], "kind": [None, "service"], "is_active": [None, True],
+        }
+        assert gone == {
+            "username": [name, None], "role": ["viewer", None], "kind": ["service", None], "is_active": [True, None],
+        }

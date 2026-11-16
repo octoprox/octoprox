@@ -385,6 +385,8 @@ def _proxy(c: ConnSpec, i: int, host: str, port: int, display: str, country: str
         "state_source": "database" if state else None,
         "city": city,
         "city_source": "database" if city else None,
+        # A gateway row names no exit of its own; the others keep their records under the IP they show.
+        "exit_ip": display if display[:1].isdigit() else None,
         "tags": [c.ctype],
         "created_at": ago(hours=6 + int(unit(f"pcreated:{c.id}", i) * 300)),
     }

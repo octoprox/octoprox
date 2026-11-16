@@ -71,10 +71,11 @@ from api.db.redis import PROJECT_WINDOWS, PROXY_WINDOWS, TUNNEL_PEER_WINDOWS, To
 from api.geo.models import META_LOCATION_CHECKED_AT, ConflictRule, ContradictedAction, UnknownAction
 from api.models.connector import Connector
 from api.models.credential import Credential
-from api.models.project import MitmBrowser, MitmEngine, MitmMode, Project
+from api.models.project import ExitReputationMode, MitmBrowser, MitmEngine, MitmMode, Project
 from api.models.provider import ProviderRecord
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.models.user import User, UserRole
+from api.models.user import User, UserKind, UserRole
+from api.providers.sdk.strategies import META_DYNAMIC_SESSIONS
 
 
 @dataclass
@@ -169,6 +170,12 @@ class ProjectRepository:
             exit_headers=project.exit_headers,
             observation_log=project.observation_log,
             observation_retention_days=project.observation_retention_days,
+            exit_reputation=project.exit_reputation.value,
+            exit_reputation_avoid_minutes=project.exit_reputation_avoid_minutes,
+            exit_reputation_half_life_hours=project.exit_reputation_half_life_hours,
+            exit_reputation_connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
+            exit_reputation_bad_reports=project.exit_reputation_bad_reports,
+            exit_reputation_bad_share=project.exit_reputation_bad_share,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -205,6 +212,12 @@ class ProjectRepository:
             model.exit_headers = project.exit_headers
             model.observation_log = project.observation_log
             model.observation_retention_days = project.observation_retention_days
+            model.exit_reputation = project.exit_reputation.value
+            model.exit_reputation_avoid_minutes = project.exit_reputation_avoid_minutes
+            model.exit_reputation_half_life_hours = project.exit_reputation_half_life_hours
+            model.exit_reputation_connector_half_life_requests = project.exit_reputation_connector_half_life_requests
+            model.exit_reputation_bad_reports = project.exit_reputation_bad_reports
+            model.exit_reputation_bad_share = project.exit_reputation_bad_share
             model.updated_at = utc_now()
             await self._session.flush()
         return self._to_domain(model) if model else None
@@ -296,6 +309,12 @@ class ProjectRepository:
             exit_headers=bool(model.exit_headers),
             observation_log=bool(model.observation_log),
             observation_retention_days=model.observation_retention_days,
+            exit_reputation=ExitReputationMode(model.exit_reputation or "off"),
+            exit_reputation_avoid_minutes=model.exit_reputation_avoid_minutes,
+            exit_reputation_half_life_hours=model.exit_reputation_half_life_hours,
+            exit_reputation_connector_half_life_requests=model.exit_reputation_connector_half_life_requests,
+            exit_reputation_bad_reports=model.exit_reputation_bad_reports,
+            exit_reputation_bad_share=model.exit_reputation_bad_share,
             pending_deletion=bool(model.pending_deletion),
             created_at=model.created_at,
             updated_at=model.updated_at,
@@ -916,25 +935,52 @@ class ProxyRepository:
             for owner, connector_id, status, count in result.all()
         ]
 
-    async def metadata_values(self, connector_ids: Iterable[str], key: str) -> dict[str, set[str]]:
-        """The values metadata ``key`` takes on each connector's rows; a connector none of whose rows has it is absent.
+    async def metadata_values(
+        self, connector_ids: Iterable[str], key: str, *, among: Collection[str] | None = None
+    ) -> dict[str, set[str]]:
+        """The values metadata ``key`` takes on each connector's rows, only those ``among`` when given; a connector none
+        of whose rows has one is absent.
 
         One statement that returns a row per connector and value, however many rows share it: a 10,000-slot pool with
         groups in five countries sends five.
         """
         wanted = sorted(set(connector_ids))
-        if not wanted:
+        if not wanted or (among is not None and not among):
             return {}
         value = ProxyModel.metadata_[key].as_string()
+        # Equal to one of ``among`` holds only for a value, so the row's metadata is read once.
+        held = value.is_not(None) if among is None else any_of(value, sorted(among))
         result = await self._session.execute(
-            select(ProxyModel.connector_id, value)
-            .where(any_of(ProxyModel.connector_id, wanted), value.is_not(None))
-            .distinct()
+            select(ProxyModel.connector_id, value).where(any_of(ProxyModel.connector_id, wanted), held).distinct()
         )
         found: dict[str, set[str]] = {}
         for connector_id, taken in result.all():
             found.setdefault(connector_id, set()).add(taken)
         return found
+
+    async def dynamic_connectors(self, connector_ids: Iterable[str]) -> set[str]:
+        """Those of ``connector_ids`` that serve through a dynamic gateway row, which a synced dynamic-sessions connector
+        holds alone (its sync deletes every other row).
+
+        One statement: it counts each connector's rows on the connector index and reads the metadata of a lone row only,
+        so a pool of thousands of rows is never read.
+        """
+        wanted = sorted(set(connector_ids))
+        if not wanted:
+            return set()
+        lone = (
+            select(ProxyModel.connector_id)
+            .where(any_of(ProxyModel.connector_id, wanted))
+            .group_by(ProxyModel.connector_id)
+            .having(func.count() == 1)
+            .subquery("lone")
+        )
+        result = await self._session.execute(
+            select(ProxyModel.connector_id)
+            .join(lone, ProxyModel.connector_id == lone.c.connector_id)
+            .where(ProxyModel.metadata_[META_DYNAMIC_SESSIONS].as_string() == "true")
+        )
+        return set(result.scalars().all())
 
     async def placements(self, proxy_ids: Iterable[str], project_id: str | None = None) -> dict[str, ProxyPlacement]:
         """The connector and status of each of ``proxy_ids`` that exists (in the project, when one is given)."""
@@ -2247,6 +2293,7 @@ class UserRepository:
             email=user.email,
             password_hash=user.password_hash,
             role=user.role.value if isinstance(user.role, UserRole) else user.role,
+            kind=user.kind.value,
             is_active=user.is_active,
             invite_token=user.invite_token,
             invite_token_expires_at=user.invite_token_expires_at,
@@ -2260,7 +2307,7 @@ class UserRepository:
         return user
 
     async def update(self, user: User) -> User:
-        """Update an existing user."""
+        """Update an existing user; its kind stays as it was created."""
         result = await self._session.execute(
             select(UserModel).where(UserModel.id == user.id)
         )
@@ -2314,6 +2361,7 @@ class UserRepository:
             email=model.email,
             password_hash=model.password_hash,
             role=UserRole(model.role),
+            kind=UserKind(model.kind),
             is_active=model.is_active,
             invite_token=model.invite_token,
             invite_token_expires_at=model.invite_token_expires_at,

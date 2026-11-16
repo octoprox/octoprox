@@ -78,7 +78,9 @@ Octoprox requires authentication for all web UI and API access. On first startup
 There are three roles:
 - **Admin** - Full access including user management
 - **Editor** - Can manage projects, proxies, credentials, and connectors (no user management)
-- **Viewer** - Read-only access to all data
+- **Viewer** - Read-only access to all data, except [exit reports]({{ site.baseurl }}/exit-reputation#reporting-exits): a viewer can send them to any project, and they steer routing where the project's exit reputation avoids
+
+Every user has one of them, people and service accounts alike. A service account is a user for a script or a service: it never signs in, and authenticates only with the API tokens an admin issues it under **Administration → Users**, *Service accounts*. See [Service accounts](sso#service-accounts).
 
 Besides a password, a user can sign in with a Google, Microsoft or GitHub account once an admin has set the provider up, and scripts can authenticate with a personal access token instead of a password. See [Single Sign-On and API Tokens](sso).
 
@@ -294,6 +296,21 @@ failure_log:
 | `failure_log.max_per_window` | How many distinct examples of each kind one gateway keeps per project in each 5-second window. Beyond that, failures are only counted | `100` |
 
 An example is a few hundred bytes, so a kind that fills its examples at the default takes a few hundred kilobytes of Redis, and a project takes that for each kind it actually sees. Lower `max_entries` on an install with many projects: the counts stay complete whatever it is set to. The settings can also be set as `OCTOPROX_FAILURE_LOG_ENABLED`, `OCTOPROX_FAILURE_LOG_MAX_ENTRIES`, `OCTOPROX_FAILURE_LOG_RETENTION_HOURS` and `OCTOPROX_FAILURE_LOG_MAX_PER_WINDOW`; gateways record the failures and the api shows them, so set them alike on both.
+
+## Exit Reputation
+
+How long [exit reputation]({{ site.baseurl }}/exit-reputation) records are kept. A project's mode and its five settings are in its Project settings; this one is the install's:
+
+```yaml
+exit_reputation:
+  retention_days: 30   # after the day a record was last seen; 0 keeps records forever
+```
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `exit_reputation.retention_days` | Days a record is kept after the day it was last seen, by a report or a request counted. The hourly compaction on the workers deletes the older ones, except an exit IP's whose avoid is still ahead; `0` keeps them forever | `30` |
+
+It can also be set as `OCTOPROX_EXIT_REPUTATION_RETENTION_DAYS`, on the workers, which alone read it. Records exist only for what clients reported: an exit IP on a site, or a connector on a site and a requested place. Keep it at ten times the projects' Remember for or more: an exit IP's record deleted sooner forgets evidence that still weighs, so later reports on the IP are decided without it. A connector's evidence counts half every hour at least, so it weighs next to nothing long before its record is deleted.
 
 ## Audit Log
 

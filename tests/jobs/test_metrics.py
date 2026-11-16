@@ -693,7 +693,7 @@ class Series:
 class TestCompaction:
     @pytest.fixture
     def compaction(self, sessions: async_sessionmaker[AsyncSession], geo: GeoStack) -> CompactionJob:
-        return CompactionJob(sessions, geo.geo_service)
+        return CompactionJob(sessions, geo.geo_service, reputation_retention_days=30)
 
     @pytest.fixture
     async def series(self, rows: Rows, project: Project) -> Series:

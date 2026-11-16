@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from api.gateway.latency import LatencyHistogram
     from api.models.system import StreamState
     from api.providers.registry import ProviderRegistry
+    from api.reputation.ingest import ExitReportCount
     from api.roles.runtime import RoleRuntime
 
 logger = structlog.get_logger()
@@ -218,7 +219,7 @@ class Node:
         self.tasks = TaskSet()
         # One per process: what its heartbeat and metrics report as loop lag.
         self.loop_lag = LoopLagMonitor()
-        self.telemetry = Telemetry(self.snapshot, self.latencies)
+        self.telemetry = Telemetry(self.snapshot, self.latencies, self.exit_reports)
         self._phase = _Phase.BUILT
         # The runtimes asked to start, in start order: stopped in reverse, one whose start raised included.
         self._starting: list[RoleRuntime] = []
@@ -509,6 +510,10 @@ class Node:
     def latencies(self) -> list[LatencyHistogram]:
         """The gateway's request latency histograms as they stand, for the metrics alone; none without a gateway."""
         return self.gateway.metering.latencies.snapshot() if self.gateway is not None else []
+
+    def exit_reports(self) -> list[ExitReportCount]:
+        """The exit reports the worker applied, by connector and verdict, for the metrics alone; none without a worker."""
+        return self.worker.exit_report_ingest.counts.snapshot() if self.worker is not None else []
 
     @property
     def background_tasks(self) -> list[asyncio.Task[None]]:

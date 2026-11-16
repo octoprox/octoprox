@@ -4,10 +4,10 @@
 import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
-import { Plus, Trash2, Send, Copy, Check, KeyRound } from 'lucide-react'
-import { Button, Input, Label, Badge, Alert, Inspector, InspectorSection, KeyValue, ConfirmDialog, QueryContent, Tabs } from './ui'
+import { Plus, Trash2, Send, Copy, Check, KeyRound, Bot } from 'lucide-react'
+import { Button, Input, Label, Badge, Alert, Inspector, InspectorSection, KeyValue, ConfirmDialog, QueryContent, Tabs, Segmented } from './ui'
 import { DataTable, type DataTableFeatures } from './DataTable'
-import { Page } from './layout/Page'
+import { EmptyState, Page } from './layout/Page'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { ApiTokensPanel, LinkedSignInsPanel } from './AccessPanels'
 import { EntityHistory } from './audit/EntityHistory'
@@ -16,8 +16,9 @@ import { useAuth } from '../contexts/AuthContext'
 import { formatDate, formatDateTime, relativeTime } from '../utils/format'
 import { useToast } from '../contexts/ToastContext'
 import {
-  fetchUsers, createUser, inviteUser, reinviteUser, updateUser, deleteUser,
+  fetchUsers, createUser, inviteUser, reinviteUser, updateUser, deleteUser, createServiceAccount,
   UserAccount, UserCreate, UserInviteCreate, InviteResponse, UserUpdate, UserRole, AuthProviderKind,
+  ServiceAccountCreate, UserListResponse,
 } from '../api/client'
 
 /** No way in yet: neither a password nor a linked provider account. */
@@ -28,25 +29,38 @@ const roleBadgeColor: Record<UserRole, 'red' | 'blue' | 'gray'> = { admin: 'red'
 const roleOptions: RichSelectOption[] = [
   { value: 'admin', label: 'Admin', description: 'Full access including user management' },
   { value: 'editor', label: 'Editor', description: 'Manage proxies, credentials, connectors, and projects' },
-  { value: 'viewer', label: 'Viewer', description: 'Read-only access to all resources' },
+  { value: 'viewer', label: 'Viewer', description: 'Read-only, except exit reports, which steer routing where a project avoids' },
 ]
 
-type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
+type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | { kind: 'new-service' } | null
 
 /** What an open user shows: their details, or their History in their place. */
 type UserView = 'details' | 'history'
+
+/** Which accounts the page lists: the people who sign in, or the service accounts programs use through API tokens. */
+type AccountsView = 'people' | 'service'
+
+const ACCOUNTS_VIEWS: { value: AccountsView; label: string }[] = [
+  { value: 'people', label: 'People' },
+  { value: 'service', label: 'Service accounts' },
+]
 
 export default function UsersPage() {
   const queryClient = useQueryClient()
   const { authStatus } = useAuth()
   const toast = useToast()
+  const [accounts, setAccounts] = useState<AccountsView>('people')
   const [panel, setPanel] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<UserAccount | null>(null)
   const [inviteUrl, setInviteUrl] = useState<string | null>(null)
 
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: fetchUsers })
   const { data } = usersQuery
-  const users = data?.users ?? []
+  const [people, serviceAccounts] = useMemo(() => {
+    const all = data?.users ?? []
+    return [all.filter((u) => u.kind !== 'service'), all.filter((u) => u.kind === 'service')]
+  }, [data])
+  const showingService = accounts === 'service'
 
   const reinviteMutation = useMutation({
     mutationFn: (userId: string) => reinviteUser(userId),
@@ -59,14 +73,17 @@ export default function UsersPage() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deleteUser(id),
-    onSuccess: (_r, id) => {
+    mutationFn: (user: UserAccount) => deleteUser(user.id),
+    onSuccess: (_r, user) => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
-      if (panel?.kind === 'edit' && panel.id === id) setPanel(null)
+      if (panel?.kind === 'edit' && panel.id === user.id) setPanel(null)
       setPendingDelete(null)
-      toast.show('User deleted')
+      toast.show(user.kind === 'service' ? 'Service account deleted' : 'User deleted')
     },
-    onError: (err: any) => { setPendingDelete(null); toast.show(err.message || 'Failed to delete user', 'error') },
+    onError: (err: any, user) => {
+      setPendingDelete(null)
+      toast.show(err.message || (user.kind === 'service' ? 'Failed to delete service account' : 'Failed to delete user'), 'error')
+    },
   })
 
   const columns: ColumnDef<DataTableFeatures, UserAccount, unknown>[] = useMemo(() => [
@@ -159,10 +176,76 @@ export default function UsersPage() {
     },
   ], [reinviteMutation, authStatus?.user_id])
 
-  const openUser = panel?.kind === 'edit' ? users.find((u) => u.id === panel.id) ?? null : null
+  const serviceColumns: ColumnDef<DataTableFeatures, UserAccount, unknown>[] = useMemo(() => [
+    {
+      accessorKey: 'username',
+      header: 'Name',
+      meta: { filterVariant: 'text' as const },
+      cell: ({ row }) => (
+        <span className="inline-flex items-center gap-2.5 max-w-full">
+          <span className="w-6 h-6 rounded-full bg-surface-raised text-fg-muted flex items-center justify-center flex-none"><Bot className="w-3.5 h-3.5" /></span>
+          <span className="font-medium truncate">{row.original.username}</span>
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'role',
+      header: 'Role',
+      size: 100,
+      meta: { filterVariant: 'select' as const },
+      cell: ({ getValue }) => <Badge color={roleBadgeColor[getValue<UserRole>()]}>{getValue<UserRole>()}</Badge>,
+    },
+    {
+      accessorFn: (row: UserAccount) => (row.is_active ? 'Active' : 'Disabled'),
+      id: 'status',
+      header: 'Status',
+      size: 110,
+      meta: { filterVariant: 'select' as const },
+      cell: ({ row }) => row.original.is_active ? <Badge color="green">Active</Badge> : <Badge color="gray">Disabled</Badge>,
+    },
+    {
+      accessorKey: 'token_count',
+      header: 'Tokens',
+      size: 90,
+      meta: { align: 'right' as const },
+      cell: ({ getValue }) => {
+        const n = getValue<number>()
+        return n > 0 ? <span className="tabular-nums">{n}</span> : <span className="text-fg-subtle">none</span>
+      },
+    },
+    {
+      accessorKey: 'token_last_used_at',
+      header: 'Last used',
+      size: 120,
+      cell: ({ getValue }) => {
+        const v = getValue<string | null>()
+        return v
+          ? <span className="text-fg-muted" title={formatDateTime(v)}>{relativeTime(v)}</span>
+          : <span className="text-fg-subtle">never</span>
+      },
+    },
+    {
+      accessorKey: 'created_at',
+      header: 'Created',
+      size: 120,
+      cell: ({ getValue }) => <span className="text-fg-muted">{formatDate(getValue<string>())}</span>,
+    },
+  ], [])
+
+  const openUser = panel?.kind === 'edit' ? data?.users.find((u) => u.id === panel.id) ?? null : null
 
   let panelNode: React.ReactNode = null
-  if (panel?.kind === 'edit' && openUser) {
+  if (panel?.kind === 'edit' && openUser?.kind === 'service') {
+    panelNode = (
+      <ServiceAccountPanel
+        key={openUser.id}
+        account={openUser}
+        onClose={() => setPanel(null)}
+        onDelete={() => setPendingDelete(openUser)}
+        onSaved={() => toast.show('Service account updated')}
+      />
+    )
+  } else if (panel?.kind === 'edit' && openUser) {
     panelNode = (
       <UserPanel
         key={openUser.id}
@@ -190,35 +273,88 @@ export default function UsersPage() {
         onSaved={() => {}}
       />
     )
+  } else if (panel?.kind === 'new-service') {
+    panelNode = (
+      <ServiceAccountPanel
+        key="new-service"
+        onClose={() => setPanel(null)}
+        onCreated={(account) => {
+          // Its inspector next, where its first token is issued.
+          setPanel({ kind: 'edit', id: account.id })
+          toast.show(`Service account "${account.username}" created`)
+        }}
+        onSaved={() => {}}
+      />
+    )
   }
+
+  const addServiceAccount = () => setPanel({ kind: 'new-service' })
 
   return (
     <Page
       title="Users"
-      count={data?.total}
-      subtitle="Who can sign in to this Octoprox instance. Admins manage users and backups."
-      actions={<Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add user</Button>}
+      count={data ? (showingService ? serviceAccounts.length : people.length) : undefined}
+      subtitle={showingService
+        ? 'Accounts for scripts and services: a role and the API tokens you issue them, never a password or an email.'
+        : 'Who can sign in to this Octoprox instance. Admins manage users and backups.'}
+      belowTitle={
+        <Segmented
+          size="sm"
+          options={ACCOUNTS_VIEWS}
+          value={accounts}
+          onChange={(next) => { setAccounts(next); setPanel(null); setInviteUrl(null) }}
+          className="pointer-coarse:*:min-h-11"
+        />
+      }
+      actions={showingService
+        ? <Button size="sm" onClick={addServiceAccount} className="pointer-coarse:h-11"><Plus className="w-3.5 h-3.5" /> Add service account</Button>
+        : <Button size="sm" onClick={() => setPanel({ kind: 'new' })} className="pointer-coarse:h-11"><Plus className="w-3.5 h-3.5" /> Add user</Button>}
       panel={panelNode}
     >
       <QueryContent query={usersQuery} what="the users">
-        <DataTable
-          columns={columns}
-          data={users}
-          defaultPageSize={20}
-          emptyMessage="No users found."
-          enableColumnFilters
-          getRowId={(row) => row.id}
-          onRowClick={(row) => { setInviteUrl(null); setPanel({ kind: 'edit', id: row.id }) }}
-          activeRowId={panel?.kind === 'edit' ? panel.id : null}
-          columnVisibility={panel ? { last_login_at: false, created_at: false, actions: false } : {}}
-        />
+        {!showingService ? (
+          <DataTable
+            key="people"
+            columns={columns}
+            data={people}
+            defaultPageSize={20}
+            emptyMessage="No users found."
+            enableColumnFilters
+            getRowId={(row) => row.id}
+            onRowClick={(row) => { setInviteUrl(null); setPanel({ kind: 'edit', id: row.id }) }}
+            activeRowId={panel?.kind === 'edit' ? panel.id : null}
+            columnVisibility={panel ? { last_login_at: false, created_at: false, actions: false } : {}}
+          />
+        ) : serviceAccounts.length === 0 ? (
+          <EmptyState
+            icon={<Bot />}
+            title="No service accounts yet"
+            description="A service account lets a script or a service call the API with tokens of its own, under no person's name. It has a role and never signs in."
+            action={<Button size="sm" onClick={addServiceAccount} className="pointer-coarse:h-11"><Plus className="w-3.5 h-3.5" /> Add service account</Button>}
+          />
+        ) : (
+          <DataTable
+            key="service"
+            columns={serviceColumns}
+            data={serviceAccounts}
+            defaultPageSize={20}
+            emptyMessage="No service accounts found."
+            enableColumnFilters
+            getRowId={(row) => row.id}
+            onRowClick={(row) => setPanel({ kind: 'edit', id: row.id })}
+            activeRowId={panel?.kind === 'edit' ? panel.id : null}
+            columnVisibility={panel ? { created_at: false } : {}}
+          />
+        )}
       </QueryContent>
       {pendingDelete && (
         <ConfirmDialog
-          title="Delete user?"
-          message={<>Remove <b className="text-fg">{pendingDelete.username}</b>. They lose access immediately. This cannot be undone.</>}
+          title={pendingDelete.kind === 'service' ? 'Delete service account?' : 'Delete user?'}
+          message={pendingDelete.kind === 'service'
+            ? <>Remove <b className="text-fg">{pendingDelete.username}</b> and its API tokens. Anything still using them gets 401 on its next call. This cannot be undone.</>
+            : <>Remove <b className="text-fg">{pendingDelete.username}</b>. They lose access immediately. This cannot be undone.</>}
           onCancel={() => setPendingDelete(null)}
-          onConfirm={() => deleteMutation.mutate(pendingDelete.id)}
+          onConfirm={() => deleteMutation.mutate(pendingDelete)}
           isLoading={deleteMutation.isPending}
         />
       )}
@@ -376,6 +512,122 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
       </div>
 
       {view === 'history' && user && <EntityHistory entityType="user" entityId={user.id} />}
+    </Inspector>
+  )
+}
+
+/** A service account's inspector, or the form that adds one: a name, a role, the active flag and its API tokens. */
+function ServiceAccountPanel({ account, onClose, onDelete, onSaved, onCreated }: {
+  account?: UserAccount
+  onClose: () => void
+  onDelete?: () => void
+  onSaved: () => void
+  onCreated?: (account: UserAccount) => void
+}) {
+  const queryClient = useQueryClient()
+  const [username, setUsername] = useState(account?.username || '')
+  const [role, setRole] = useState<UserRole>(account?.role || 'viewer')
+  const [isActive, setIsActive] = useState(account?.is_active ?? true)
+  const [error, setError] = useState<string | null>(null)
+  const [view, setView] = useState<UserView>('details')
+
+  const createMutation = useMutation({
+    mutationFn: (data: ServiceAccountCreate) => createServiceAccount(data),
+    onSuccess: (created) => {
+      // In the list at once, so its inspector opens without waiting for the refetch.
+      queryClient.setQueryData<UserListResponse>(['users'], (old) => old && { total: old.total + 1, users: [...old.users, created] })
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+      onCreated?.(created)
+    },
+    onError: (err: any) => setError(err.message || 'Failed to create service account'),
+  })
+  const updateMutation = useMutation({
+    mutationFn: (data: UserUpdate) => updateUser(account!.id, data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['users'] }); onSaved() },
+    onError: (err: any) => setError(err.message || 'Failed to update service account'),
+  })
+
+  const handleSubmit = (e: React.SubmitEvent) => {
+    e.preventDefault()
+    setError(null)
+    if (!account) {
+      createMutation.mutate({ username, role })
+      return
+    }
+    const data: UserUpdate = {}
+    if (username !== account.username) data.username = username
+    if (role !== account.role) data.role = role
+    if (isActive !== account.is_active) data.is_active = isActive
+    if (Object.keys(data).length === 0) return
+    updateMutation.mutate(data)
+  }
+
+  const saving = createMutation.isPending || updateMutation.isPending
+
+  return (
+    <Inspector
+      title={account ? account.username : 'Add service account'}
+      subtitle={account
+        ? `service account · ${account.role} · ${account.is_active ? 'active' : 'disabled'}`
+        : 'A name and a role, then its API tokens'}
+      onClose={onClose}
+      footer={view === 'history' ? undefined : (
+        <>
+          {account && onDelete && <Button type="button" variant="danger-ghost" size="sm" onClick={onDelete} className="pointer-coarse:h-11"><Trash2 className="w-3.5 h-3.5" /> Delete</Button>}
+          <span className="flex-1" />
+          <Button type="button" variant="outline" size="sm" onClick={onClose} className="pointer-coarse:h-11">Cancel</Button>
+          <Button type="submit" form="service-account-form" size="sm" disabled={saving} className="pointer-coarse:h-11">
+            {saving ? (account ? 'Saving…' : 'Creating…') : account ? 'Save changes' : 'Create service account'}
+          </Button>
+        </>
+      )}
+    >
+      {account && (
+        <Tabs<UserView>
+          tabs={[{ id: 'details', label: 'Details' }, { id: 'history', label: 'History' }]}
+          active={view}
+          onChange={setView}
+          className="pointer-coarse:*:min-h-11"
+        />
+      )}
+      {/* Hidden rather than unmounted while History shows, so an edit not saved yet is still there afterwards. */}
+      <div hidden={view === 'history'} className="space-y-4">
+      <form id="service-account-form" onSubmit={handleSubmit} className="space-y-3">
+        {error && <Alert variant="error">{error}</Alert>}
+        <div>
+          <Label htmlFor="service-account-name">Name</Label>
+          <Input id="service-account-name" value={username} onChange={(e) => setUsername(e.target.value)} required autoComplete="off" placeholder={account ? undefined : 'What uses it, e.g. scraper-eu'} />
+        </div>
+        <div>
+          <Label>Role</Label>
+          <RichSelect options={roleOptions} value={role} onChange={(val) => setRole(val as UserRole)} required className="pointer-coarse:[&>button]:min-h-11" />
+          <p className="text-xs text-fg-subtle mt-1">Its tokens act with this role. Give it the lowest that does the job: a viewer reads everything and changes nothing, and can send exit reports.</p>
+        </div>
+        {account && (
+          <div>
+            <label className="flex items-center gap-2 text-[13px] pointer-coarse:min-h-11">
+              <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} className="w-4 h-4" />
+              Active
+            </label>
+            <p className="text-xs text-fg-subtle">While it is off, its tokens are refused.</p>
+          </div>
+        )}
+        {!account && (
+          <p className="text-xs text-fg-subtle">
+            It never signs in: no password, no email, no invite link. Once it is added, issue it an API token here and send that token with each call.
+          </p>
+        )}
+      </form>
+      {account && <ApiTokensPanel userId={account.id} />}
+      {account && (
+        <InspectorSection title="Details">
+          <KeyValue label="Created" value={formatDateTime(account.created_at)} />
+          <KeyValue label="Updated" value={formatDateTime(account.updated_at)} />
+        </InspectorSection>
+      )}
+      </div>
+
+      {view === 'history' && account && <EntityHistory entityType="user" entityId={account.id} />}
     </Inspector>
   )
 }

@@ -33,6 +33,7 @@ from api.core.signals import (
 )
 from api.core.stats import (
     MetricDelta,
+    RequestCount,
     StepMetricDelta,
     TunnelPeerMetricDelta,
     fold_host_tail,
@@ -44,12 +45,14 @@ from api.core.workers import WorkerName
 from api.db.redis import MetricWindows
 from api.gateway.latency import RequestLatencies
 from api.models.connector import DEFAULT_TRAFFIC_LIMIT_STATUS, TrafficLimitAction
+from api.reputation.site import counted_site
 
 if TYPE_CHECKING:
     from api.core.rate_limiter import RateLimiter
     from api.core.stats import DemandCountKey
     from api.core.timing import Step
     from api.db.redis import BatchPart, BatchReply, RedisClient
+    from api.models.location import LocationTarget
     from api.models.proxy import Proxy
     from api.routing.inflight import InFlight
     from api.routing.outcomes import LocalOutcomes
@@ -157,12 +160,14 @@ class RequestMetering(BatchPublisher):
         peer_id: str | None = None,
         target_host: str | None = None,
         steps: Mapping[Step, float] | None = None,
+        location: LocationTarget | None = None,
         **_: object,
     ) -> None:
         """``request_completed`` from a listener."""
         try:
             self.record_completed(
-                proxy_id, project_id, success, latency_ms, bytes_sent, bytes_received, peer_id, target_host, steps
+                proxy_id, project_id, success, latency_ms, bytes_sent, bytes_received, peer_id, target_host, steps,
+                location=location,
             )
         except Exception:
             logger.error("Counting a request failed", proxy_id=proxy_id, project_id=project_id, exc_info=True)
@@ -201,11 +206,15 @@ class RequestMetering(BatchPublisher):
         peer_id: str | None = None,
         target_host: str | None = None,
         steps: Mapping[Step, float] | None = None,
+        *,
+        location: LocationTarget | None = None,
     ) -> None:
         """Count one finished request, its bytes being what its meter had not reported yet; never blocks.
 
         ``steps`` is its latency by step (``RequestTimer.steps``). A request through a connector with a rate limit is
-        also counted in the proxy's shared window, in a held task.
+        also counted in the proxy's shared window, in a held task. One through a dynamic connector of a project whose
+        exit reputation records also counts for its site and requested place (``location``), what the connector's
+        block rate there is measured against.
         """
         view = self._router.snapshot.view_of(proxy_id)
         for delta in self._deltas(proxy_id, project_id, view, peer_id, target_host):
@@ -216,6 +225,9 @@ class RequestMetering(BatchPublisher):
             return
         self._outcomes.record(proxy_id, success, latency_ms)
         self.latencies.record(view.connector.id, view.connector.name, success, latency_ms, steps or {})
+        # A tunnel device's connection is never reported on: exit reports are for proxy clients.
+        if peer_id is None and view.dynamic:
+            self._count_site_request(project_id, view.connector.id, target_host, location)
         rate = view.rate_limit
         if rate is not None:
             self._held.spawn(
@@ -238,6 +250,20 @@ class RequestMetering(BatchPublisher):
             return
         self._last_rejection[project_id] = now
         self._demand[(project_id, demand_minute(self._clock()), DEMAND_REJECTIONS_FIELD)] += 1
+
+    def _count_site_request(
+        self, project_id: str, connector_id: str, target_host: str | None, location: LocationTarget | None
+    ) -> None:
+        """Count a request through a dynamic connector for exit reputation, when its project records and it names a
+        site: under (project, connector, site, place), the place "" for a request naming none."""
+        project = self._router.snapshot.project(project_id)
+        if project is None or not project.exit_reputation.records:
+            return
+        site = counted_site(target_host)
+        if site is None:
+            return
+        key = (project_id, connector_id, site, location.key if location else "")
+        self._windows.site_requests.setdefault(key, RequestCount()).requests += 1
 
     def record_unresolved(self, peer_id: str) -> None:
         """A tunnel connection was relayed by address (its name could not be recovered): counted on the device."""

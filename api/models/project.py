@@ -49,6 +49,39 @@ class MitmBrowser(StrEnum):
     RANDOM = "random"
 
 
+class ExitReputationMode(StrEnum):
+    """What a project does with exit reports; each mode does what the one before it does, and more."""
+
+    OFF = "off"
+    RECORD = "record"
+    AVOID = "avoid"
+
+    @property
+    def records(self) -> bool:
+        """Whether exit reports are taken, and requests counted for the connectors' block rates."""
+        return self is not ExitReputationMode.OFF
+
+    @property
+    def avoids(self) -> bool:
+        """Whether routing acts on it: exits avoided for a site kept away from it, connectors weighted by their record."""
+        return self is ExitReputationMode.AVOID
+
+
+# The longest "Avoid for": a week, the longest any avoid lasts.
+MAX_REPUTATION_AVOID_MINUTES = 10_080
+# The longest exit reputation half-life ("Remember for"): past the 7 days an avoid can last, a longer one changes
+# nothing.
+MAX_REPUTATION_HALF_LIFE_HOURS = 168
+# The longest connector memory, in requests ("Connector memory"). The shortest is 20: a busy record's weighted requests
+# settle at about 1.44 times it, and a factor needs 20 of them.
+MAX_REPUTATION_CONNECTOR_HALF_LIFE_REQUESTS = 10_000
+# The most fresh bad reports a project may ask for before an exit is avoided.
+MAX_REPUTATION_BAD_REPORTS = 10
+# The highest minimum bad share, in percent: at 100 a single good report would keep an exit from ever being avoided
+# again for the site, since decayed weights never reach zero.
+MAX_REPUTATION_BAD_SHARE = 99
+
+
 def mitm_fields(
     mode: MitmMode, engine: MitmEngine | None, browser: MitmBrowser | None
 ) -> tuple[MitmEngine | None, MitmBrowser | None]:
@@ -136,6 +169,19 @@ class Project(Audited):
     observation_log: bool = True
     observation_retention_days: int | None = Field(default=None, ge=0, le=MAX_OBSERVATION_RETENTION_DAYS)
 
+    # Exit reputation (see docs/exit-reputation.md): what exit reports do, how many minutes a first avoid lasts (each
+    # repeat doubles it), how many hours an exit IP's reports take to count half ("Remember for"), how many more
+    # requests a connector's evidence takes to count half ("Connector memory"), how many fresh bad reports avoid an exit
+    # for a site, and the least share (percent) of the site's recent reports that must be bad.
+    exit_reputation: ExitReputationMode = ExitReputationMode.OFF
+    exit_reputation_avoid_minutes: int = Field(default=60, ge=1, le=MAX_REPUTATION_AVOID_MINUTES)
+    exit_reputation_half_life_hours: int = Field(default=24, ge=1, le=MAX_REPUTATION_HALF_LIFE_HOURS)
+    exit_reputation_connector_half_life_requests: int = Field(
+        default=100, ge=20, le=MAX_REPUTATION_CONNECTOR_HALF_LIFE_REQUESTS
+    )
+    exit_reputation_bad_reports: int = Field(default=1, ge=1, le=MAX_REPUTATION_BAD_REPORTS)
+    exit_reputation_bad_share: int = Field(default=50, ge=1, le=MAX_REPUTATION_BAD_SHARE)
+
     # Deleted, and waiting for its cloud instances to be terminated: its clients are turned away and it takes no new
     # connector. Only a delete sets it (``ProjectRepository.mark_pending_deletion``); create and edit never write it.
     pending_deletion: bool = False
@@ -196,6 +242,14 @@ class ProjectCreate(BaseModel):
     exit_headers: bool = False
     observation_log: bool = True
     observation_retention_days: int | None = Field(default=None, ge=0, le=MAX_OBSERVATION_RETENTION_DAYS)
+    exit_reputation: ExitReputationMode = ExitReputationMode.OFF
+    exit_reputation_avoid_minutes: int = Field(default=60, ge=1, le=MAX_REPUTATION_AVOID_MINUTES)
+    exit_reputation_half_life_hours: int = Field(default=24, ge=1, le=MAX_REPUTATION_HALF_LIFE_HOURS)
+    exit_reputation_connector_half_life_requests: int = Field(
+        default=100, ge=20, le=MAX_REPUTATION_CONNECTOR_HALF_LIFE_REQUESTS
+    )
+    exit_reputation_bad_reports: int = Field(default=1, ge=1, le=MAX_REPUTATION_BAD_REPORTS)
+    exit_reputation_bad_share: int = Field(default=50, ge=1, le=MAX_REPUTATION_BAD_SHARE)
 
     @model_validator(mode="after")
     def validate_mitm_fields(self) -> "ProjectCreate":
@@ -231,6 +285,14 @@ class ProjectUpdate(BaseModel):
     observation_log: bool | None = None
     # "" clears the override (inherit the install's observation retention).
     observation_retention_days: Annotated[int, Field(ge=0, le=MAX_OBSERVATION_RETENTION_DAYS)] | Literal[""] | None = None
+    exit_reputation: ExitReputationMode | None = None
+    exit_reputation_avoid_minutes: Annotated[int, Field(ge=1, le=MAX_REPUTATION_AVOID_MINUTES)] | None = None
+    exit_reputation_half_life_hours: Annotated[int, Field(ge=1, le=MAX_REPUTATION_HALF_LIFE_HOURS)] | None = None
+    exit_reputation_connector_half_life_requests: (
+        Annotated[int, Field(ge=20, le=MAX_REPUTATION_CONNECTOR_HALF_LIFE_REQUESTS)] | None
+    ) = None
+    exit_reputation_bad_reports: Annotated[int, Field(ge=1, le=MAX_REPUTATION_BAD_REPORTS)] | None = None
+    exit_reputation_bad_share: Annotated[int, Field(ge=1, le=MAX_REPUTATION_BAD_SHARE)] | None = None
 
     def changes(self) -> dict[str, object]:
         """The fields this edit sets, with the empty strings that clear an override turned into None."""
@@ -264,6 +326,12 @@ class ProjectResponse(BaseModel):
     exit_headers: bool = False
     observation_log: bool = True
     observation_retention_days: int | None = None
+    exit_reputation: ExitReputationMode = ExitReputationMode.OFF
+    exit_reputation_avoid_minutes: int = 60
+    exit_reputation_half_life_hours: int = 24
+    exit_reputation_connector_half_life_requests: int = 100
+    exit_reputation_bad_reports: int = 1
+    exit_reputation_bad_share: int = 50
     pending_deletion: bool = False
     created_at: datetime
     updated_at: datetime
@@ -295,6 +363,12 @@ class ProjectSummary(BaseModel):
     exit_headers: bool = False
     observation_log: bool = True
     observation_retention_days: int | None = None
+    exit_reputation: ExitReputationMode = ExitReputationMode.OFF
+    exit_reputation_avoid_minutes: int = 60
+    exit_reputation_half_life_hours: int = 24
+    exit_reputation_connector_half_life_requests: int = 100
+    exit_reputation_bad_reports: int = 1
+    exit_reputation_bad_share: int = 50
     pending_deletion: bool = False
     credential_count: int = 0
     connector_count: int = 0

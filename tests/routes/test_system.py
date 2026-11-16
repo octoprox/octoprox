@@ -36,6 +36,7 @@ from api.db.models import SystemMetricsModel
 from api.db.redis import (
     CHANGES_STREAM_KEY,
     EARLIER_RELEASES_KEY_GROUP,
+    EXIT_REPORT_STREAM_KEY,
     FEED_HEAD_KEY,
     INSTANCE_TTL_SECONDS,
     JOB_STREAM_KEY,
@@ -629,7 +630,9 @@ class TestWorkStreams:
         streams = authenticated_client.get(ENDPOINT).json()["streams"]
 
         assert streams["error"] is None
-        assert list(streams["by_name"]) == [*(f"jobs.{kind}" for kind in JobKind), "sightings", "observations"]
+        assert list(streams["by_name"]) == [
+            *(f"jobs.{kind}" for kind in JobKind), "sightings", "observations", "exit_reports",
+        ]
         provision = streams["by_name"]["jobs.provision"]
         oldest = provision.pop("oldest_seconds")
         assert provision == {"length": 5, "pending": 2, "queued": 3, "consumers": 1}
@@ -665,10 +668,11 @@ class TestWorkStreams:
 
         assert streams.error is None
         assert list(streams.by_name) == list(WORK_STREAMS)
-        assert set(WORK_STREAMS) == {f"jobs.{kind}" for kind in JobKind} | {"sightings", "observations"}
+        assert set(WORK_STREAMS) == {f"jobs.{kind}" for kind in JobKind} | {"sightings", "observations", "exit_reports"}
         assert set(WORK_STREAMS.values()) == {JOB_STREAM_KEY.format(kind=kind) for kind in JobKind} | {
             SIGHTING_STREAM_KEY,
             OBSERVATION_STREAM_KEY,
+            EXIT_REPORT_STREAM_KEY,
         }
         assert all(reading == WorkStream() for reading in streams.by_name.values())
 
@@ -801,6 +805,7 @@ class TestStores:
         # The seeded admin is always present and roles add up to the total.
         assert after["users"] >= 1
         assert sum(after["users_by_role"].values()) == after["users"]
+        assert sum(after["users_by_kind"].values()) == after["users"]
         # Statuses from the proxies.status column: every proxy has one.
         assert sum(after["proxies_by_status"].values()) == after["proxies"]
         for status, moved in (("unknown", 1), ("healthy", 1), ("unhealthy", 1)):

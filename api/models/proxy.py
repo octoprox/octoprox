@@ -316,6 +316,10 @@ class ProxyResponse(BaseModel):
     state_source: str | None = None
     city: str | None = None
     city_source: str | None = None
+    # The IP the row's exit reputation is kept under: its last seen exit, as
+    # one canonical text. None on a dynamic gateway, whose every request
+    # exits elsewhere, and until the exit is first seen.
+    exit_ip: str | None = None
     tags: list[str]
     created_at: datetime
 

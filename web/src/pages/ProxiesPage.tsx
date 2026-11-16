@@ -19,6 +19,7 @@ import { ProviderLogo } from '../components/ProviderLogo'
 import { useProviders } from '../hooks/useProviders'
 import { EntityHistory } from '../components/audit/EntityHistory'
 import { RichSelect, RichSelectOption } from '../components/RichSelect'
+import { ProxyReputationSection } from '../components/geo/ExitIpReputation'
 import { formatBytes, formatDate, formatDateTime } from '../utils/format'
 import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog, CopyButton, QueryContent, Tabs } from '../components/ui'
 
@@ -324,7 +325,7 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
   onDelete: () => void
   onSaved: () => void
 }) {
-  const { selectedProjectId } = useProject()
+  const { selectedProjectId, selectedProject } = useProject()
   const toast = useToast()
   const { presets } = useProviders()
   // The state and city fields edit the hand-set pin only, each on its own; a place the databases resolved is shown as a placeholder.
@@ -500,6 +501,11 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
           <KeyValue label="Flags" value={[proxy.location.is_hosting && 'hosting', proxy.location.is_vpn && 'VPN', proxy.location.is_public_proxy && 'public proxy', proxy.location.is_tor && 'Tor', proxy.location.is_residential_proxy && 'residential proxy'].filter(Boolean).join(', ')} />
         )}
       </InspectorSection>
+
+      {/* A row with an exit of its own (not a dynamic gateway) is avoided by its exit IP's records. */}
+      {proxy.exit_ip && selectedProjectId && selectedProject?.exit_reputation !== 'off' && (
+        <ProxyReputationSection projectId={selectedProjectId} ip={proxy.exit_ip} />
+      )}
 
       <InspectorSection title="Details">
         <KeyValue

@@ -36,9 +36,14 @@ export function ApiTokensPanel({ userId, canCreate = true, compact = false }: { 
   const [created, setCreated] = useState<ApiTokenCreated | null>(null)
   const [pendingRevoke, setPendingRevoke] = useState<ApiTokenSummary | null>(null)
 
+  const changed = () => {
+    queryClient.invalidateQueries({ queryKey })
+    // The user list counts each user's tokens.
+    if (userId) queryClient.invalidateQueries({ queryKey: ['users'] })
+  }
   const revoke = useMutation({
     mutationFn: (id: string) => deleteApiToken(id, userId),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); setPendingRevoke(null); toast.show('Token revoked') },
+    onSuccess: () => { changed(); setPendingRevoke(null); toast.show('Token revoked') },
     onError: (e: Error) => { setPendingRevoke(null); toast.show(e.message || 'Failed to revoke token', 'error') },
   })
 
@@ -47,7 +52,7 @@ export function ApiTokensPanel({ userId, canCreate = true, compact = false }: { 
       <div className="flex items-center justify-between gap-3 mb-2">
         <div className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle">API tokens</div>
         {canCreate && (
-          <Button type="button" size="sm" variant="outline" onClick={() => setCreating(true)}>
+          <Button type="button" size="sm" variant="outline" onClick={() => setCreating(true)} className="pointer-coarse:h-11">
             <Plus className="w-3.5 h-3.5" /> New token
           </Button>
         )}
@@ -77,7 +82,7 @@ export function ApiTokensPanel({ userId, canCreate = true, compact = false }: { 
                     {t.created_by && userId ? ` · issued by ${t.created_by}` : ''}
                   </div>
                 </div>
-                <Button type="button" size="sm" variant="danger-ghost" onClick={() => setPendingRevoke(t)} title="Revoke">
+                <Button type="button" size="sm" variant="danger-ghost" onClick={() => setPendingRevoke(t)} title="Revoke" className="pointer-coarse:h-11 pointer-coarse:min-w-11">
                   <Trash2 className="w-3.5 h-3.5" />
                 </Button>
               </li>
@@ -90,7 +95,7 @@ export function ApiTokensPanel({ userId, canCreate = true, compact = false }: { 
         <CreateTokenDialog
           userId={userId}
           onClose={() => setCreating(false)}
-          onCreated={(result) => { setCreating(false); setCreated(result); queryClient.invalidateQueries({ queryKey }) }}
+          onCreated={(result) => { setCreating(false); setCreated(result); changed() }}
         />
       )}
       {created && <ShowTokenDialog result={created} onClose={() => setCreated(null)} />}
@@ -135,8 +140,8 @@ function CreateTokenDialog({ userId, onClose, onCreated }: { userId?: string; on
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-6">
-          <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-          <Button type="submit" size="sm" disabled={!name.trim() || create.isPending}>{create.isPending ? 'Creating…' : 'Create token'}</Button>
+          <Button type="button" variant="outline" size="sm" onClick={onClose} className="pointer-coarse:h-11">Cancel</Button>
+          <Button type="submit" size="sm" disabled={!name.trim() || create.isPending} className="pointer-coarse:h-11">{create.isPending ? 'Creating…' : 'Create token'}</Button>
         </div>
       </form>
     </Modal>
@@ -157,12 +162,12 @@ function ShowTokenDialog({ result, onClose }: { result: ApiTokenCreated; onClose
         <Alert variant="warning" className="text-sm mb-4">Copy it now. The token is shown once and cannot be fetched again; only a hash is kept.</Alert>
         <div className="flex items-stretch gap-2">
           <code className="flex-1 min-w-0 font-mono text-xs bg-surface-raised rounded-lg p-3 break-all select-all">{result.token}</code>
-          <Button type="button" variant="outline" size="sm" onClick={copy} className="flex-none">
+          <Button type="button" variant="outline" size="sm" onClick={copy} className="flex-none pointer-coarse:h-11">
             {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} {copied ? 'Copied' : 'Copy'}
           </Button>
         </div>
         <div className="flex justify-end mt-6">
-          <Button type="button" size="sm" onClick={onClose}>Done</Button>
+          <Button type="button" size="sm" onClick={onClose} className="pointer-coarse:h-11">Done</Button>
         </div>
       </div>
     </Modal>

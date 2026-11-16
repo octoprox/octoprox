@@ -4,12 +4,14 @@
 """The feed compiler: the definitions in Postgres, cut into the sections gateways route on.
 
 The controller compiles the whole feed, the api one project for its previews; the caller passes the runtime state in.
+The controller's compile also carries the exit reputation section, read from Postgres apart from the compiles
+(:mod:`api.feed.reputation`); the previews carry none.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Container, Iterable, Mapping
+from collections.abc import Collection, Container, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -31,6 +33,7 @@ from api.db.repository import (
 from api.db.wireguard_repository import WireGuardPeerRepository, WireGuardSettingsRepository
 from api.feed.models import (
     GLOBAL_SECTION,
+    REPUTATION_SECTION,
     RUNTIME_SECTION,
     ConnectorSection,
     GeoDatabaseFeed,
@@ -38,6 +41,7 @@ from api.feed.models import (
     OpenVpnFeed,
     OpenVpnPeerFeed,
     OpenVpnServerFeed,
+    ReputationSection,
     RuntimeSection,
     Section,
     WireGuardFeed,
@@ -45,6 +49,7 @@ from api.feed.models import (
     WireGuardServerFeed,
     connector_section,
 )
+from api.feed.reputation import FeedReputation, ReputationScope
 from api.feed.sections import resolve_credentials, routing_credential
 from api.geo.models import (
     META_LOCATION_CANDIDATES,
@@ -109,12 +114,17 @@ class CompiledFeed:
     changes: str | None
     compiled_at: datetime
     # The whole feed, ready for the publisher: the global section, every
-    # connector section, and the runtime section with the quarantines and the
-    # traffic blocks the compile was given.
+    # connector section, the runtime section with the quarantines and the
+    # traffic blocks the compile was given, and the exit reputation section as
+    # last read, for what this compile holds.
     sections: dict[str, Section]
     # Every compiled connector's section, the very objects ``sections`` holds,
     # by connector ID: what the controller's job keys are made from.
     connectors: dict[str, ConnectorSection]
+    # The projects whose exit reputation this compile gave something new to be
+    # read for (an exit IP, a dynamic connector, a switch to avoid): each owes
+    # a read of its records.
+    reputation_owed: frozenset[str] = frozenset()
 
 
 class FeedCompiler:
@@ -143,7 +153,7 @@ class FeedCompiler:
     ) -> dict[str, Section]:
         """One project's feed for the api's previews, built as the full compile builds it, in a session of its own.
 
-        It applies nothing, keeps and logs nothing, and carries no database list and no tunnels.
+        It applies nothing, keeps and logs nothing, and carries no database list, no tunnels and no exit reputation.
 
         Args:
             quarantined: proxy ID -> its quarantine's end (naive UTC), as the api read it; other projects' are ignored.
@@ -285,19 +295,24 @@ class FeedCompiler:
         global_section: GlobalSection,
         connector_sections: Mapping[str, ConnectorSection],
         runtime: RuntimeSection,
+        reputation: ReputationSection | None = None,
     ) -> dict[str, Section]:
-        """The feed's sections by name: the global section, each connector's in order, then the runtime section."""
+        """The feed's sections by name: the global section, each connector's in order, the runtime section, then the
+        exit reputation section when there is one (never in a preview)."""
         sections: dict[str, Section] = {GLOBAL_SECTION: global_section}
         for connector_id, section in connector_sections.items():
             sections[connector_section(connector_id)] = section
         sections[RUNTIME_SECTION] = runtime
+        if reputation is not None:
+            sections[REPUTATION_SECTION] = reputation
         return sections
 
 
 class FullFeedCompiler(FeedCompiler):
     """Compiles the whole routing feed on the controller, applying the rows it reads to the process's stores first.
 
-    It keeps the ids of its last compile for the runtime sections built between compiles, and logs each workaround once.
+    It keeps the ids of its last compile for the runtime sections built between compiles, and what its exit reputation
+    is read for with the records last read, and logs each workaround once.
     """
 
     def __init__(
@@ -319,6 +334,9 @@ class FullFeedCompiler(FeedCompiler):
         # quarantine or a traffic block may name. None before the first compile.
         self._proxy_ids: frozenset[str] | None = None
         self._connector_ids: frozenset[str] = frozenset()
+        # The exit reputation of the projects that avoid: what the last full
+        # compile gives it to be read for, and the records last read for that.
+        self._reputation = FeedReputation(session_factory)
         # The workarounds the last full compile made, so the next logs only new ones.
         self._logged: set[tuple[str, str]] = set()
 
@@ -331,7 +349,9 @@ class FullFeedCompiler(FeedCompiler):
     ) -> CompiledFeed:
         """Every section as Postgres holds it now, read in one read-only snapshot, with these quarantines and traffic blocks.
 
-        The rows read are applied to the sinks before any section is built; raises when Postgres cannot be read.
+        The rows read are applied to the sinks before any section is built; raises when Postgres cannot be read. The
+        exit reputation section is the one last read, for what this compile holds; no record is read here, and the
+        projects the compile gave something new to be read for are named in ``reputation_owed``.
 
         Args:
             quarantined: proxy ID -> when its quarantine ends (naive UTC); an ID the feed does not hold is ignored.
@@ -362,8 +382,14 @@ class FullFeedCompiler(FeedCompiler):
         connector_sections = self._connector_sections(connectors, credentials, proxies, workarounds)
         self._proxy_ids = frozenset(proxy.id for section in connector_sections.values() for proxy in section.proxies)
         self._connector_ids = frozenset(connector_sections)
+        owed = self._reputation.adopt(ReputationScope.of(global_section.projects, connector_sections.values()))
         self._log_workarounds(workarounds)
-        sections = self._sections(global_section, connector_sections, self.runtime_section(quarantined, blocked_until))
+        sections = self._sections(
+            global_section,
+            connector_sections,
+            self.runtime_section(quarantined, blocked_until),
+            self._reputation.section(),
+        )
         logger.debug(
             "Feed compiled",
             changes=changes,
@@ -372,7 +398,11 @@ class FullFeedCompiler(FeedCompiler):
             duration_ms=round((time.monotonic() - started) * 1000, 1),
         )
         return CompiledFeed(
-            changes=changes, compiled_at=utc_now(), sections=sections, connectors=dict(connector_sections)
+            changes=changes,
+            compiled_at=utc_now(),
+            sections=sections,
+            connectors=dict(connector_sections),
+            reputation_owed=owed,
         )
 
     def runtime_section(
@@ -385,6 +415,21 @@ class FullFeedCompiler(FeedCompiler):
         if self._proxy_ids is None:
             raise RuntimeError("The runtime section is built from a full compile, and none has run")
         return self._runtime_section(quarantined, blocked_until, self._proxy_ids, self._connector_ids)
+
+    def reputation_section(self) -> ReputationSection:
+        """The exit reputation section as last read, for what the last compile holds; Postgres is not read."""
+        return self._reputation.section()
+
+    async def read_reputation(self, project_ids: Collection[str] | None = None) -> None:
+        """Read from Postgres the exit reputation records of ``project_ids`` (None: every project that avoids), for what
+        the last compile holds, and make the section anew.
+
+        Nothing is read while no project avoids; RuntimeError before the first compile, and a failed read raises and
+        keeps the last one.
+        """
+        if self._proxy_ids is None:
+            raise RuntimeError("Exit reputation is read for what a full compile holds, and none has run")
+        await self._reputation.read(project_ids)
 
     def _log_workarounds(self, workarounds: _Workarounds) -> None:
         """Log each workaround the previous full compile did not make: once when it starts, not every compile.

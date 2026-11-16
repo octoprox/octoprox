@@ -44,17 +44,26 @@ from api.db.redis import (
     RedisClient,
 )
 from api.db.repository import ProxyRepository
+from api.db.reputation_repository import ExitReputationRepository
 from api.db.streams import ChangeKind, ChangeLog, RuntimeSignal
 from api.feed.codec import FeedCodec
 from api.feed.compiler import FullFeedCompiler
-from api.feed.models import RUNTIME_SECTION, FeedHead, RuntimeSection, connector_section
+from api.feed.models import (
+    REPUTATION_SECTION,
+    RUNTIME_SECTION,
+    FeedHead,
+    ReputationSection,
+    RuntimeSection,
+    connector_section,
+)
 from api.feed.publisher import FeedPublisher
 from api.geo.settings import GeoSettingsStore, defaults_from_config
 from api.models.connector import Connector, ConnectorUpdate
-from api.models.project import Project
+from api.models.project import ExitReputationMode, Project, ProjectCreate
 from api.models.proxy import Proxy, ProxyCreate, ProxyStatus
 from api.providers.registry import ProviderRegistry
 from api.providers.store import ProviderStore
+from api.reputation.record import ExitIpKey, ReportCounts
 from api.services.proxies import StatusMove
 from tests.conftest import queued_job_keys
 from tests.controller.conftest import (
@@ -130,6 +139,42 @@ def runtime_of(builder: FeedBuilder) -> RuntimeSection:
     section = builder.sections[RUNTIME_SECTION]
     assert isinstance(section, RuntimeSection)
     return section
+
+
+def avoids_of(builder: FeedBuilder, project_id: str) -> dict[str, dict[str, datetime]]:
+    """The avoids the builder's reputation section carries for the project: exit IP -> site -> end."""
+    section = builder.sections[REPUTATION_SECTION]
+    assert isinstance(section, ReputationSection)
+    project = section.projects.get(project_id)
+    return project.ip_avoids if project is not None else {}
+
+
+async def avoiding_project(services: Services, *ips: str, **connector_fields: Any) -> tuple[Project, list[Proxy]]:
+    """A project whose exit reputation avoids, with one static connector of working rows last seen exiting from ``ips``."""
+    project = await services.projects.create(
+        ProjectCreate(name="Avoids", username="avoids", password="pw", exit_reputation=ExitReputationMode.AVOID),
+        services.actor,
+    )
+    connector = await services.connect(project, "ISP", STATIC, **connector_fields)
+    rows = []
+    for ip in ips:
+        row = Proxy(
+            host=ip, port=8080, connector_id=connector.id, status=ProxyStatus.HEALTHY, metadata={"discovered_ip": ip}
+        )
+        await services.proxies.add(row)
+        rows.append(row)
+    return project, rows
+
+
+async def reported_bad(
+    sessions: async_sessionmaker[AsyncSession], redis_client: RedisClient, project: Project, ip: str, site: str
+) -> None:
+    """A bad exit report applied as the workers apply one, then the runtime entry announcing the move."""
+    async with sessions() as session:
+        reports = {ExitIpKey(project.id, ip, site): ReportCounts(bad=1)}
+        await ExitReputationRepository(session).apply_reports(reports, utc_now())
+        await session.commit()
+    await announce(redis_client, RuntimeSignal.REPUTATION.value, project.id)
 
 
 def statements_while(sessions: async_sessionmaker[AsyncSession]) -> tuple[list[str], Callable[[], None]]:
@@ -396,21 +441,280 @@ class TestRuntimeSection:
         redis_client: RedisClient,
         sessions: async_sessionmaker[AsyncSession],
     ) -> None:
-        project = await services.project()
-        connector = await services.connect(project, "ISP", STATIC, traffic_config=LIMITED)
-        tripped = await healthy_proxy(services, connector, "10.0.0.1")
+        """A quarantine or a traffic block is read from Redis alone, the exit reputation section kept as it was."""
+        project, (tripped, _) = await avoiding_project(
+            services, "203.0.113.1", "203.0.113.2", traffic_config=LIMITED
+        )
+        connector_id = tripped.connector_id
+        await reported_bad(sessions, redis_client, project, "203.0.113.2", "google.com")
         await caught_up(builder, redis_client)
+        await until(lambda: avoids_of(builder, project.id) != {})
+        reputation = builder.sections[REPUTATION_SECTION]
         published = builder.publishes
 
         statements, stop = statements_while(sessions)
         try:
             await quarantine(redis_client, tripped.id, time.time() + 600)
-            await block(redis_client, connector.id, utc_now() + timedelta(days=1))
+            await block(redis_client, connector_id, utc_now() + timedelta(days=1))
             await caught_up(builder, redis_client)
         finally:
             stop()
         assert builder.publishes > published
         assert statements == []
+        assert builder.sections[REPUTATION_SECTION] is reputation
+
+
+class TestReputation:
+    """Exit reputation reaches gateways in a section of its own, read from Postgres per project: for the project a
+    reputation entry names, for every one at a full read, and for one whose exits a compile moved; never on every
+    compile."""
+
+    async def test_a_reputation_entry_reads_postgres_and_moves_only_the_reputation_section(
+        self,
+        builder: FeedBuilder,
+        services: Services,
+        gateway: Gateway,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        project, (blocked, kept) = await avoiding_project(services, "203.0.113.1", "203.0.113.2")
+        await caught_up(builder, redis_client)
+        assert await gateway.follower.poll()
+        compiles = builder.compiles
+
+        statements, stop = statements_while(sessions)
+        try:
+            await reported_bad(sessions, redis_client, project, "203.0.113.1", "www.google.com")
+            await caught_up(builder, redis_client)
+            await until(lambda: "203.0.113.1" in avoids_of(builder, project.id))
+        finally:
+            stop()
+        assert any("exit_ip_reputation" in statement for statement in statements)
+        assert builder.compiles == compiles
+        await until(lambda: not builder._unpublished)
+        assert await gateway.follower.poll()
+        assert set(gateway.updates[-1].changed) == {REPUTATION_SECTION}
+
+        async def picked(host: str) -> set[str | None]:
+            picks = [await gateway.router.select_proxy_for_project(project.id, target_host=host) for _ in range(6)]
+            return {proxy.id if proxy is not None else None for proxy in picks}
+
+        # The site's requests keep off the avoided exit; other sites still use it.
+        assert await picked("www.google.com") == {kept.id}
+        assert await picked("example.com") == {blocked.id, kept.id}
+
+    async def test_an_entry_reads_the_project_it_names_and_one_naming_several_reads_every_one(
+        self,
+        builder: FeedBuilder,
+        services: Services,
+        redis_client: RedisClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project, _ = await avoiding_project(services, "203.0.113.1")
+        await caught_up(builder, redis_client)
+        asked: list[list[str] | None] = []
+        read = builder._compiler.read_reputation
+
+        async def recorded(project_ids: list[str] | None = None) -> None:
+            asked.append(project_ids)
+            await read(project_ids)
+
+        monkeypatch.setattr(builder._compiler, "read_reputation", recorded)
+        await announce(redis_client, RuntimeSignal.REPUTATION.value, project.id)
+        await until(lambda: asked == [[project.id]])
+        await announce(redis_client, RuntimeSignal.REPUTATION.value, "")
+        await until(lambda: asked == [[project.id], None])
+
+    async def test_a_compile_reads_none_unless_it_moved_a_projects_exits(
+        self,
+        builder: FeedBuilder,
+        services: Services,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+        change_log: ChangeLog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A row seen exiting from a new IP is joined to that IP's record by the read its compile owes."""
+        project, (row,) = await avoiding_project(services, "203.0.113.1")
+        await reported_bad(sessions, redis_client, project, "203.0.113.9", "google.com")
+        await caught_up(builder, redis_client)
+        await until(lambda: not builder._reputation_owed)
+        assert avoids_of(builder, project.id) == {}
+        asked: list[list[str] | None] = []
+        read = builder._compiler.read_reputation
+
+        async def recorded(project_ids: list[str] | None = None) -> None:
+            asked.append(project_ids)
+            await read(project_ids)
+
+        monkeypatch.setattr(builder._compiler, "read_reputation", recorded)
+        # A change that moves no exit: compiled, nothing read.
+        await change_log.record(ChangeKind.PROJECT, project.id)
+        await caught_up(builder, redis_client)
+        assert asked == []
+
+        # Attribution writes the new exit and announces the row: a change entry, and no reputation entry.
+        async with sessions() as session:
+            row.metadata = {"discovered_ip": "203.0.113.9"}
+            await ProxyRepository(session).update(row)
+            await session.commit()
+        await change_log.record(ChangeKind.PROXY, row.id)
+        await caught_up(builder, redis_client)
+
+        await until(lambda: list(avoids_of(builder, project.id)) == ["203.0.113.9"])
+        assert asked == [[project.id]]
+
+    async def test_the_reconcile_reads_every_projects_records(
+        self,
+        make_builder: MakeBuilder,
+        lease: Lease,
+        services: Services,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A record that moved with no entry (one Redis did not take) reaches the gateways with the next reconcile."""
+        builder = make_builder(lease, reconcile_interval=0.5)
+        project, _ = await avoiding_project(services, "203.0.113.1")
+        async with running(builder):
+            await caught_up(builder, redis_client)
+            await until(lambda: not builder._reputation_owed)
+            async with sessions() as session:
+                reports = {ExitIpKey(project.id, "203.0.113.1", "google.com"): ReportCounts(bad=1)}
+                await ExitReputationRepository(session).apply_reports(reports, utc_now())
+                await session.commit()
+
+            await until(lambda: avoids_of(builder, project.id) != {}, timeout=3)
+
+    async def test_a_new_lead_publishes_its_first_compile_with_the_records_read(
+        self,
+        make_builder: MakeBuilder,
+        lease: Lease,
+        services: Services,
+        gateway: Gateway,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Read right after the first compile, before its publish: gateways never route a moment without the avoids."""
+        project, (blocked, kept) = await avoiding_project(services, "203.0.113.1", "203.0.113.2")
+        async with sessions() as session:
+            reports = {ExitIpKey(project.id, "203.0.113.1", "www.google.com"): ReportCounts(bad=1)}
+            await ExitReputationRepository(session).apply_reports(reports, utc_now())
+            await session.commit()
+        builder = make_builder(lease)
+        async with running(builder):
+            await caught_up(builder, redis_client)
+            assert await gateway.follower.poll()
+
+        (first,) = gateway.updates
+        reputation = first.sections[REPUTATION_SECTION]
+        assert isinstance(reputation, ReputationSection)
+        assert list(reputation.projects[project.id].ip_avoids) == ["203.0.113.1"]
+
+    async def test_a_burst_of_reputation_entries_is_read_once_per_interval(
+        self,
+        make_builder: MakeBuilder,
+        lease: Lease,
+        services: Services,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Every report batch of a busy ingest announces itself: the reads must not follow each entry."""
+        interval = 0.3
+        builder = make_builder(lease, compile_interval=interval)
+        project, _ = await avoiding_project(services, "203.0.113.1")
+        reads: list[float] = []
+        read = builder._compiler.read_reputation
+
+        async def counted(project_ids: list[str] | None = None) -> None:
+            reads.append(time.monotonic())
+            await read(project_ids)
+
+        monkeypatch.setattr(builder._compiler, "read_reputation", counted)
+        async with running(builder):
+            await caught_up(builder, redis_client)
+            started = time.monotonic()
+            for _ in range(20):
+                await announce(redis_client, RuntimeSignal.REPUTATION.value, project.id)
+                await asyncio.sleep(0.02)
+            burst = time.monotonic() - started
+            await reported_bad(sessions, redis_client, project, "203.0.113.1", "google.com")
+            # Every entry is read in the end.
+            await until(lambda: avoids_of(builder, project.id) != {})
+        assert 1 <= len(reads) <= math.ceil(burst / interval) + 2
+
+    async def test_a_failed_read_keeps_the_last_one_and_is_tried_again(
+        self,
+        builder: FeedBuilder,
+        services: Services,
+        gateway: Gateway,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Postgres away: quarantines still reach the gateways, and the reputation follows once it is back."""
+        monkeypatch.setattr(streams, "RETRY_FIRST_SECONDS", 0.05)
+        project, (tripped, _) = await avoiding_project(services, "203.0.113.1", "203.0.113.2")
+        await caught_up(builder, redis_client)
+        await until(lambda: not builder._reputation_owed)
+        read = builder._compiler.read_reputation
+
+        async def unreachable(project_ids: list[str] | None = None) -> None:
+            raise ConnectionError("Postgres is down")
+
+        monkeypatch.setattr(builder._compiler, "read_reputation", unreachable)
+        await reported_bad(sessions, redis_client, project, "203.0.113.2", "google.com")
+        await quarantine(redis_client, tripped.id, time.time() + 600)
+        await until(lambda: tripped.id in runtime_of(builder).quarantined and not builder._unpublished)
+        assert await gateway.follower.poll()
+        assert tripped.id in gateway.router.snapshot.quarantined
+        assert avoids_of(builder, project.id) == {}
+
+        monkeypatch.setattr(builder._compiler, "read_reputation", read)
+        await until(lambda: avoids_of(builder, project.id) != {})
+
+    async def test_a_quarantine_never_waits_for_a_reputation_read(
+        self,
+        builder: FeedBuilder,
+        services: Services,
+        gateway: Gateway,
+        redis_client: RedisClient,
+        sessions: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A slow Postgres holds back no quarantine trip that lands with a reputation entry: the read runs after the
+        publish, and what it changes goes out with the next cycle."""
+        project, (tripped, _) = await avoiding_project(services, "203.0.113.1", "203.0.113.2")
+        await caught_up(builder, redis_client)
+        await until(lambda: not builder._reputation_owed)
+        read = builder._compiler.read_reputation
+        released = asyncio.Event()
+
+        async def slow(project_ids: list[str] | None = None) -> None:
+            await released.wait()
+            await read(project_ids)
+
+        monkeypatch.setattr(builder._compiler, "read_reputation", slow)
+        async with sessions() as session:
+            reports = {ExitIpKey(project.id, "203.0.113.2", "google.com"): ReportCounts(bad=1)}
+            await ExitReputationRepository(session).apply_reports(reports, utc_now())
+            await session.commit()
+        # Both entries in one read of the stream.
+        pipe = redis_client.client.pipeline(transaction=True)
+        pipe.zadd(QUARANTINE_KEY, {tripped.id: time.time() + 600})
+        for kind, ref in ((RuntimeSignal.QUARANTINE, tripped.id), (RuntimeSignal.REPUTATION, project.id)):
+            pipe.xadd(
+                RUNTIME_STREAM_KEY, {"kind": kind.value, "ref": ref}, maxlen=RUNTIME_STREAM_MAXLEN, approximate=True
+            )
+        await pipe.execute()
+
+        await until(lambda: tripped.id in runtime_of(builder).quarantined and not builder._unpublished)
+        assert await gateway.follower.poll()
+        assert tripped.id in gateway.router.snapshot.quarantined
+        assert avoids_of(builder, project.id) == {}
+
+        released.set()
+        await until(lambda: avoids_of(builder, project.id) != {} and not builder._unpublished)
 
 
 class TestJobKeys:

@@ -85,3 +85,11 @@ def refused_proxy_status(received_status: int | None) -> str:
 
 #: The Proxy-Status value for a connector over its traffic limit, whichever status it answers with.
 BANDWIDTH_LIMIT_PROXY_STATUS = proxy_status("bandwidth_limit_exceeded")
+
+#: The Proxy-Status error for a request every exit that could serve it is avoided for its site (exit reputation).
+EXITS_AVOIDED_ERROR = "exits_avoided"
+
+
+def exits_avoided_proxy_status(site: str) -> str:
+    """The Proxy-Status value for a request every exit that could serve it is avoided for ``site``, named in its details."""
+    return proxy_status(EXITS_AVOIDED_ERROR, details=site)

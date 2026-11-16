@@ -17,13 +17,17 @@ from typing import Any
 
 from api.feed.models import (
     GLOBAL_SECTION,
+    REPUTATION_SECTION,
     RUNTIME_SECTION,
     ConnectorSection,
     GlobalSection,
+    ProjectReputation,
+    ReputationSection,
     RuntimeSection,
     Section,
     connector_section,
 )
+from api.feed.reputation import ReputationScope
 from api.feed.sections import resolve_credentials, routing_credential
 from api.models.connector import Connector
 from api.models.credential import Credential
@@ -60,6 +64,10 @@ class FeedBuilder:
         self.quarantined: dict[str, datetime] = {}
         # Connector id -> end of its traffic block, as the traffic decider decided.
         self.blocked_until: dict[str, datetime] = {}
+        # Project id -> exit IP -> site -> the end of its avoid, as the exit reputation records hold them.
+        self.reputation: dict[str, dict[str, dict[str, datetime]]] = {}
+        # Project id -> connector id -> site -> level of the requested place -> its stored factor.
+        self.factors: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
 
     def add(self, *items: Project | Credential | Connector | Proxy) -> FeedBuilder:
         """Store definitions, replacing any of the same id."""
@@ -93,7 +101,38 @@ class FeedBuilder:
             quarantined={pid: until for pid, until in sorted(self.quarantined.items()) if pid in held},
             traffic_blocked_until={cid: until for cid, until in sorted(self.blocked_until.items()) if cid in compiled},
         )
+        sections[REPUTATION_SECTION] = self._reputation(
+            [section for name, section in sections.items() if isinstance(section, ConnectorSection)]
+        )
         return sections
+
+    def avoid(self, project_id: str, ip: str, site: str, until: datetime) -> FeedBuilder:
+        """Record ``ip`` as avoided for ``site`` in the project until ``until``."""
+        self.reputation.setdefault(project_id, {}).setdefault(ip, {})[site] = until
+        return self
+
+    def factor(self, project_id: str, connector_id: str, site: str, place: str, factor: float) -> FeedBuilder:
+        """Store ``factor`` as the connector's for ``site`` at the level ``place`` ("" for none) of a requested place."""
+        self.factors.setdefault(project_id, {}).setdefault(connector_id, {}).setdefault(site, {})[place] = factor
+        return self
+
+    def _reputation(self, compiled: list[ConnectorSection]) -> ReputationSection:
+        """The records as the controller carries them: projects that avoid, the IPs their compiled rows hold, and the
+        factors of their dynamic connectors (every stored one: routing reads them alike)."""
+        projects: dict[str, ProjectReputation] = {}
+        for project_id, scope in ReputationScope.of(self.projects.values(), compiled).items():
+            ips = self.reputation.get(project_id, {})
+            factors = self.factors.get(project_id, {})
+            carried = ProjectReputation(
+                ip_avoids={ip: dict(sorted(ips[ip].items())) for ip in sorted(scope.ips & ips.keys())},
+                connector_factors={
+                    connector_id: {site: dict(sorted(by_place.items())) for site, by_place in sorted(factors[connector_id].items())}
+                    for connector_id in sorted(scope.connectors & factors.keys())
+                },
+            )
+            if carried.ip_avoids or carried.connector_factors:
+                projects[project_id] = carried
+        return ReputationSection(projects=projects)
 
     def connector_section(self, connector_id: str) -> ConnectorSection:
         """One connector's section, as the compiler builds it."""

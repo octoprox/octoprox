@@ -24,6 +24,13 @@ class UserRole(StrEnum):
     VIEWER = "viewer"
 
 
+class UserKind(StrEnum):
+    """Who a user is: a person, or a service account a program uses through API tokens and nothing else."""
+
+    PERSON = "person"
+    SERVICE = "service"
+
+
 class User(Audited):
     """Domain model for a user; its history records the profile and the ways in, never the theme or the sign-in stamps."""
 
@@ -36,6 +43,8 @@ class User(Audited):
     email: str = ""
     password_hash: str | None = None
     role: UserRole = UserRole.VIEWER
+    # Set when the user is created and never changed.
+    kind: UserKind = UserKind.PERSON
     is_active: bool = True
     invite_token: str | None = None
     invite_token_expires_at: datetime | None = None
@@ -49,13 +58,17 @@ class User(Audited):
         return self.username
 
     def audit_fields(self) -> dict[str, Any]:
-        """The profile and the ways in: username, email, role, active flag, password, and the invite link with its
-        expiry."""
+        """The profile and the ways in: username, email, role, kind, active flag, password, and the invite link with
+        its expiry."""
         return {
-            **self.model_dump(mode="json", include={"username", "email", "role", "is_active"}),
+            **self.model_dump(mode="json", include={"username", "email", "role", "kind", "is_active"}),
             "password": self.password_hash,
             **self.model_dump(mode="json", include={"invite_token", "invite_token_expires_at"}),
         }
+
+    @property
+    def is_service(self) -> bool:
+        return self.kind is UserKind.SERVICE
 
     def set_password(self, password: str) -> None:
         """Store a new password and consume any outstanding invite link.
@@ -179,6 +192,13 @@ class UserInviteCreate(BaseModel):
         return _validate_email(v)
 
 
+class ServiceAccountCreate(BaseModel):
+    """Schema for creating a service account (admin action): a name and a role, nothing to sign in with."""
+
+    username: str
+    role: UserRole = UserRole.VIEWER
+
+
 class SetPasswordRequest(BaseModel):
     """Schema for setting password via invite token."""
 
@@ -193,10 +213,14 @@ class UserResponse(BaseModel):
     username: str
     email: str
     role: UserRole
+    kind: UserKind
     is_active: bool
     has_password: bool
     # Sign-in providers linked to the user (see api.models.auth), by kind.
     sign_in_providers: list[str] = Field(default_factory=list)
+    # The user's personal access tokens, expired ones included, and the latest use of any of them.
+    token_count: int = 0
+    token_last_used_at: datetime | None = None
     theme_preference: str
     last_login_at: datetime | None
     created_at: datetime

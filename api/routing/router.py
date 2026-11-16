@@ -3,7 +3,8 @@
 
 """The gateway's router: which proxy a request goes through, from the applied routing snapshot and what only this gateway knows.
 
-Eligibility comes first, then the project's strategy picks the connector by weight and the proxy inside it.
+Eligibility comes first, exit reputation's avoids among it, then the project's strategy picks the connector by weight
+(under exit reputation, the effective weight for the request's site) and the proxy inside it.
 """
 
 from __future__ import annotations
@@ -11,14 +12,16 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
+from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 import structlog
 
 from api.core import utc_now
 from api.core.logging import error_text
+from api.feed.models import static_exit_ip
 from api.feed.sections import resolve_credentials
 from api.geo.models import LocationRules, eligible_under
 from api.models.connect import ConnectPlace, ConnectRoute
@@ -27,6 +30,8 @@ from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.sdk.strategies import META_SESSION_ID, is_dynamic_gateway
+from api.reputation.site import site_of
+from api.reputation.weight import ConnectorReputation
 from api.routing.exclusions import LocalExclusions
 from api.routing.snapshot import ConnectorView, RoutingSnapshot
 from api.strategies import ProxyGroup, RoutingStrategy, get_strategy
@@ -77,6 +82,38 @@ class _Ask(NamedTuple):
 
     at: float
     task: asyncio.Task[None]
+
+
+_NO_FACTORS: Mapping[str, float] = MappingProxyType({})
+
+
+class _SiteReputation(NamedTuple):
+    """What a project's exit reputation says about one request's site now: the rows kept away from it, and the factors
+    of its dynamic connectors there, read at the request's place (its ``LocationTarget`` key, "" for none)."""
+
+    site: str | None = None
+    place: str = ""
+    avoided: frozenset[str] = frozenset()
+    factors: Mapping[str, Mapping[str, float]] = MappingProxyType({})
+
+    def of(self, view: ConnectorView, usable: int, avoided: int) -> ConnectorReputation:
+        """A connector's reputation for the request (:class:`ConnectorReputation`): a dynamic one's by its block rate at
+        the request's place, one with IPs' by the share of its ``usable + avoided`` eligible rows still usable."""
+        if view.dynamic:
+            return ConnectorReputation.by_block_rate(self.factors.get(view.connector.id, _NO_FACTORS), self.place)
+        return ConnectorReputation.by_usable_ips(usable, usable + avoided)
+
+
+# A request whose project's exit reputation does not avoid, or that names no site.
+_UNRATED = _SiteReputation()
+
+
+class AvoidedSite(NamedTuple):
+    """Why exit reputation refused a request: the site, and the exit IP of the row a session is held to when that is
+    why (a project that does not move refused sessions)."""
+
+    site: str
+    session_exit: str | None = None
 
 
 class Router:
@@ -199,10 +236,13 @@ class Router:
     ) -> Proxy | None:
         """The proxy for one request of the project, credentials filled in; None when nothing serves it.
 
-        A sticky session held to its quarantined proxy (``sticky_quarantine``) gets None, a 429, and only a ``-cc-``
-        request, never a state or city, may wait for an on-demand country group.
+        A sticky session held to its quarantined proxy (``sticky_quarantine``) gets None, a 429, as does one held to
+        its proxy avoided for the site (``location_session_move`` off), a 502; and only a ``-cc-`` request, never a
+        state or city, may wait for an on-demand country group.
 
         Args:
+            target_host: the destination; under exit reputation its site keeps avoided rows out and weighs the
+                connectors by their reputation there.
             session_id: the client's ``-sessid-``, which sticky projects route by and a dynamic gateway's session derives from.
             exclude: proxies dropped before the strategy runs (preflight's retry); a session bound to one is re-bound.
             exclude_connectors: connectors whose proxies are all dropped the same way (preflight's retry after a vendor's 4xx).
@@ -213,8 +253,15 @@ class Router:
             return None
         target = location or None
         snapshot = self._snapshot
+        reputation = self._site_reputation(snapshot, project_id, target_host, target)
+        if pinned_proxy_id is None and (
+            await self._sticky_avoid_hold(snapshot, project_id, session_id, reputation) is not None
+        ):
+            return None
+        avoided: Counter[str] = Counter()
         routable = self._eligible_proxies(
-            snapshot, project_id, target_host, target, include_quarantined=False, pinned_proxy_id=pinned_proxy_id
+            snapshot, project_id, target_host, target,
+            include_quarantined=False, pinned_proxy_id=pinned_proxy_id, avoided=reputation.avoided, left_out=avoided,
         )
         if (
             not routable
@@ -225,7 +272,12 @@ class Router:
             and await self._await_country_group(snapshot, project_id, target_host, target.country)
         ):
             snapshot = self._snapshot
-            routable = self._eligible_proxies(snapshot, project_id, target_host, target, include_quarantined=False)
+            reputation = self._site_reputation(snapshot, project_id, target_host, target)
+            avoided.clear()
+            routable = self._eligible_proxies(
+                snapshot, project_id, target_host, target,
+                include_quarantined=False, avoided=reputation.avoided, left_out=avoided,
+            )
         if exclude:
             routable = [proxy for proxy in routable if proxy.id not in exclude]
         if exclude_connectors:
@@ -234,10 +286,13 @@ class Router:
             # The strategy is not asked, so a sticky session's binding is neither read nor moved.
             selected = routable[0] if routable else None
         else:
-            # The connector by routing weight, then the proxy inside it. Sticky
+            # The connector by routing weight, effective under exit reputation, then the proxy inside it. Sticky
             # reads and writes its Redis binding inside; the others need no I/O.
             selected = await self.strategy_for_project(project_id).select_weighted(
-                self._groups(snapshot, routable), session_id, redis_client=self._redis, project_id=project_id
+                self._groups(snapshot, routable, reputation, avoided),
+                session_id,
+                redis_client=self._redis,
+                project_id=project_id,
             )
         if selected is None or not is_dynamic_gateway(selected):
             return selected
@@ -264,6 +319,36 @@ class Router:
             snapshot, project_id, target_host, target, include_quarantined=True, pinned_proxy_id=pinned_proxy_id
         )
         return bool(candidates) and all(self._is_quarantined(snapshot, proxy.id) for proxy in candidates)
+
+    async def avoided_site(
+        self,
+        project_id: str,
+        target_host: str | None = None,
+        session_id: str | None = None,
+        location: LocationTarget | None = None,
+        pinned_proxy_id: str | None = None,
+    ) -> AvoidedSite | None:
+        """Why a request found nothing, when exit reputation is why (a 502): every row that would serve it is avoided
+        for its site, or the session is held to its row avoided there, whose exit IP it names; None otherwise.
+
+        Asked after the quarantines and the traffic limits, so a row resting or held back is not counted. A pinned
+        request asks about its one proxy only.
+        """
+        snapshot = self._snapshot
+        target = location or None
+        reputation = self._site_reputation(snapshot, project_id, target_host, target)
+        if reputation.site is None or not reputation.avoided:
+            return None
+        if pinned_proxy_id is None:
+            held = await self._sticky_avoid_hold(snapshot, project_id, session_id, reputation)
+            if held is not None:
+                return AvoidedSite(reputation.site, static_exit_ip(held))
+        candidates = self._eligible_proxies(
+            snapshot, project_id, target_host, target, include_quarantined=False, pinned_proxy_id=pinned_proxy_id
+        )
+        if candidates and all(proxy.id in reputation.avoided for proxy in candidates):
+            return AvoidedSite(reputation.site)
+        return None
 
     def traffic_limit_status(
         self,
@@ -306,10 +391,15 @@ class Router:
     ) -> list[Proxy]:
         """The proxies a request may be routed to now, before the strategy picks one, by the eligibility of selection.
 
-        Quarantined and retired rows are out, and without a location so are the on-demand groups of "All countries" pools.
+        Quarantined and retired rows are out, as are rows exit reputation keeps away from the host's site, and without a
+        location so are the on-demand groups of "All countries" pools.
         """
         target = location or None
-        return self._eligible_proxies(self._snapshot, project_id, target_host, target, include_quarantined=False)
+        snapshot = self._snapshot
+        avoided = self._site_reputation(snapshot, project_id, target_host, target).avoided
+        return self._eligible_proxies(
+            snapshot, project_id, target_host, target, include_quarantined=False, avoided=avoided
+        )
 
     def group_by_connector(self, proxies: list[Proxy]) -> list[ProxyGroup]:
         """Proxies grouped per connector, each group carrying its connector's routing weight.
@@ -488,11 +578,14 @@ class Router:
         include_quarantined: bool,
         include_traffic_blocked: bool = False,
         pinned_proxy_id: str | None = None,
+        avoided: frozenset[str] = frozenset(),
+        left_out: Counter[str] | None = None,
     ) -> list[Proxy]:
         """Healthy proxies a request for ``target`` may use, after domain and location filtering and the project's rules.
 
         A state or city keeps the dynamic gateways that render it and the fixed exits known to be there. A pinned
-        request keeps its one proxy, if that one passes.
+        request keeps its one proxy, if that one passes. ``avoided`` rows, those exit reputation keeps away from the
+        request's site, are left out last, each counted in ``left_out`` by connector: what was eligible but for that.
         """
         wanted = target.country if target is not None else None
         project = snapshot.project(project_id)
@@ -501,6 +594,7 @@ class Router:
             return self._pinned(
                 snapshot, project_id, target_host, target, rules, pinned_proxy_id,
                 include_quarantined=include_quarantined, include_traffic_blocked=include_traffic_blocked,
+                avoided=avoided,
             )
         excluded = self._excluded(snapshot, include_quarantined=include_quarantined)
         eligible: list[Proxy] = []
@@ -511,6 +605,10 @@ class Router:
                 if proxy.id in excluded:
                     continue
                 if target is not None and target.below_country and not self._serves_place(view, proxy, rules, target):
+                    continue
+                if proxy.id in avoided:
+                    if left_out is not None:
+                        left_out[view.connector.id] += 1
                     continue
                 eligible.append(proxy)
         return eligible
@@ -526,6 +624,7 @@ class Router:
         *,
         include_quarantined: bool,
         include_traffic_blocked: bool,
+        avoided: frozenset[str],
     ) -> list[Proxy]:
         """The pinned proxy alone, looked up by id, when it passes every check ``_eligible_proxies`` makes; else nothing.
 
@@ -542,6 +641,8 @@ class Router:
         if reserved and view not in reserved:
             return []
         if self._exclusions.is_retired(proxy.id) or (not include_quarantined and self._is_quarantined(snapshot, proxy.id)):
+            return []
+        if proxy.id in avoided:
             return []
         if not view.can_serve(proxy, country, rules, pinned=True):
             return []
@@ -577,18 +678,53 @@ class Router:
         return self._exclusions.is_retired(proxy_id) or self._is_quarantined(snapshot, proxy_id)
 
     @staticmethod
-    def _groups(snapshot: RoutingSnapshot, proxies: list[Proxy]) -> list[ProxyGroup]:
-        groups: dict[str, ProxyGroup] = {}
+    def _site_reputation(
+        snapshot: RoutingSnapshot, project_id: str, target_host: str | None, target: LocationTarget | None
+    ) -> _SiteReputation:
+        """What the project's exit reputation says now about ``target_host`` as a site (:func:`site_of`), for a request
+        naming ``target``: nothing unless the project avoids."""
+        project = snapshot.project(project_id)
+        if project is None or not target_host or not project.exit_reputation.avoids:
+            return _UNRATED
+        site = site_of(target_host)
+        if site is None:
+            return _UNRATED
+        return _SiteReputation(
+            site,
+            target.key if target is not None else "",
+            snapshot.avoided(project_id, site, utc_now()),
+            snapshot.factors(project_id, site),
+        )
+
+    @staticmethod
+    def _groups(
+        snapshot: RoutingSnapshot,
+        proxies: list[Proxy],
+        reputation: _SiteReputation = _UNRATED,
+        avoided: Mapping[str, int] | None = None,
+    ) -> list[ProxyGroup]:
+        """The proxies by connector, in the order the connectors first appear, each group weighted by its connector's
+        routing weight; for a request with a site in a project that avoids, the effective weight there (``avoided``:
+        each connector's eligible rows left out for the site), marked lowered where it is under the configured one."""
+        rows: dict[str, list[Proxy]] = {}
         for proxy in proxies:
-            group = groups.get(proxy.connector_id)
-            if group is None:
-                view = snapshot.connector_view(proxy.connector_id)
-                weight = view.weight if view is not None else DEFAULT_ROUTING_WEIGHT
-                group = groups[proxy.connector_id] = ProxyGroup(
-                    key=proxy.connector_id, weight=weight, members=view.proxies if view is not None else ()
-                )
-            group.proxies.append(proxy)
-        return list(groups.values())
+            rows.setdefault(proxy.connector_id, []).append(proxy)
+        groups: list[ProxyGroup] = []
+        for connector_id, members in rows.items():
+            view = snapshot.connector_view(connector_id)
+            if view is None:
+                groups.append(ProxyGroup(key=connector_id, weight=DEFAULT_ROUTING_WEIGHT, proxies=members))
+                continue
+            weight: float = view.weight
+            lowered = False
+            if reputation.site is not None:
+                left_out = avoided.get(connector_id, 0) if avoided is not None else 0
+                rated = reputation.of(view, len(members), left_out)
+                weight, lowered = rated.weight(weight), rated.lowers
+            groups.append(
+                ProxyGroup(key=connector_id, weight=weight, proxies=members, members=view.proxies, lowered=lowered)
+            )
+        return groups
 
     # --- On-demand country groups -----------------------------------------------------------
 
@@ -682,6 +818,31 @@ class Router:
             or view.rate_limit is None
             or not view.rate_limit.sticky_quarantine
         )
+
+    async def _sticky_avoid_hold(
+        self, snapshot: RoutingSnapshot, project_id: str, session_id: str | None, reputation: _SiteReputation
+    ) -> Proxy | None:
+        """The proxy the session is held to while it is avoided for the request's site, instead of moving to another:
+        projects that do not move refused sessions (``location_session_move`` off); None when the session is not held.
+
+        As for ``sticky_quarantine``, only a session the project's strategy holds (sticky's) is held, and a row that is
+        unhealthy or retired holds none. A held session stays in use, as a request through its proxy would keep it, so
+        it is refused until the avoid ends rather than placed again once its binding goes idle.
+        """
+        if session_id is None or not reputation.avoided:
+            return None
+        project = snapshot.project(project_id)
+        if project is None or project.location_session_move:
+            return None
+        strategy = self.strategy_for_project(project_id)
+        bound = await strategy.held_proxy(session_id, redis_client=self._redis, project_id=project_id)
+        if bound is None or bound not in reputation.avoided:
+            return None
+        proxy = snapshot.proxy(bound)
+        if proxy is None or proxy.status != ProxyStatus.HEALTHY or self._exclusions.is_retired(bound):
+            return None
+        strategy.hold(session_id, bound, redis_client=self._redis, project_id=project_id)
+        return proxy
 
     def render_session(
         self, proxy: Proxy, project_id: str, session_id: str, location: LocationTarget | None, generation: int
