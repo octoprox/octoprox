@@ -3,9 +3,17 @@
 
 """Tests for ProjectRepository."""
 
+from datetime import datetime, timedelta
+from typing import Any
+from uuid import uuid4
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.attention.alert import REOPEN_WINDOW
+from api.core import utc_now
+from api.db.models import AlertModel
 from api.db.repository import ProjectRepository
+from api.models.alerts import AlertSettings
 from api.models.project import Project
 
 
@@ -229,28 +237,6 @@ class TestAttentionMutes:
         # A mute is not an edit.
         assert (await project_repo.get_by_id(one.id)).updated_at == stamped  # type: ignore[union-attr]
 
-    async def test_a_clear_removes_only_the_until_clear_mutes_among_the_keys_and_writes_nothing_without_one(
-        self, project_repo: ProjectRepository, db_session: AsyncSession
-    ) -> None:
-        one, _two = await self._projects(project_repo, db_session)
-        stamped = (await project_repo.get_by_id(one.id)).updated_at  # type: ignore[union-attr]
-        timed = {"severity": "warning", "until": "2026-11-23T14:02:00"}
-        await project_repo.write_attention_mutes(
-            one.id, {"a": {"severity": "warning", "until": None}, "b": timed, "c": {"severity": "problem", "until": None}}
-        )
-        await db_session.commit()
-
-        assert await project_repo.clear_attention_mutes(one.id, ["a", "b", "gone"])
-        await db_session.commit()
-        db_session.expire_all()
-        assert await project_repo.attention_mutes([one.id]) == {
-            one.id: {"b": timed, "c": {"severity": "problem", "until": None}}
-        }
-        # Nothing until-clear among the keys: nothing written, however many readers ask.
-        assert not await project_repo.clear_attention_mutes(one.id, ["a", "b"])
-        assert not await project_repo.clear_attention_mutes(one.id, [])
-        assert (await project_repo.get_by_id(one.id)).updated_at == stamped  # type: ignore[union-attr]
-
     async def test_a_project_edit_leaves_the_mutes_alone(
         self, project_repo: ProjectRepository, db_session: AsyncSession
     ) -> None:
@@ -265,3 +251,99 @@ class TestAttentionMutes:
         await db_session.commit()
 
         assert await project_repo.attention_mutes([one.id]) == {one.id: mutes}
+
+
+def _mute(at: datetime, until: datetime | None = None) -> dict[str, Any]:
+    """A stored mute, set at ``at``; until its line clears when ``until`` is None."""
+    return {"severity": "warning", "duration": "until_clear" if until is None else "day",
+            "until": until.isoformat() if until else None, "by": "ivan", "at": at.isoformat()}
+
+
+def _alert(project_id: str, key: str, now: datetime, *, resolved: timedelta | None = None, hidden_by: str = "") -> AlertModel:
+    """A stored alert of ``key``, open, or resolved ``resolved`` before ``now``."""
+    return AlertModel(
+        id=str(uuid4()), project_id=project_id, key=key, kind=key.partition(":")[0], severity="warning",
+        worst_severity="warning", body=" text", hidden_by=hidden_by, opened_at=now - timedelta(hours=1),
+        last_seen_at=now, resolved_at=now - resolved if resolved is not None else None,
+    )
+
+
+class TestEndClearedMutes:
+    """The alerts job ends an until-clear mute once its line's alert has stayed resolved for the reopen window."""
+
+    async def test_which_mutes_end(self, project_repo: ProjectRepository, db_session: AsyncSession) -> None:
+        now = utc_now()
+        one, two = (Project(name=f"Ending {i}", username=f"ending{i}", password="pass") for i in range(2))
+        for project in (one, two):
+            await project_repo.create(project)
+        await db_session.commit()
+        stamped = (await project_repo.get_by_id(one.id)).updated_at  # type: ignore[union-attr]
+        earlier = now - timedelta(hours=2)
+        mutes = {
+            # Resolved before the window: ends.
+            "cleared": _mute(earlier),
+            # Never stored, or gone with retention: ends too.
+            "unknown": _mute(earlier),
+            # Resolved within the window: a flapping line comes back still muted.
+            "flapping": _mute(earlier),
+            # Open, covered by a wider line: its mute holds.
+            "covered": _mute(earlier),
+            # Open and shown.
+            "open": _mute(earlier),
+            # Timed: it ends by its time.
+            "timed": _mute(earlier, until=now + timedelta(days=1)),
+            # Set after the run read its data: never ended by that run.
+            "late": _mute(now + timedelta(seconds=1)),
+        }
+        await project_repo.write_attention_mutes(one.id, mutes)
+        await project_repo.write_attention_mutes(two.id, {"cleared": _mute(earlier)})
+        db_session.add_all([
+            _alert(one.id, "cleared", now, resolved=REOPEN_WINDOW + timedelta(seconds=1)),
+            _alert(one.id, "flapping", now, resolved=REOPEN_WINDOW - timedelta(seconds=1)),
+            _alert(one.id, "covered", now, hidden_by="connectors_off"),
+            _alert(one.id, "open", now),
+        ])
+        await db_session.commit()
+
+        assert await project_repo.end_cleared_mutes([one.id], now, reopen=REOPEN_WINDOW) == 1
+        await db_session.commit()
+        db_session.expire_all()
+
+        stored = await project_repo.attention_mutes(None)
+        assert set(stored[one.id]) == {"flapping", "covered", "open", "timed", "late"}
+        # Only the projects asked about.
+        assert set(stored[two.id]) == {"cleared"}
+        # Nothing left to end: nothing written.
+        assert await project_repo.end_cleared_mutes([one.id], now, reopen=REOPEN_WINDOW) == 0
+        assert await project_repo.end_cleared_mutes([], now, reopen=REOPEN_WINDOW) == 0
+        # Ending a mute is not an edit.
+        assert (await project_repo.get_by_id(one.id)).updated_at == stamped  # type: ignore[union-attr]
+
+
+class TestAlertSettings:
+    """A project's alert cut-offs: their own column, never in the domain project, written without stamping it."""
+
+    async def test_written_and_read_without_an_edit(
+        self, project_repo: ProjectRepository, db_session: AsyncSession
+    ) -> None:
+        project = Project(name="Cut-offs", username="cutoffs", password="pass")
+        await project_repo.create(project)
+        await db_session.commit()
+        stamped = (await project_repo.get_by_id(project.id)).updated_at  # type: ignore[union-attr]
+
+        assert await project_repo.alert_settings([project.id, "unknown"]) == {project.id: AlertSettings()}
+        settings = AlertSettings(vendor_min=20, keep_days=0)
+        assert await project_repo.write_alert_settings(project.id, settings)
+        assert not await project_repo.write_alert_settings("unknown", settings)
+        await db_session.commit()
+        db_session.expire_all()
+
+        assert await project_repo.alert_settings([project.id]) == {project.id: settings}
+        assert await project_repo.lock_alert_settings(project.id) == settings
+        assert await project_repo.lock_alert_settings("unknown") is None
+        assert (await project_repo.get_by_id(project.id)).updated_at == stamped  # type: ignore[union-attr]
+
+        edited = (await project_repo.get_by_id(project.id)).model_copy(update={"description": "edited"})  # type: ignore[union-attr]
+        await project_repo.update(edited)
+        await db_session.commit()
+        assert await project_repo.alert_settings([project.id]) == {project.id: settings}

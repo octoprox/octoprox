@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.core.audit import Actor, AuditLog
 from api.db.models import AuditLogModel
 from api.db.redis import CHANGES_STREAM_KEY, RUNTIME_STREAM_KEY, RedisClient
@@ -105,8 +106,11 @@ def project_service(
     redis_client: RedisClient,
     change_log: ChangeLog,
     connector_service: ConnectorService,
+    alert_checks: AlertChecks,
 ) -> ProjectService:
-    return ProjectService(sessions, jobs, redis_client, changes=change_log, connectors=connector_service)
+    return ProjectService(
+        sessions, jobs, redis_client, changes=change_log, connectors=connector_service, alerts=alert_checks
+    )
 
 
 @pytest.fixture
@@ -123,8 +127,9 @@ def connector_service(
     redis_client: RedisClient,
     registry: ProviderRegistry,
     change_log: ChangeLog,
+    alert_checks: AlertChecks,
 ) -> ConnectorService:
-    return ConnectorService(sessions, jobs, redis_client, registry, changes=change_log)
+    return ConnectorService(sessions, jobs, redis_client, registry, changes=change_log, alerts=alert_checks)
 
 
 @pytest.fixture
@@ -134,8 +139,9 @@ def proxy_service(
     redis_client: RedisClient,
     registry: ProviderRegistry,
     change_log: ChangeLog,
+    alert_checks: AlertChecks,
 ) -> ProxyService:
-    return ProxyService(sessions, jobs, redis_client, registry, changes=change_log)
+    return ProxyService(sessions, jobs, redis_client, registry, changes=change_log, alerts=alert_checks)
 
 
 @pytest.fixture

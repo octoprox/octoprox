@@ -226,6 +226,24 @@ def month_bytes(cid: str) -> tuple[int, int]:
     return t["bytes_sent"], t["bytes_received"]
 
 
+@cache
+def usage_reached(cid: str, share: float) -> int | None:
+    """The minute the connector's traffic this month first reached ``share`` of its limit, summed as month_bytes sums
+    it; None while it has not."""
+    limit = CONN_BY_ID[cid].traffic_config.get("limit_bytes")
+    if not limit:
+        return None
+    target, used = limit * share, 0
+    for m in range(minute_index(PERIOD_START), NOW_MIN, 10):
+        x = conn_minute(cid, m)
+        per_minute = x["bytes_sent"] + x["bytes_received"]
+        if used + per_minute * 10 >= target:
+            # Each of the 10 minutes a sample stands for carries the same bytes.
+            return m + math.ceil((target - used) / per_minute) - 1
+        used += per_minute * 10
+    return None
+
+
 def traffic_usage(c: ConnSpec) -> dict:
     """The connector's traffic this month against its limit, and what it cost."""
     sent, received = month_bytes(c.id)
@@ -262,10 +280,11 @@ REFUSED = {"no_proxy_available": 0.00031, "all_proxies_quarantined": 0.00012, "i
 FAILURE_BUCKETS = {"1h": 60, "6h": 300, "24h": 900, "7d": 3600, "30d": 21600}
 
 
-def vendor_refusals(c: ConnSpec, minutes: int = 15) -> tuple[int, dict[int, int], datetime]:
-    """The connector's requests over the last ``minutes``, its vendor refusals by status, and the last minute."""
+def vendor_refusals(c: ConnSpec, minutes: int = 15, end: int = LAST) -> tuple[int, dict[int, int], datetime]:
+    """The connector's requests over the ``minutes`` up to minute ``end`` (the last saved one by default), its vendor
+    refusals by status, and that last minute."""
     requests, statuses = 0, {}
-    for m in range(LAST - minutes + 1, LAST + 1):
+    for m in range(end - minutes + 1, end + 1):
         x = conn_minute(c.id, m)
         requests += x["requests"]
         rejected = x["base_failures"] * KIND_MIX[c.profile].get("upstream_rejected", 0.0)
@@ -273,7 +292,7 @@ def vendor_refusals(c: ConnSpec, minutes: int = 15) -> tuple[int, dict[int, int]
             statuses[st] = statuses.get(st, 0) + rejected * sf
         if x["extra_kind"] == "upstream_rejected":
             statuses[x["extra_status"]] = statuses.get(x["extra_status"], 0) + x["extra_failures"]
-    return requests, {st: round(v) for st, v in statuses.items()}, from_minute(LAST)
+    return requests, {st: round(v) for st, v in statuses.items()}, from_minute(end)
 
 
 def failure_summary(project_id: str, rng: str) -> dict:

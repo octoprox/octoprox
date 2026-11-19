@@ -4,8 +4,9 @@
 """Needs attention: a project's lines for its Overview card, the mutes its editors set, every project's problem count
 for the Projects page and the switcher, and the install-wide lines of the Projects page.
 
-The lines are read off stored state on every request (:class:`~api.attention.service.AttentionService`); the install's
-from the heartbeats in Redis (:class:`~api.attention.install.InstallAttentionReader`).
+The lines are read from the alerts the workers store (:class:`~api.attention.service.AttentionService`), the install's
+too, with the lines the api answers itself when it cannot read them
+(:class:`~api.attention.service.InstallAttentionService`).
 """
 
 from fastapi import APIRouter, HTTPException, Request
@@ -20,7 +21,7 @@ router = APIRouter()
 @router.get("/projects/{project_id}/attention", response_model=ProjectAttention)
 async def get_project_attention(request: Request, project_id: str) -> ProjectAttention:
     """The project's lines, muted or not, in display order, with how many problems and warnings show and how many are
-    muted; none for a project pending deletion."""
+    muted, and when the workers last checked it; none for a project pending deletion."""
     report = await attention_of(request).project(project_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -29,8 +30,8 @@ async def get_project_attention(request: Request, project_id: str) -> ProjectAtt
 
 @router.put("/projects/{project_id}/attention/mutes", status_code=204)
 async def mute_line(request: Request, project_id: str, body: MuteRequest, user: RequireEditorDep) -> None:
-    """Mute one of the project's lines now for everyone in it, replacing its mute if it has one; recorded in the
-    project's History."""
+    """Mute one of the project's open alerts now for everyone in it, shown or covered, replacing its mute if it has one;
+    recorded in the project's History."""
     await attention_of(request).mute(project_id, body.key, body.duration, actor_of(request, user))
 
 
@@ -48,5 +49,5 @@ async def get_projects_attention(request: Request) -> ProjectsAttention:
 
 @router.get("/attention/install", response_model=InstallAttention)
 async def get_install_attention(request: Request) -> InstallAttention:
-    """The install-wide lines, the same for every role: no instance, host, version or raw error."""
+    """The install-wide lines, the same for every role: no instance, host, version or raw error; always answered."""
     return await install_attention_of(request).read()

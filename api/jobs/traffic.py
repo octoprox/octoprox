@@ -4,7 +4,8 @@
 """Traffic decisions: whether a connector is blocked by its traffic limit, and until when.
 
 A worker decides a batch of connectors from their period totals and live windows, records each decision that changed
-in the blocks hash with an entry on the runtime stream for the feed builder, and settles the requests it answers.
+in the blocks hash with an entry on the runtime stream for the feed builder, and settles the requests it answers; a
+changed decision asks for its project's alert check, so the traffic line follows the block.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
     from redis.commands.core import AsyncScript
 
+    from api.attention.requests import AlertChecks
     from api.db.redis import RedisClient
     from api.db.session import SessionFactory
     from api.jobs.job import JobBatch
@@ -79,9 +81,10 @@ class TrafficJob(Job):
     kind = JobKind.TRAFFIC
     batch_size = 100
 
-    def __init__(self, session_factory: SessionFactory, redis_client: RedisClient) -> None:
+    def __init__(self, session_factory: SessionFactory, redis_client: RedisClient, *, alerts: AlertChecks) -> None:
         self._session_factory = session_factory
         self._redis = redis_client
+        self._alerts = alerts
         self._state = RuntimeStateReader(redis_client)
         self._set_block: AsyncScript | None = None
         # The furthest usage status this process logged for each limited connector, and in which window.
@@ -106,8 +109,12 @@ class TrafficJob(Job):
                 continue
             self._log_usage(current)
             blocks[connector_id] = current.block_until()
-        for connector_id in await self._record(blocks, pending):
+        changed = await self._record(blocks, pending)
+        for connector_id in changed:
             self._log_change(connector_id, connectors.get(connector_id), traffic.get(connector_id), blocks[connector_id])
+        # A block written or lifted: the projects' traffic lines follow it now, a reset's clearing included.
+        for project_id in sorted({connectors[c].project_id for c in changed if c in connectors}):
+            await self._alerts.request(project_id)
 
     async def _record(self, blocks: Mapping[str, datetime | None], pending: Mapping[str, str]) -> list[str]:
         """Store each decision that differs from the stored one and announce it, settling the requests in ``pending``, pipelined; the connectors it changed."""

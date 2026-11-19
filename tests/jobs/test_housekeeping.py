@@ -21,6 +21,7 @@ import structlog
 from redis.exceptions import ResponseError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.core import utc_now
 from api.core.releases import LatestRelease, ReleaseNote
 from api.core.roles import JobKind
@@ -549,7 +550,8 @@ class TestIndexHygieneJob:
 
         await hygiene.run(ALL)
         keys = await queued_job_keys(redis_client, JobKind.TRAFFIC)
-        await TrafficJob(sessions, redis_client).run(JobBatch(ids=("1-0",), keys=tuple(keys)))
+        traffic = TrafficJob(sessions, redis_client, alerts=AlertChecks(redis_client, JobQueue(redis_client)))
+        await traffic.run(JobBatch(ids=("1-0",), keys=tuple(keys)))
 
         assert keys == [connector.id]
         assert await redis_client.client.exists(TRAFFIC_PENDING_KEY) == 0

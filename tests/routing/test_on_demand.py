@@ -18,6 +18,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.core.config import Settings
 from api.core.roles import JobKind
 from api.db.redis import JOB_STREAM_KEY, RedisClient
@@ -95,7 +96,10 @@ class Cluster:
         self.redis_client = redis_client
         self.registry = registry
         self.requests = _Requests(redis_client)
-        self.proxies = ProxyService(session_factory, JobQueue(redis_client), redis_client, registry, changes=changes)
+        jobs = JobQueue(redis_client)
+        self.proxies = ProxyService(
+            session_factory, jobs, redis_client, registry, changes=changes, alerts=AlertChecks(redis_client, jobs)
+        )
         self.job = ProvisionJob(session_factory, registry, self.proxies)
         self.compiler = FullFeedCompiler(
             session_factory,

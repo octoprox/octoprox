@@ -37,6 +37,7 @@ from api.services.errors import NotFoundError, WriteRejectedError
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from api.attention.requests import AlertChecks
     from api.core.audit import Actor
     from api.db.redis import RedisClient
     from api.db.session import SessionFactory
@@ -124,6 +125,7 @@ class ProxyService:
 
     Args:
         redis_client: Lifts a quarantine on unquarantine; its request deadline bounds every step after a commit.
+        alerts: Asks for the project's alert check after each of the api's writes: the pool and exit lines.
         lookup_enabled: ``geo_lookup_enabled``: whether a static proxy added without a country gets an ``enrich`` run.
     """
 
@@ -135,6 +137,7 @@ class ProxyService:
         provider_registry: ProviderRegistry,
         *,
         changes: ChangeLog,
+        alerts: AlertChecks,
         lookup_enabled: bool = True,
     ) -> None:
         self._session_factory = session_factory
@@ -142,6 +145,7 @@ class ProxyService:
         self._redis = redis_client
         self._registry = provider_registry
         self._changes = changes
+        self._alerts = alerts
         self._lookup_enabled = lookup_enabled
 
     # --- The api's writes -------------------------------------------------------------------
@@ -180,6 +184,7 @@ class ProxyService:
             await session.commit()
         await self._announce([proxy.id])
         await self._added([proxy], {connector.id: connector})
+        await self._alerts.request(project_id)
         return proxy
 
     async def upload(self, project_id: str, connector_id: str, text: str, actor: Actor) -> ProxyUpload:
@@ -218,6 +223,7 @@ class ProxyService:
             await session.commit()
         await self._announce([proxy.id for proxy in proxies])
         await self._added(proxies, {connector.id: connector})
+        await self._alerts.request(project_id)
         return ProxyUpload(total_lines=sum(1 for line in lines if line.strip()), added=proxies, errors=errors)
 
     async def update(self, project_id: str, proxy_id: str, data: ProxyUpdate, actor: Actor) -> Proxy:
@@ -243,6 +249,7 @@ class ProxyService:
             raise NotFoundError("Proxy not found")
         logger.info("Updated proxy", proxy_id=proxy_id, host=saved.host)
         await self._announce([proxy_id])
+        await self._alerts.request(project_id)
         return saved
 
     async def remove(self, project_id: str, proxy_id: str, actor: Actor) -> None:
@@ -258,10 +265,11 @@ class ProxyService:
             connector = await ConnectorRepository(session).get_by_id(proxy.connector_id)
         if connector is None or not self._registry.is_cloud(connector.credential_type):
             await self.delete_many([proxy_id], actor)
-            return
-        await self.terminate(proxy_id, actor)
-        # Asked for even when it was terminating already: a second delete is how an admin retries a stalled one.
-        await self._jobs.request_now(JobKind.SCALE, [connector.id])
+        else:
+            await self.terminate(proxy_id, actor)
+            # Asked for even when it was terminating already: a second delete is how an admin retries a stalled one.
+            await self._jobs.request_now(JobKind.SCALE, [connector.id])
+        await self._alerts.request(project_id)
 
     async def unquarantine(self, project_id: str, proxy_id: str) -> bool:
         """Lift a proxy's quarantine and empty its rate window; False, touching nothing, when it was not quarantined.
@@ -279,6 +287,7 @@ class ProxyService:
         RuntimeSignal.QUARANTINE.append(pipe, proxy_id)
         await pipe.execute()
         logger.info("Proxy manually unquarantined", proxy_id=proxy_id)
+        await self._alerts.request(project_id)
         return True
 
     # --- The jobs' writes -------------------------------------------------------------------

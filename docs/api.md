@@ -1239,11 +1239,11 @@ Any signed-in user reads them; clearing them needs an editor (`403` for viewers)
 
 ## Needs attention
 
-What needs someone now, as the [Needs attention]({{ site.baseurl }}/metrics#needs-attention) card on a project's Overview and the Projects page show it. Every line is read from what Octoprox already stores, on each request; nothing is cached. Times are UTC without an offset, as everywhere in the API.
+What needs someone now, as the [Needs attention]({{ site.baseurl }}/metrics#needs-attention) card on a project's Overview and the Projects page show it. Every line is read from the [alerts](#alerts) Octoprox's background checks store: they check every project once a minute, and a project again within seconds of a change made through the API or the web UI (a connector, its countries, the project, its proxies or its alert settings), or of a connector's traffic limit starting or stopping to turn requests away. No request computes a line. Times are UTC without an offset, as everywhere in the API.
 
 | Method | Path | Who | Description |
 |---|---|---|---|
-| GET | `/projects/{project_id}/attention` | anyone signed in | The project's lines, muted or not, and their counts |
+| GET | `/projects/{project_id}/attention` | anyone signed in | The project's lines, muted or not, their counts, and when they were checked |
 | PUT | `/projects/{project_id}/attention/mutes` | editor or admin | Mute one line for everyone in the project |
 | DELETE | `/projects/{project_id}/attention/mutes/{key}` | editor or admin | Unmute a line |
 | GET | `/attention/projects` | anyone signed in | Every project's problem count |
@@ -1258,7 +1258,7 @@ GET /api/v1/projects/{project_id}/attention
 **Response:**
 ```json
 {
-  "generated_at": "2026-11-16T14:32:10.123456",
+  "generated_at": "2026-11-18T14:32:10.123456",
   "lines": [
     {
       "key": "vendor_login:3f2c9a1e-0000-4000-8000-000000000001",
@@ -1268,33 +1268,50 @@ GET /api/v1/projects/{project_id}/attention
       "subject": "Webshare UK",
       "text": ": the vendor is rejecting its login (41% of requests in the last 15 minutes).",
       "detail": "The vendor answered 407 to 123 of 300 requests.",
-      "when": {"kind": "last_at", "at": "2026-11-16T14:32:00"},
+      "when": {"kind": "last_at", "at": "2026-11-18T14:32:00"},
       "link": "connectors?open=3f2c9a1e-0000-4000-8000-000000000001",
       "action": "Open connector",
-      "mute": null
+      "mute": null,
+      "alert_id": "8d0c41f2-6b7e-4f3a-9c55-2e1d0a7b9f10",
+      "since": "2026-11-18T14:20:05.311200",
+      "opened_at": "2026-11-18T13:58:11.120331",
+      "reopened": 1
     }
   ],
   "problems": 1,
   "warnings": 0,
-  "muted": 0
+  "muted": 0,
+  "checked_at": "2026-11-18T14:32:02.004112",
+  "pending": false,
+  "stale": false
 }
 ```
 
-A `problem` means requests fail now; a `warning` that they are degraded or about to be. `lines` are in display order: problems first, then warnings, each by kind and then by name, so a refresh changes words in place rather than moving rows. `problems` and `warnings` count the lines whose mute does not hide them, and `muted` those it does. A project being deleted answers no lines, and an unknown one `404`.
+A `problem` means requests fail now; a `warning` that they are degraded or about to be. `lines` are in display order: problems first, then warnings, each by kind and then by name, so a refresh changes words in place rather than moving rows. `problems` and `warnings` count the lines whose mute does not hide them, and `muted` those it does. A line that a wider line covers (every connector turned off covering the countries nothing can serve, say) is left out of `lines` and the counts; it stays open in the project's [alerts](#alerts), where `hidden_by` names the line that covers it. A project being deleted answers no lines, and an unknown one `404`.
 
 | Field | Meaning |
 |---|---|
 | `key` | Stable: the kind alone for a line about the project, or `<kind>:<id>` for one about a connector, a kind of refused request or a site |
-| `kind` | What the line is about, such as `connectors_off`, `pool_no_routable`, `countries_unserved`, `vendor_login`, `connector_failing`, `refusals`, `connector_traffic_blocked` or `reputation_site_blocked` |
+| `kind` | What the line is about, such as `connectors_off`, `pool_no_routable`, `countries_unserved`, `vendor_login`, `connector_failing`, `refusals`, `success_rate`, `connector_traffic_blocked` or `reputation_site_blocked`; [Alerts](#alerts) lists them all |
 | `lead`, `subject`, `text` | The sentence is `lead + subject + text`; the subject, such as a connector's name, is the part to show in bold |
 | `detail` | Extra plain words, such as the vendor's status and the counts behind the line, or `null` |
 | `when` | The one time the line shows, or `null`: `last_at` (its newest failure), `last_failed` (a connector's last failed vendor sync or cloud call) or `resets` (when a traffic period starts over) |
 | `link`, `action` | The page that fixes it, relative to `/projects/{project_id}/`, and the link's label |
 | `mute` | The line's mute, or `null` when it has none or a timed one has ended |
+| `alert_id` | The alert behind the line, as [one alert](#one-alert) reads it |
+| `since` | When the line's current spell began: the last time it came back, else when it opened. Show it for a line whose `when` is `null` |
+| `opened_at` | When the alert first opened, kept when the line comes back |
+| `reopened` | How many times the line came back within 15 minutes of clearing |
+
+| Field | Meaning |
+|---|---|
+| `checked_at` | When the background checks last checked the project (the time of the data they read), or `null` before the first check, when empty `lines` say nothing yet |
+| `pending` | A check a change asked for is still waiting. Read again every couple of seconds while it is `true` to see the change land; it turns `false` once the check is stored, or a minute after it was asked for |
+| `stale` | The last check is more than three minutes old, so the lines may be out of date |
 
 A `mute` holds the `severity` the line had when it was muted, the `duration`, `until` (its end, `null` until the line clears), `muted_by` (a username), `muted_at`, and `active`: whether it hides the line now. A line muted as a warning that has become a problem shows again, with `active` false, until it is a warning again or the mute ends.
 
-Lines about requests cover the last 15 minutes of the flushed history, about a minute behind live traffic, and go five minutes after their last failure.
+Lines about requests cover the last 15 minutes of the flushed history, about a minute behind live traffic, and go five minutes after their last failure. A line clears as soon as a check no longer finds it.
 
 ### Muting a line
 
@@ -1306,13 +1323,13 @@ PUT /api/v1/projects/{project_id}/attention/mutes
 {"key": "vendor_login:3f2c9a1e-0000-4000-8000-000000000001", "duration": "week"}
 ```
 
-`duration` is `day` (24 hours), `week` (7 days), `month` (30 days) or `until_clear`, which ends when the line is no longer there. The mute is shared by everyone in the project and replaces the line's earlier mute, if any. Answers `204`; `403` for a viewer; `404` for an unknown project, or `{"detail": "Nothing with that key needs attention now"}` for a key that is not one of the project's lines now; `422` for a bad body. The project's [History]({{ site.baseurl }}/audit-log) records a `muted` entry with the line's sentence (`line`) and the mute's end (`muted_until`, or `it clears`).
+`duration` is `day` (24 hours), `week` (7 days), `month` (30 days) or `until_clear`, which ends once the line has stayed gone for 15 minutes, so a line that comes and goes stays muted. The mute is shared by everyone in the project and replaces the line's earlier mute, if any. The key is that of an open alert of the project, shown on the card or covered. Answers `204`; `403` for a viewer; `404` for an unknown project, or `{"detail": "Nothing with that key needs attention now"}` for a key that is not one of the project's open alerts; `422` for a bad body. The project's [History]({{ site.baseurl }}/audit-log) records a `muted` entry with the line's sentence (`line`) and the mute's end (`muted_until`, or `it clears`).
 
 ```bash
 DELETE /api/v1/projects/{project_id}/attention/mutes/{key}
 ```
 
-URL-encode the key. Answers `204` whether or not the line was muted, and History records an `unmuted` entry with the line only when a mute was removed; `403` for a viewer, `404` for an unknown project. A mute until the line clears ends on its own the first time the project's lines are read without it, with no History entry, since no one ended it.
+URL-encode the key. Answers `204` whether or not the line was muted, and History records an `unmuted` entry with the line only when a mute was removed; `403` for a viewer, `404` for an unknown project. A mute until the line clears is ended by the background checks once the line has stayed gone for 15 minutes, with no History entry, since no one ended it.
 
 ### Every project's problems
 
@@ -1324,7 +1341,7 @@ GET /api/v1/attention/projects
 {"projects": [{"project_id": "3c49da3c-a997-45a0-9a26-dc3b3ae6c920", "problems": 2}]}
 ```
 
-Every project not being deleted, oldest first, with the problem lines its card counts: the same checks, with muted lines left out. Warnings are not counted here.
+Every project not being deleted, oldest first, with the problem lines its card counts: the same stored alerts, with muted and covered lines left out. Warnings are not counted here.
 
 ### Install-wide lines
 
@@ -1334,20 +1351,218 @@ GET /api/v1/attention/install
 
 ```json
 {
-  "generated_at": "2026-11-16T14:32:10.123456",
+  "generated_at": "2026-11-18T14:32:10.123456",
   "lines": [
     {
       "key": "changes_not_applied",
       "severity": "warning",
       "text": "Changes since {time} have not taken effect yet. Requests still follow the earlier setup.",
-      "at": "2026-11-16T14:02:11.402000",
-      "admin_page": "system"
+      "at": "2026-11-18T14:02:11.402000",
+      "admin_page": "system",
+      "since": "2026-11-18T14:03:40.118204"
     }
-  ]
+  ],
+  "checked_at": "2026-11-18T14:32:01.551730"
 }
 ```
 
-Problems with the install itself, in plain words, the same for every role and without deployment detail: no process names, hosts, releases, sizes or error text. Always `200`: a store that cannot be reached is itself a line. `key` is one of `no_gateway_serving` (a problem), `changes_not_applied`, `background_behind`, `ip_databases`, `store_unreachable:database` and `store_unreachable:live_data`. A `text` holding `{time}` has `at` set; show it in the reader's time. `admin_page` names where an admin sees more: `system` (Administration, System) or `geo` (IP attribution). These lines cannot be muted.
+Problems with the install itself, in plain words, the same for every role and without deployment detail: no process names, hosts, releases, sizes or error text. Always `200`: a store that cannot be reached is itself a line. A `text` holding `{time}` has `at` set; show it in the reader's time. `admin_page` names where an admin sees more: `system` (Administration, System) or `geo` (IP attribution). These lines cannot be muted. `checked_at` is when the background checks last checked the install, or `null`.
+
+The lines found by the checks come first, problems first, then those the api adds:
+
+- **Found by the background checks**, with `since` set to when the line last opened or came back: `no_gateway_serving` (a problem), `changes_not_applied`, `background_behind`, `ip_databases` and `store_unreachable:database` (a process cannot reach the database). Each is an install alert: it opens once two checks about a minute apart have found it, so 1-2 minutes after it starts, and admins can read its history under [Alerts](#install-alerts).
+- **Added by the api as it answers**, with `since` `null`: `store_unreachable:database` (the api could not read the alerts; then the only line), `store_unreachable:live_data` (the api could not read the live data store), `checks_behind` (the install was last checked more than three minutes ago; `at` is when) and `checks_not_running` (the install was never checked and the checks' work has waited three minutes: no worker runs the `alerts` job). One api's read can fail where another's works, so the web UI shows such a line only once two reads in a row have it.
+
+---
+
+## Alerts
+
+Every line of a [Needs attention](#needs-attention) card, a project's or the install's, is kept as an alert from when it opened until it resolved, and these endpoints read them, with a project's alert settings and the install alerts' retention. The background checks store them; nothing here computes one. See [Alerts]({{ site.baseurl }}/metrics#alerts) for what the pages show.
+
+| Method | Path | Who | Description |
+|---|---|---|---|
+| GET | `/projects/{project_id}/alerts` | anyone signed in | A page of the project's alerts, newest first |
+| GET | `/projects/{project_id}/alerts/{alert_id}` | anyone signed in | One of the project's alerts |
+| GET | `/projects/{project_id}/alert-settings` | anyone signed in | The project's alert settings in force, and the defaults |
+| PUT | `/projects/{project_id}/alert-settings` | editor or admin | Replace the project's alert settings |
+| GET | `/alerts/install` | admin | A page of the install's alerts, newest first |
+| GET | `/alerts/install/retention` | admin | How many days the install's resolved alerts are kept |
+| PUT | `/alerts/install/retention` | admin | Set how many days they are kept |
+
+An alert opens when a check finds its line, and resolves as soon as a check no longer does. A line back within 15 minutes of resolving reopens the same alert (`reopened` counts the returns, `opened_at` stays) rather than adding one. A resolved alert is kept for the project's alert setting `keep_days`, its metrics retention when that is unset (0 keeps it forever); the install's for the install retention below. Open alerts are never deleted.
+
+### A project's alerts
+
+```bash
+GET /api/v1/projects/{project_id}/alerts?status=all&since=2026-11-17T14:00:00&limit=50
+```
+
+| Parameter | Meaning |
+|---|---|
+| `status` | `open` (muted and covered alerts included), `resolved` or `all` (the default) |
+| `severity` | `problem` or `warning`: an open alert's severity now, a resolved one's worst |
+| `kind` | One kind, 1 to 48 characters: `connectors_off`, `pool_no_routable`, `countries_unserved`, `vendor_login`, `vendor_rate_limited`, `vendor_forbidden`, `vendor_cannot_serve`, `vendor_refused_other`, `connector_failing`, `refusals`, `success_rate`, `connector_sync_failing`, `connector_cloud_error`, `connector_no_healthy_proxy`, `connector_traffic_blocked`, `connector_traffic_near`, `connector_traffic_over_alert`, `pool_unhealthy_share`, `exits_contradicted`, `exits_outside_countries`, `reputation_site_blocked` or `connector_stuck_deleting` |
+| `q` | Text in the subject, such as a connector's name, in any case; 1 to 100 characters |
+| `since` | ISO time: only alerts open at any point since then (still open, or resolved at or after it) |
+| `until` | ISO time: only alerts opened at or before it; now by default. Keep the first page's `until` while refreshing and paging, so alerts opened meanwhile never shift the rows; `newer` says how many wait |
+| `limit` | 1 to 200, default 50 |
+| `before` | The `id` of the last alert already shown, for the next page |
+
+A time without an offset is UTC.
+
+**Response:**
+```json
+{
+  "alerts": [
+    {
+      "id": "8d0c41f2-6b7e-4f3a-9c55-2e1d0a7b9f10",
+      "key": "vendor_rate_limited:3f2c9a1e-0000-4000-8000-000000000001",
+      "kind": "vendor_rate_limited",
+      "severity": "warning",
+      "worst_severity": "problem",
+      "lead": "",
+      "subject": "Plainproxies AU",
+      "text": ": the vendor says the account sends too many requests (12% refused in the last 15 minutes).",
+      "detail": "The vendor answered 429 to 61 of 508 requests.",
+      "when": {"kind": "last_at", "at": "2026-11-18T09:41:00"},
+      "link": "connectors?open=3f2c9a1e-0000-4000-8000-000000000001",
+      "action": "Open connector",
+      "hidden_by": null,
+      "opened_at": "2026-11-18T08:02:11.120331",
+      "reopened_at": "2026-11-18T09:40:05.311200",
+      "last_seen_at": "2026-11-18T09:42:10.004112",
+      "resolved_at": null,
+      "reopened": 2,
+      "mute": null
+    }
+  ],
+  "more": false,
+  "open": 3,
+  "resolved": 41,
+  "until": "2026-11-18T09:42:30.000000",
+  "newer": 0
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | The alert's ID |
+| `key`, `kind`, `lead`, `subject`, `text`, `detail`, `when`, `link`, `action` | As on the [card's lines](#a-projects-lines), as the last check that found the line wrote them |
+| `severity` | `problem` or `warning`: now while open, when it resolved once resolved |
+| `worst_severity` | The worst it reached |
+| `hidden_by` | The key of the line that stands for it on the card while it is open and covered (a **Covered** alert); `null` otherwise |
+| `opened_at` | When it first opened |
+| `reopened_at` | When it last came back, or `null` |
+| `last_seen_at` | When a check last found it |
+| `resolved_at` | When it resolved, or `null` while open |
+| `reopened` | How many times it came back within 15 minutes of resolving |
+| `mute` | On an open alert, its mute as on the card, or `null` |
+
+`more` says older alerts remain. `open` and `resolved` count the alerts under every filter but `status`, `until` and `before`; `newer` counts those under every filter opened after `until`. `until` is the value the page used: send it back with the next page and the refreshes. `404` for an unknown project; `422` for a bad parameter.
+
+### One alert
+
+```bash
+GET /api/v1/projects/{project_id}/alerts/{alert_id}
+```
+
+One alert as the list shows it, also when it is not on a page already read, for a link to it. `404` with `{"detail": "Alert not found"}` for an ID that is not one of the project's alerts, and `{"detail": "Project not found"}` for an unknown project.
+
+### Alert settings
+
+Where each of the project's lines starts, as the **Alert settings** tab of Project settings edits them (see [Thresholds]({{ site.baseurl }}/metrics#thresholds)).
+
+```bash
+GET /api/v1/projects/{project_id}/alert-settings
+```
+
+```json
+{
+  "settings": {"success_rate": true, "success_warning_below": 70, "vendor_min": 20, "keep_days": null},
+  "defaults": {"success_rate": true, "success_warning_below": 80, "vendor_min": 10, "keep_days": null}
+}
+```
+
+Shortened: `settings` holds every field of the table below as in force, and `defaults` every default beside it. `404` for an unknown project.
+
+```bash
+PUT /api/v1/projects/{project_id}/alert-settings
+```
+
+```json
+{"success_warning_below": 70, "vendor_min": 20}
+```
+
+The body replaces the project's settings: a field left out is back at its default, so `{}` resets them all. Only the values that differ from the defaults are kept, so the others follow the defaults. Answers `200` with the new `settings` and the `defaults`; `403` for a viewer, `404` for an unknown project. The project is checked again at once, and its [History]({{ site.baseurl }}/audit-log) records an `updated` entry with each changed setting as `alerts.<field>` (`alerts.success_warning_below: [80, 70]`); a save that changes nothing records nothing. Nothing here changes how requests are routed.
+
+Percent fields are whole percent.
+
+| Field | Default | Range | What it decides |
+|---|---|---|---|
+| `success_rate` | `true` | boolean | Whether a low success rate is a line at all |
+| `success_warning_below` | 80 | 1-100 | A warning when the share of requests that reached a proxy and succeeded in the last 15 minutes is below this |
+| `success_problem_below` | 50 | 0-99 | A problem below this; 0 never makes it a problem |
+| `success_min_requests` | 100 | 1-1,000,000 | The requests in the last 15 minutes before the success rate counts |
+| `refusals_min` | 10 | 1-1,000,000 | The requests of one kind turned away before a proxy before they make a line |
+| `refusals_warning_percent` | 5 | 1-100 | A warning from this share of the project's requests turned away |
+| `refusals_problem_percent` | 25 | 1-100 | A problem from this share |
+| `invalid_location_min` | 10 | 1-1,000,000 | The requests asking for a location that could not be read before they make a line (a warning) |
+| `vendor_min` | 10 | 1-1,000,000 | The requests a vendor refused through a connector before they make a line |
+| `vendor_login_problem_percent` | 20 | 1-100 | A problem from this share of a connector's requests refused with 407 |
+| `vendor_rate_limited_warning_percent` | 5 | 1-100 | A warning from this share refused with 429 |
+| `vendor_rate_limited_problem_percent` | 50 | 1-100 | A problem from this share refused with 429 |
+| `vendor_forbidden_warning_percent` | 5 | 1-100 | A warning from this share refused with 403 |
+| `vendor_forbidden_problem_percent` | 50 | 1-100 | A problem from this share refused with 403 |
+| `vendor_cannot_serve_warning_percent` | 30 | 1-100 | A warning from this share refused with 400, 502 or 503 |
+| `vendor_other_warning_percent` | 30 | 1-100 | A warning from this share refused otherwise |
+| `connector_failing_min_requests` | 50 | 1-1,000,000 | A connector's requests in the last 15 minutes before its failures count |
+| `connector_failing_warning_percent` | 30 | 1-100 | A warning from this share of a connector's requests failing |
+| `connector_failing_problem_percent` | 80 | 1-100 | A problem from this share |
+| `connector_errors_min` | 1 | 1-100 | Failed vendor list syncs or cloud calls in a row before a connector's line shows |
+| `stuck_deleting_minutes` | 30 | 5-10,080 | Minutes a connector may take to finish deleting before its line shows |
+| `unhealthy_share_percent` | 25 | 1-100 | A warning from this share of the project's proxies failing their health checks |
+| `unhealthy_min` | 3 | 1-1,000,000 | And at least this many |
+| `exits_outside_percent` | 10 | 1-100 | A warning from this share of a connector's proxies exiting outside its listed countries |
+| `exits_outside_min` | 3 | 1-1,000,000 | And at least this many |
+| `exits_contradicted_percent` | 25 | 1-100 | A warning from this share of a connector's checked proxies exiting in another country than its vendor says |
+| `exits_contradicted_min` | 3 | 1-1,000,000 | And at least this many |
+| `site_blocked_percent` | 50 | 1-100 | A warning once a site blocks at least this share of the requests on every connector that serves it, by [exit reputation]({{ site.baseurl }}/exit-reputation) |
+| `keep_days` | `null` | 0-36,500 or `null` | Days resolved alerts are kept; `null` follows the project's `metrics_retention_days`, 0 keeps them forever |
+
+A field the body does not know (`Extra inputs are not permitted`), a value out of range, or two values that disagree is refused with `422`, each with its message in `detail[].msg`:
+
+- `Value error, <warning field> cannot be above <problem field>`, for `refusals_*`, `vendor_rate_limited_*`, `vendor_forbidden_*` and `connector_failing_*`
+- `Value error, success_problem_below must be below success_warning_below`
+
+### Install alerts
+
+The install-wide lines of the Projects page over time, for admins (`403` for anyone else): the ones the background checks found, not the ones the api adds as it answers.
+
+```bash
+GET /api/v1/alerts/install?status=resolved&since=2026-11-11T00:00:00
+```
+
+The parameters and the answer are a project list's, without `q`; `kind` is one of `no_gateway_serving`, `store_unreachable`, `changes_not_applied`, `background_behind` and `ip_databases`. An install alert has an empty `lead`, `subject` and `action`, `link` set to the admin page (`system` or `geo`), and no `mute`; a `text` holding `{time}` has `when` set, of kind `at`, to show in the reader's time.
+
+```bash
+GET /api/v1/alerts/install/retention
+```
+
+```json
+{"days": 90}
+```
+
+How many days the install's alerts are kept after they resolve: 90 until an admin sets it, 0 keeping them forever.
+
+```bash
+PUT /api/v1/alerts/install/retention
+```
+
+```json
+{"days": 30}
+```
+
+`days` from 0 to 36500. Answers `200` with the value saved, `422` out of range. The change is recorded itself, on the system settings, and applies within the hour, when older alerts are deleted.
 
 ---
 
@@ -1375,7 +1590,7 @@ POST /api/v1/backup/export
 | Field | Type | Notes |
 |-------|------|-------|
 | `passphrase` | string | Minimum 8 characters. Required again to import - it cannot be recovered. |
-| `include_metrics` | boolean | Include history: proxy/project metrics, exit IP observations, per-connector exit IPs and [exit reputation]({{ site.baseurl }}/exit-reputation) records. Default `false` (smaller file). |
+| `include_metrics` | boolean | Include history: proxy/project metrics, exit IP observations, per-connector exit IPs, [exit reputation]({{ site.baseurl }}/exit-reputation) records, and the [alerts](#alerts): each project's, and the install's resolved ones. Default `false` (smaller file). |
 | `include_database_files` | boolean | Include the bytes of uploaded and downloaded IP databases. Default `false`; a city database is tens of megabytes. Their rows are always included, so without the files the restored instance lists them without a file, ready to re-upload or refresh. |
 
 **Response:** the backup file as `application/octet-stream` with a
@@ -1385,11 +1600,13 @@ header.
 The file covers users (including password hashes), projects, credentials,
 connectors, proxies, custom provider descriptors, the IP attribution settings
 and database records, the [audit log](#audit-log), and the install's system
-settings (the audit retention and the Octoprox Enterprise license key), under
-the payload keys `audit_log` and `system_settings`. The audit log travels
-whether or not history is included. Optionally the file also
-carries the history (metrics, attribution observations and exit reputation
-records) and the IP database files.
+settings (the audit retention, the install alert retention and the Octoprox
+Enterprise license key), under the payload keys `audit_log` and
+`system_settings`. The audit log travels whether or not history is included.
+Optionally the file also carries the history (metrics, attribution
+observations, exit reputation records, each project's alerts, and the
+install's resolved alerts) and the IP database files. A project's alert
+settings travel with the project.
 
 ### Import Backup
 
@@ -1405,9 +1622,11 @@ Content-Type: multipart/form-data
 | `mode` | string | Only `replace` is supported (default). |
 | `keep_current_user` | boolean | Default `false`. See below. |
 
-**Import replaces all existing data** on the install, except its audit history
-and its license key. The backup's audit entries are added to the install's own,
-an entry the install already has left as it is; the backup's system settings
+**Import replaces all existing data** on the install, except its audit history,
+its install alerts and its license key. The backup's audit entries and resolved
+install alerts are added to the install's own, one the install already has left
+as it is; a project's alerts are restored with the project, and its open ones
+are brought up to date by the next check. The backup's system settings
 are taken only when the install has never saved its own, and a missing license
 key is filled in from the backup's. The import itself is recorded last, in the
 import's transaction: one `imported` entry on `backup` `1` naming the admin, with
@@ -1454,6 +1673,7 @@ again with credentials that are valid in the backup.
   "proxies": 14,
   "proxy_metrics": 0,
   "project_metrics": 0,
+  "alerts": 0,
   "provider_descriptors": 0,
   "geo_settings": 1,
   "geo_databases": 2,
@@ -1463,6 +1683,7 @@ again with credentials that are valid in the backup.
   "exit_ip_reputation": 0,
   "system_settings": 0,
   "audit_log": 48,
+  "install_alerts": 0,
   "kept_current_user": true,
   "user_conflicts": [
     {
@@ -1476,8 +1697,9 @@ again with credentials that are valid in the backup.
 ```
 
 `users` counts imported rows only; the kept account is not included.
-`audit_log` counts the backup's entries added to the install's, and
-`system_settings` is 1 when the backup's settings were taken or filled in the
+`audit_log` counts the backup's entries added to the install's, `alerts` the
+projects' alerts restored and `install_alerts` the backup's install alerts added
+to the install's, and `system_settings` is 1 when the backup's settings were taken or filled in the
 install's missing license key.
 
 **Errors (HTTP 400):**
@@ -1606,7 +1828,7 @@ Editors and viewers receive `403`.
 | `instances` | Every live process, grouped by the role it registered with (`all`, `api`, `gateway`, `controller`, `worker`; a role with no live process is absent), each list sorted by instance id. An entry carries `instance_id`, `role`, the process's last heartbeat `snapshot` (below) and `age_seconds`, how old that snapshot is. `{}` when Redis cannot be read. Echo processes do not heartbeat and are never listed. |
 | `controller` | `leader`: the instance id holding the controller lease (`null` while none does, during a failover); `changes` and `compiled_at`: how far the leader's last compile read the change stream (an entry ID) and when it was made, from its heartbeat; `changes_head`: the change stream's newest entry ID, read now, ahead of `changes` while the leader has changes to compile (`null` while there is no stream); `standby_poll_ms` and `lease_ttl_ms`: how often a standby asks for the lease and how long a failed leader holds it, the numbers the page words the takeover from; `error` when Redis cannot be read. |
 | `feed` | The routing feed in Redis: `digest`, `changes`, `compiled_at` and `sections` of its head (all `null` while there is none), and `gateways`: per gateway the `digest` and `changes` it applied, `in_sync` (it applied the current head) and `age_seconds` since it last applied an update, which grows while nothing changes. `error` when Redis cannot be read or the head was published by another release. |
-| `streams` | `by_name`: every work stream by name, `jobs.<kind>` for each of the fourteen job kinds, then `sightings`, `observations` and `exit_reports`, each with `length` (entries queued and running, since workers delete each entry once handled), `pending` (delivered to a worker and not acknowledged yet: running, or waiting to be reclaimed), `queued` (`length` less `pending`, never below zero: the backlog), `consumers` (worker processes in the `workers` group, a stopped one until index hygiene removes it, within the hour) and `oldest_seconds` (the age of the oldest entry, queued or running, by Redis's clock; `null` when the stream is empty). A stream nobody created yet reads as zeros. `error` when Redis cannot be read. |
+| `streams` | `by_name`: every work stream by name, `jobs.<kind>` for each of the fifteen job kinds, then `sightings`, `observations` and `exit_reports`, each with `length` (entries queued and running, since workers delete each entry once handled), `pending` (delivered to a worker and not acknowledged yet: running, or waiting to be reclaimed), `queued` (`length` less `pending`, never below zero: the backlog), `consumers` (worker processes in the `workers` group, a stopped one until index hygiene removes it, within the hour) and `oldest_seconds` (the age of the oldest entry, queued or running, by Redis's clock; `null` when the stream is empty). A stream nobody created yet reads as zeros. `error` when Redis cannot be read. |
 | `inventory` | Exact counts of projects, credentials, connectors, proxies, users and providers, and `proxies_by_status` from the proxies' status column. |
 | `projects` | Per-project credential, connector and proxy counts, busiest first. |
 | `database` | Database size, per-table size (indexes included) and server connections. Each api process's own pool is in its snapshot. |

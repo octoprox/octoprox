@@ -183,6 +183,19 @@ SSO_LOGIN_CODE_TTL_SECONDS = 60
 # the release notes octoprox.com lists and when the worker's update_check job
 # fetched them. Replaced by each successful check, read by the api.
 LATEST_RELEASE_KEY = KEY_PREFIX + "release:latest"
+# One scope's alert checks (a hash): "checked", when the data of the newest check the workers stored was read, and
+# "requested", when the api last asked for a check now, both ISO naive UTC with microseconds (so they compare as
+# strings). The scope is a project id, or "install". Written by the api (requested, in the MULTI that appends the
+# run-now entry) and the alerts job (checked, after its commit, by _MARK_CHECKED_SCRIPT, which only moves it forward);
+# read by the api for the card's pending re-check and staleness. Each write sets a day's TTL, so a deleted project's
+# hash goes on its own.
+ALERT_CHECK_KEY = KEY_PREFIX + "alerts:check:{scope}"
+ALERT_CHECK_TTL_SECONDS = 86400
+INSTALL_SCOPE = "install"
+# The install conditions the alerts job has seen and not yet stored (a hash): condition key -> when an `all` run first
+# saw it, ISO naive UTC. Written and read by the alerts job only: a condition becomes an install alert once seen
+# INSTALL_SETTLE apart, and leaves the hash when a run no longer sees it. A day's TTL on each write.
+ALERT_INSTALL_SEEN_KEY = KEY_PREFIX + "alerts:install:seen"
 # The routing feed (api.feed): the definitions the controller compiled from
 # Postgres, for gateways, which have no database. The head (a string of
 # FeedHead JSON) names the current compile; the manifest hash maps each
@@ -376,6 +389,8 @@ REDIS_KEY_GROUPS: tuple[tuple[str, str], ...] = (
     (KEY_PREFIX + "tunnel:", "Tunnel devices"),
     (KEY_PREFIX + "sso:", "Sign-in flows"),
     (LATEST_RELEASE_KEY, "Update check"),
+    # ALERT_CHECK_KEY and ALERT_INSTALL_SEEN_KEY.
+    (KEY_PREFIX + "alerts:", "Alerts"),
     (KEY_PREFIX + "feed:", "Routing feed"),
     (_literal_prefix(JOB_STREAM_KEY), "Job streams"),
     (_literal_prefix(DEMAND_KEY), "Demand"),
@@ -446,6 +461,20 @@ for i = 1, #ARGV, 2 do
   end
 end
 return removed
+"""
+
+# Marks scopes checked (RedisClient.mark_alert_checks). KEYS are the scopes' ALERT_CHECK_KEY hashes; ARGV[1] the check's
+# data time (ISO naive UTC with microseconds, so times compare as strings), ARGV[2] the TTL. A newer time already
+# stored stays: a slow run that ends after a fresher one never moves "checked" back.
+_MARK_CHECKED_SCRIPT = """
+for i = 1, #KEYS do
+  local checked = redis.call('HGET', KEYS[i], 'checked')
+  if not checked or checked < ARGV[1] then
+    redis.call('HSET', KEYS[i], 'checked', ARGV[1])
+  end
+  redis.call('EXPIRE', KEYS[i], ARGV[2])
+end
+return #KEYS
 """
 
 # Moves metrics windows into a flush's staging hash
@@ -1130,6 +1159,7 @@ class RedisClient:
         self._client: redis.Redis | None = None
         self._prune_script: AsyncScript | None = None
         self._take_script: AsyncScript | None = None
+        self._mark_checked_script: AsyncScript | None = None
         # Whose applied marks this client's batches move (APPLIED_BATCHES_KEY).
         # The token keeps a restarted process, which may reuse its instance id,
         # off its predecessor's marks while its sequences start again at 1.
@@ -1255,6 +1285,17 @@ class RedisClient:
             args = [part for pair in members[start:start + _HASH_BATCH] for part in pair]
             removed += int(await self._prune_script(keys=[index], args=args))
         return removed
+
+    async def mark_alert_checks(self, scopes: Sequence[str], at: str) -> None:
+        """Set each scope's alert check time (ALERT_CHECK_KEY) to ``at``, an ISO time with microseconds, unless it holds
+        a later one, and renew its TTL: one script call for every scope."""
+        if not scopes:
+            return
+        if self._mark_checked_script is None:
+            self._mark_checked_script = self.client.register_script(_MARK_CHECKED_SCRIPT)
+        await self._mark_checked_script(
+            keys=[ALERT_CHECK_KEY.format(scope=scope) for scope in scopes], args=[at, ALERT_CHECK_TTL_SECONDS]
+        )
 
     # Batches: the writes a failure sends again, prepared as parts that carry
     # an identity (the *_batch methods, no I/O) and sent with send_batch.

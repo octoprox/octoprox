@@ -64,3 +64,6 @@ class JobKind(StrEnum):
     INDEX_HYGIENE = "index_hygiene"
     # Ask octoprox.com for its release notes once a day, for the api to say when a newer release is out.
     UPDATE_CHECK = "update_check"
+    # Check every project and the install for what needs attention, or one project after a change, and store the
+    # alerts that open, stay, resolve and reopen.
+    ALERTS = "alerts"

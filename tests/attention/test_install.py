@@ -1,8 +1,8 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The install-wide lines of Needs attention, read off heartbeats written as live processes write them, the streams'
-entries stamped on Redis's clock, and the IP database rows in Postgres."""
+"""The install-wide lines of Needs attention as the alerts job finds them, read off heartbeats written as live processes
+write them, the streams' entries stamped on Redis's clock, and the IP database rows in Postgres."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.attention import install
-from api.attention.install import InstallAttentionReader
+from api.attention.checks import Finding
+from api.attention.install import InstallChecks, InstallKind, InstallReport
 from api.core import utc_now
 from api.core.roles import JobKind
 from api.core.system_stats import ClusterReader, ClusterReading
@@ -137,12 +138,17 @@ class Cluster:
         )
         return compiled
 
-    async def lines(self, *, geo_updater_interval: float = 3600.0) -> dict[str, InstallAttentionLine]:
-        reader = InstallAttentionReader(
+    async def report(self, *, geo_updater_interval: float = 3600.0) -> InstallReport | None:
+        checks = InstallChecks(
             self.redis, self.sessions, ClusterReader(self.redis), geo_updater_interval=geo_updater_interval
         )
-        answer = await reader.read()
-        return {line.key: line for line in answer.lines}
+        return await checks.report(utc_now())
+
+    async def lines(self, *, geo_updater_interval: float = 3600.0) -> dict[str, InstallAttentionLine]:
+        """What the check found, as the Projects page would show each line."""
+        report = await self.report(geo_updater_interval=geo_updater_interval)
+        assert report is not None
+        return {finding.key: _shown(finding) for finding in report.findings}
 
     async def database(self, **fields: Any) -> GeoDatabaseRecord:
         record = GeoDatabaseRecord(name=fields.pop("name", "City"), **fields)
@@ -150,6 +156,15 @@ class Cluster:
             await GeoDatabaseRepository(session).create(record, None)
             await session.commit()
         return record
+
+
+def _shown(finding: Finding) -> InstallAttentionLine:
+    """An install finding as its stored alert's line reads (``Alert.install_line``)."""
+    at = finding.when.at if finding.when is not None else None
+    admin_page = "geo" if finding.link == "geo" else "system"
+    return InstallAttentionLine(
+        key=finding.key, severity=finding.severity, text=finding.text, at=at, admin_page=admin_page, since=None
+    )
 
 
 @pytest.fixture
@@ -219,14 +234,17 @@ class TestGateways:
         )
         await cluster.add(CHANGES_STREAM_KEY, 70, kind="proxy")
 
-        lines = await cluster.lines()
+        report = await cluster.report()
 
-        # The database line says it all: the changes and the background work wait on it.
-        assert list(lines) == ["store_unreachable:database"]
-        assert lines["store_unreachable:database"].text == (
+        # The database line says it all: the changes, the background work and the IP databases wait on it, their
+        # alerts held as they are rather than resolved.
+        assert report is not None
+        assert [finding.key for finding in report.findings] == ["store_unreachable:database"]
+        assert report.findings[0].text == (
             "Octoprox cannot reach its database. Proxy traffic keeps flowing, but changes cannot be saved and proxy "
             "health and charts are not updating."
         )
+        assert report.held == {"changes_not_applied", "background_behind", "ip_databases"}
 
 
 class TestChanges:
@@ -506,13 +524,8 @@ class TestRedisAway:
 
         monkeypatch.setattr(ClusterReader, "read", refused)
 
-        lines = await cluster.lines()
-
-        assert list(lines) == ["store_unreachable:live_data"]
-        assert lines["store_unreachable:live_data"].text == (
-            "Octoprox cannot reach its live data store. Requests still go through but may be slower, and live numbers "
-            "may be missing."
-        )
+        # Skipped: the run leaves the install's alerts as they are, and the api says Redis is away itself.
+        assert await cluster.report() is None
 
     async def test_a_reading_that_takes_too_long(self, cluster: Cluster, monkeypatch: pytest.MonkeyPatch) -> None:
         await cluster.healthy()
@@ -525,4 +538,35 @@ class TestRedisAway:
         monkeypatch.setattr(ClusterReader, "streams", stalled)
         monkeypatch.setattr(install, "INSTALL_READ_TIMEOUT_SECONDS", 0.05)
 
-        assert list(await cluster.lines()) == ["store_unreachable:live_data"]
+        assert await cluster.report() is None
+
+    async def test_an_ip_database_read_that_fails_skips_the_check(
+        self, cluster: Cluster, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await cluster.healthy()
+
+        async def refused(self: GeoDatabaseRepository) -> list[GeoDatabaseRecord]:
+            raise ConnectionRefusedError("Postgres is away")
+
+        monkeypatch.setattr(GeoDatabaseRepository, "get_all", refused)
+
+        assert await cluster.report() is None
+
+
+class TestFindings:
+    async def test_each_line_as_its_alert_stores_it(self, cluster: Cluster) -> None:
+        await cluster.healthy()
+        await cluster.lead(None)
+        await cluster.publish("node-1", "controller", snapshot("node-1", "controller", serves=False, worker=taking()))
+        await cluster.add(CHANGES_STREAM_KEY, 65, kind="connector")
+
+        report = await cluster.report()
+
+        assert report is not None and report.held == frozenset()
+        found = {finding.key: finding for finding in report.findings}
+        gateways, changes = found["no_gateway_serving"], found["changes_not_applied"]
+        assert (gateways.kind, gateways.sort_name, gateways.link, gateways.action) == (
+            InstallKind.NO_GATEWAY_SERVING, "0", "system", ""
+        )
+        assert (gateways.lead, gateways.subject, gateways.when) == ("", "", None)
+        assert (changes.kind, changes.sort_name) == (InstallKind.CHANGES_NOT_APPLIED, "2")

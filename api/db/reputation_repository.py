@@ -562,6 +562,93 @@ class ExitReputationRepository:
         )
         return [_CONNECTORS.to_record(row) for row in result]
 
+    # The same reads for several projects at once, as the alerts job reads every project's: one statement each.
+
+    async def recent_sites_of(
+        self, project_ids: Collection[str], since: datetime, *, limit: int
+    ) -> dict[str, list[str]]:
+        """Each project's sites with a connector record seen since ``since``, the most reported first, at most ``limit``
+        each; counted at the coarsest level as :meth:`recent_sites` counts them. A project with none is absent."""
+        if not project_ids:
+            return {}
+        c = _CONNECTORS.table.c
+        reports = func.sum(c.blocked_reports + c.good_reports)
+        ranked = (
+            select(
+                c.project_id,
+                c.site,
+                func.row_number().over(partition_by=c.project_id, order_by=(reports.desc(), c.site)).label("rank"),
+            )
+            .where(any_of(c.project_id, sorted(set(project_ids))), c.place.not_like("%/%"), c.last_seen_at >= since)
+            .group_by(c.project_id, c.site)
+            .subquery("ranked")
+        )
+        result = await self._session.execute(
+            select(ranked.c.project_id, ranked.c.site)
+            .where(ranked.c.rank <= limit)
+            .order_by(ranked.c.project_id, ranked.c.rank)
+        )
+        sites: dict[str, list[str]] = {}
+        for project_id, site in result:
+            sites.setdefault(project_id, []).append(site)
+        return sites
+
+    async def avoided_ips_of(
+        self, sites: Collection[tuple[str, str]], now: datetime
+    ) -> dict[tuple[str, str], frozenset[str]]:
+        """Each (project, site) of ``sites`` that avoids exit IPs at ``now``, with those IPs."""
+        if not sites:
+            return {}
+        await self._plan_for_the_values()
+        table = _IPS.table
+        c = table.c
+        wanted = rows_of("wanted", _IPS.named(("project_id", "site")), sorted(set(sites)))
+        result = await self._session.execute(
+            select(c.project_id, c.site, c.ip)
+            .join(wanted, and_(c.project_id == wanted.c.project_id, c.site == wanted.c.site))
+            .where(self._avoided(table, now))
+        )
+        avoided: dict[tuple[str, str], set[str]] = {}
+        for project_id, site, ip in result:
+            avoided.setdefault((project_id, site), set()).add(ip)
+        return {key: frozenset(ips) for key, ips in avoided.items()}
+
+    async def connector_records_of(
+        self, sites: Collection[tuple[str, str]], places: Collection[str]
+    ) -> list[ConnectorSiteReputation]:
+        """The connector records of each (project, site) of ``sites`` at each of ``places``, in key order."""
+        if not sites or not places:
+            return []
+        await self._plan_for_the_values()
+        table = _CONNECTORS.table
+        c = table.c
+        wanted = rows_of("wanted", _CONNECTORS.named(("project_id", "site")), sorted(set(sites)))
+        result = await self._session.execute(
+            select(table)
+            .join(wanted, and_(c.project_id == wanted.c.project_id, c.site == wanted.c.site))
+            .where(any_of(c.place, sorted(set(places))))
+            .order_by(*_CONNECTORS.lock_order())
+        )
+        return [_CONNECTORS.to_record(row) for row in result]
+
+    async def coarse_records_of(
+        self, sites: Collection[tuple[str, str]], since: datetime
+    ) -> list[ConnectorSiteReputation]:
+        """The connector records of each (project, site) of ``sites`` at a country or no place, seen since ``since``."""
+        if not sites:
+            return []
+        await self._plan_for_the_values()
+        table = _CONNECTORS.table
+        c = table.c
+        wanted = rows_of("wanted", _CONNECTORS.named(("project_id", "site")), sorted(set(sites)))
+        result = await self._session.execute(
+            select(table)
+            .join(wanted, and_(c.project_id == wanted.c.project_id, c.site == wanted.c.site))
+            .where(c.place.not_like("%/%"), c.last_seen_at >= since)
+            .order_by(*_CONNECTORS.lock_order())
+        )
+        return [_CONNECTORS.to_record(row) for row in result]
+
     async def busiest_places(self, project_id: str, site: str | None, *, limit: int) -> list[tuple[str, int]]:
         """The requested places the project's connector records are kept at, for ``site`` or for any, each with the
         reports made there, the most reported first; at most ``limit``, and never "" (no place)."""

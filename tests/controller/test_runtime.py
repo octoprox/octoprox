@@ -60,6 +60,7 @@ LOOPS = {
     "job_producer_tunnel_last_seen",
     "job_producer_index_hygiene",
     "job_producer_update_check",
+    "job_producer_alerts",
 }
 
 # Builds a controller runtime for an instance ID, with any settings changed: build("controller-a", health_check_interval=1).
@@ -173,6 +174,8 @@ class TestLoops:
             JobKind.TUNNEL_LAST_SEEN: 10,
             JobKind.INDEX_HYGIENE: 60,
             JobKind.UPDATE_CHECK: 3600,
+            # Every check, the install's included, on one schedule.
+            JobKind.ALERTS: 60,
         }
 
     def test_no_snapshots_are_published_while_they_are_off(self, runtimes: Build) -> None:
@@ -188,6 +191,13 @@ class TestLoops:
     def test_a_period_a_setting_gives_in_fractions_is_rounded_to_whole_seconds(self, runtimes: Build) -> None:
         runtime = runtimes("controller-a", geo_updater_interval=90.6)
         assert producers_of(runtime)[JobKind.GEO_UPDATE].period == 91
+
+    def test_every_project_and_the_install_are_checked_for_alerts_every_minute(self, runtimes: Build) -> None:
+        producer = producers_of(runtimes("controller-a"))[JobKind.ALERTS]
+        assert producer.period == 60
+        # One key, the install-wide one: one run checks every project and the install.
+        assert producer._slot_map(producer._builder.job_keys) == {60: {producer.slot("all"): ["all"]}}
+        assert INSTALL_WIDE_KEYS == ("all",)
 
     async def test_compaction_is_published_at_its_slot_in_its_first_period(
         self, runtimes: Build, clock: Clock, redis_client: RedisClient

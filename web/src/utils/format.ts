@@ -41,6 +41,16 @@ export function compact(n: number): string {
   return n.toLocaleString()
 }
 
+/** A span of seconds, short: "42s", "17m", "3h 5m", "2d 4h". */
+export function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`
+  const m = Math.floor(seconds / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${m % 60}m`
+  return `${Math.floor(h / 24)}d ${h % 24}h`
+}
+
 /** Requests per minute: one decimal under ten, whole and compact above; a trickle reads <0.1, not 0. */
 export function formatRpm(rpm: number): string {
   if (rpm <= 0) return '0'

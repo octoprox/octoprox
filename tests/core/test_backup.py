@@ -8,14 +8,17 @@ test Redis.
 """
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.attention.alert import REOPEN_WINDOW, FoundAlert
+from api.attention.checks import AttentionKind, Finding
+from api.attention.install import InstallKind
 from api.core.backup import (
     _ENTITY_SPECS,
     BACKUP_FORMAT_VERSION,
@@ -30,8 +33,10 @@ from api.core.backup import (
     _KeptUser,
 )
 from api.core.stats import FailureKind, RequestCount
+from api.db.alert_repository import AlertRepository
 from api.db.audit_repository import AuditRepository, SystemSettingsRepository
 from api.db.models import (
+    AlertModel,
     ApiTokenModel,
     AuditLogModel,
     AuthIdentityModel,
@@ -59,6 +64,8 @@ from api.db.repository import (
     ProxyRepository,
 )
 from api.db.reputation_repository import ExitReputationRepository
+from api.models.alerts import AlertSettings
+from api.models.attention import Severity
 from api.models.audit import AuditEntry
 from api.models.backup import BackupPayload, ImportSummary
 from api.models.connector import Connector
@@ -530,6 +537,88 @@ class TestTheInstallsOwnRowsStay:
         assert [row["id"] for row in payload["audit_log"]] == ["e1"]
         assert [(row["id"], row["audit_retention_days"]) for row in payload["system_settings"]] == [(1, 30)]
         assert BackupPayload.model_validate(payload).audit_log[0]["entity_name"] == "install"
+
+
+class TestAlerts:
+    """A project's alerts are history that goes and comes with its project; the install's resolved ones join this
+    install's, as its audit trail does, and never an open one."""
+
+    @staticmethod
+    def _finding(key: str) -> Finding:
+        return Finding(
+            key=key, kind=AttentionKind.CONNECTORS_OFF if key == "connectors_off" else InstallKind(key),
+            severity=Severity.PROBLEM, lead="", subject="", text=" text.", link="connectors", action="",
+        )
+
+    @classmethod
+    async def _run(
+        cls, session: AsyncSession, at: datetime, found: dict[str, list[str]], checked: list[str]
+    ) -> None:
+        """What an alerts run at ``at`` stores: ``found`` maps each scope ('' for the install) to its keys."""
+        rows = [FoundAlert(scope, cls._finding(key)) for scope, keys in found.items() for key in keys]
+        await AlertRepository(session).reconcile(rows, checked, [], at, reopen=REOPEN_WINDOW)
+        await session.commit()
+
+    @staticmethod
+    async def _stored(session: AsyncSession) -> set[tuple[str | None, str, bool]]:
+        rows = (await session.execute(select(AlertModel))).scalars()
+        return {(row.project_id, row.key, row.resolved_at is None) for row in rows}
+
+    async def test_project_alerts_and_resolved_install_alerts_travel_with_the_history(
+        self, db_session: AsyncSession
+    ) -> None:
+        project = await ProjectRepository(db_session).create(Project(name="Alerted", username="alerted", password="pw"))
+        await ProjectRepository(db_session).write_alert_settings(project.id, AlertSettings(vendor_min=20, keep_days=0))
+        await db_session.commit()
+        t0 = datetime(2026, 11, 18, 9)
+        await self._run(db_session, t0, {project.id: ["connectors_off"], "": ["ip_databases", "background_behind"]}, [])
+        await self._run(db_session, t0 + timedelta(minutes=1), {project.id: ["connectors_off"], "": ["ip_databases"]}, [""])
+        repository = BackupRepository(db_session)
+
+        exported = await repository.export(include_metrics=False)
+        assert (exported["alerts"], exported["install_alerts"]) == ([], [])
+        assert exported["projects"][0]["alert_settings"] == {"vendor_min": 20, "keep_days": 0}
+        payload = await repository.export(include_metrics=True)
+        assert [row["key"] for row in payload["alerts"]] == ["connectors_off"]
+        # The open install alert stays behind.
+        assert [row["key"] for row in payload["install_alerts"]] == ["background_behind"]
+
+        # Meanwhile this install had its own history, and an open alert of the same key.
+        await db_session.execute(delete(AlertModel))
+        await db_session.commit()
+        await self._run(db_session, t0 + timedelta(hours=1), {"": ["no_gateway_serving", "background_behind"]}, [])
+        await self._run(db_session, t0 + timedelta(hours=1, minutes=1), {"": ["background_behind"]}, [""])
+        result = await repository.replace_all(BackupPayload.model_validate(payload), REGISTRY)
+        await db_session.commit()
+
+        assert (result.summary.alerts, result.summary.install_alerts) == (1, 1)
+        assert await self._stored(db_session) == {
+            (project.id, "connectors_off", True),
+            (None, "no_gateway_serving", False),
+            (None, "background_behind", True),
+            (None, "background_behind", False),
+        }
+        restored = await ProjectRepository(db_session).alert_settings([project.id])
+        assert restored[project.id] == AlertSettings(vendor_min=20, keep_days=0)
+
+        # Imported again: the install's history already holds the backup's.
+        again = await repository.replace_all(BackupPayload.model_validate(payload), REGISTRY)
+        assert again.summary.install_alerts == 0
+
+    async def test_an_older_backup_without_them_imports(self, db_session: AsyncSession) -> None:
+        await ProjectRepository(db_session).create(Project(name="Old", username="old", password="pw"))
+        await db_session.commit()
+        payload = await BackupRepository(db_session).export(include_metrics=True)
+        for row in payload["projects"]:
+            del row["alert_settings"]
+        del payload["alerts"], payload["install_alerts"]
+
+        result = await BackupRepository(db_session).replace_all(BackupPayload.model_validate(payload), REGISTRY)
+        await db_session.commit()
+
+        assert (result.summary.projects, result.summary.alerts, result.summary.install_alerts) == (1, 0, 0)
+        [project] = await ProjectRepository(db_session).get_all()
+        assert await ProjectRepository(db_session).alert_settings([project.id]) == {project.id: AlertSettings()}
 
 
 class TestCloudConnectorsLeaving:

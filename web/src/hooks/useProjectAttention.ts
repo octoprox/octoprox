@@ -1,6 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
   fetchInstallAttention, fetchProjectAttention, fetchProjectsAttention, muteAttention, unmuteAttention,
@@ -8,8 +9,10 @@ import {
 } from '../api/client'
 import { useToast } from '../contexts/ToastContext'
 
-/** How often the lines are read again: the request lines cover the last 15 minutes. */
+/** How often the lines are read again: the workers check every minute. */
 const ATTENTION_POLL_MS = 30_000
+/** How often while a check asked for after a change is under way, so a fix clears its line within seconds. */
+const PENDING_POLL_MS = 2_000
 
 const MUTED_FOR: Record<MuteDuration, string> = {
   day: 'Muted for 1 day',
@@ -18,20 +21,35 @@ const MUTED_FOR: Record<MuteDuration, string> = {
   until_clear: 'Muted until it clears',
 }
 
-/** A project's Needs attention lines; the Overview card and the sidebar count share the one query. */
+/**
+ * A project's Needs attention lines; the Overview card and the sidebar count share the one query. Read every 2 s while a
+ * check asked for after a change is waiting; once it lands, the project list's counts and the Alerts page read again.
+ */
 export function useProjectAttention(projectId: string | undefined) {
-  return useQuery({
+  const queryClient = useQueryClient()
+  const query = useQuery({
     queryKey: ['attention', projectId],
     queryFn: () => fetchProjectAttention(projectId!),
     enabled: !!projectId,
-    refetchInterval: ATTENTION_POLL_MS,
+    refetchInterval: (query) => (query.state.data?.pending ? PENDING_POLL_MS : ATTENTION_POLL_MS),
   })
+  const pending = !!query.data?.pending
+  const wasPending = useRef(pending)
+  useEffect(() => {
+    if (wasPending.current && !pending) {
+      queryClient.invalidateQueries({ queryKey: ['projects-attention'] })
+      queryClient.invalidateQueries({ queryKey: ['alerts', projectId] })
+    }
+    wasPending.current = pending
+  }, [pending, projectId, queryClient])
+  return query
 }
 
 /** After a change that may fix a line (a connector, a country, the project's settings, a mute), so it clears at once. */
 export function invalidateAttention(queryClient: QueryClient, projectId: string | null | undefined): void {
   queryClient.invalidateQueries({ queryKey: ['attention', projectId] })
   queryClient.invalidateQueries({ queryKey: ['projects-attention'] })
+  queryClient.invalidateQueries({ queryKey: ['alerts', projectId] })
 }
 
 /** Mute and unmute a project's lines, for editors and admins. */
@@ -80,8 +98,10 @@ interface DebouncedInstall {
 }
 
 /**
- * The install-wide lines for the Projects page. A line shows only once two answers in a row hold it, so a blip
- * (a gateway restarting) never flashes; the first answer shows nothing, and a failed read keeps the last.
+ * The install-wide lines for the Projects page. A stored line (`since` set) shows at once: the workers stored it
+ * only once two checks a minute apart found it. A line the api adds as it answers (Postgres or Redis out of reach, the
+ * checks behind) shows only once two answers in a row hold it: api processes share no memory, and one failed read on
+ * one of them must not flash a line. The first answer shows none of those, and a failed read keeps the last.
  */
 export function useInstallAttention(): InstallAttentionLine[] {
   const queryClient = useQueryClient()
@@ -90,7 +110,7 @@ export function useInstallAttention(): InstallAttentionLine[] {
     queryFn: async (): Promise<DebouncedInstall> => {
       const before = new Set(queryClient.getQueryData<DebouncedInstall>(['attention-install'])?.keys)
       const { lines } = await fetchInstallAttention()
-      return { keys: lines.map((line) => line.key), shown: lines.filter((line) => before.has(line.key)) }
+      return { keys: lines.map((line) => line.key), shown: lines.filter((line) => line.since !== null || before.has(line.key)) }
     },
     refetchInterval: ATTENTION_POLL_MS,
   })

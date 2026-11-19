@@ -3,7 +3,8 @@
 
 """Connector writes: create, edit, delete, traffic reset and error recording, and the work each starts.
 
-Each write but an error's is announced after its commit, and the runs it needs are asked for after that.
+Each write but an error's is announced after its commit, and the runs it needs are asked for after that, its project's
+alert check among them.
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ from api.services.errors import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from api.attention.requests import AlertChecks
     from api.core.audit import Actor
     from api.db.redis import RedisClient
     from api.db.session import SessionFactory
@@ -74,6 +76,7 @@ class ConnectorService:
 
     Args:
         redis_client: Lifts quarantines, marks connectors pending a traffic decision and deletes a deleted connector's keys; its request deadline bounds those steps.
+        alerts: Asks for the project's alert check after each write, so a fix clears its line within seconds.
     """
 
     def __init__(
@@ -84,12 +87,14 @@ class ConnectorService:
         provider_registry: ProviderRegistry,
         *,
         changes: ChangeLog,
+        alerts: AlertChecks,
     ) -> None:
         self._session_factory = session_factory
         self._jobs = jobs
         self._redis = redis_client
         self._registry = provider_registry
         self._changes = changes
+        self._alerts = alerts
 
     async def create(self, project_id: str, data: ConnectorCreate, actor: Actor) -> Connector:
         """Validate and store a new connector of the project; the saved connector.
@@ -126,6 +131,7 @@ class ConnectorService:
         logger.info("Added connector", connector_id=connector.id, name=connector.name)
         await self._changes.record(ChangeKind.CONNECTOR, connector.id)
         await self._start_work(connector)
+        await self._alerts.request(project_id)
         return connector
 
     async def update(self, project_id: str, connector_id: str, data: ConnectorUpdate, actor: Actor) -> Connector:
@@ -188,6 +194,7 @@ class ConnectorService:
         if not saved.parsed_traffic_config.blocks_alike(current.parsed_traffic_config):
             # Decided again now, so a raised limit lifts a block at once rather than at the next minute's re-check.
             await self._ask_for_traffic_decision(connector_id)
+        await self._alerts.request(project_id)
         return saved
 
     async def set_country(
@@ -221,6 +228,8 @@ class ConnectorService:
             await self._changes.record(ChangeKind.CONNECTOR, saved.id)
             if saved.config != current.config:
                 await self._start_work(saved)
+        if edited:
+            await self._alerts.request(project_id)
 
     async def remove(self, project_id: str, connector_id: str, actor: Actor) -> None:
         """Delete a connector of the project, as the api's delete does: any but a cloud connector goes now.
@@ -245,6 +254,7 @@ class ConnectorService:
                 await actor.deleted(session, connector, masked=masked)
             await session.commit()
         await self._changes.record(ChangeKind.CONNECTOR, connector_id)
+        await self._alerts.request(project_id)
         if not cloud:
             await self._removed(connector_id)
             return
@@ -293,8 +303,10 @@ class ConnectorService:
             await session.commit()
         logger.info("Connector traffic usage reset", connector_id=connector_id, name=saved.name)
         await self._changes.record(ChangeKind.CONNECTOR, connector_id)
-        # The block the reset lifts is the traffic job's to lift.
+        # The block the reset lifts is the traffic job's to lift; its decision asks for the alert check that clears the
+        # line, and this one clears the near-limit line at once.
         await self._ask_for_traffic_decision(connector_id)
+        await self._alerts.request(project_id)
         return saved
 
     async def record_error(self, connector_id: str, error: str | None) -> Connector | None:

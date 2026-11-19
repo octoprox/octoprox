@@ -25,8 +25,10 @@ MASK = "********"
 INSTALL_ENTITY_ID = "1"
 # Days the audit log keeps entries until an admin says otherwise; 0 keeps them forever.
 DEFAULT_AUDIT_RETENTION_DAYS = 365
+# Days the install's resolved alerts are kept until an admin says otherwise; 0 keeps them forever.
+DEFAULT_INSTALL_ALERT_RETENTION_DAYS = 90
 # The longest retention an admin can set: a century, so the cutoff it gives is still a date.
-MAX_AUDIT_RETENTION_DAYS = 36500
+MAX_RETENTION_DAYS = 36500
 # The width of each bounded text column of ``audit_log``: an entry cuts a longer value to it.
 AUDIT_TEXT_WIDTHS: dict[str, int] = {
     "action": 32,
@@ -230,4 +232,16 @@ class AuditRetention(BaseModel):
 class AuditRetentionUpdate(BaseModel):
     """A new retention for the audit log, in days (0 keeps entries forever)."""
 
-    days: int = Field(ge=0, le=MAX_AUDIT_RETENTION_DAYS)
+    days: int = Field(ge=0, le=MAX_RETENTION_DAYS)
+
+
+class InstallAlertRetention(BaseModel):
+    """How many days the install's resolved alerts are kept, 0 for ever; the hourly compaction applies it."""
+
+    days: int
+
+
+class InstallAlertRetentionUpdate(BaseModel):
+    """A new retention for the install's resolved alerts, in days (0 keeps them forever)."""
+
+    days: int = Field(ge=0, le=MAX_RETENTION_DAYS)

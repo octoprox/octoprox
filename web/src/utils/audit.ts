@@ -67,6 +67,37 @@ const FIELD_NAMES: Record<string, string> = {
   client_ip: 'Address',
   user_agent: 'Browser',
   token_name: 'Token',
+  // A project's alert settings (under Alerts), in the Alert settings tab's words.
+  success_rate: 'Warn about a low success rate',
+  success_warning_below: 'Success rate: warning below (%)',
+  success_problem_below: 'Success rate: problem below (%)',
+  success_min_requests: 'Success rate: only with at least (requests)',
+  refusals_min: 'Turned away: only with at least (requests)',
+  refusals_warning_percent: 'Turned away: warning from (%)',
+  refusals_problem_percent: 'Turned away: problem from (%)',
+  invalid_location_min: 'Locations that could not be read: warning from (requests)',
+  vendor_min: 'Vendor refusals: only with at least (refused)',
+  vendor_login_problem_percent: 'Login rejected (407): problem from (%)',
+  vendor_rate_limited_warning_percent: 'Too many requests (429): warning from (%)',
+  vendor_rate_limited_problem_percent: 'Too many requests (429): problem from (%)',
+  vendor_forbidden_warning_percent: 'Not allowed (403): warning from (%)',
+  vendor_forbidden_problem_percent: 'Not allowed (403): problem from (%)',
+  vendor_cannot_serve_warning_percent: 'Cannot serve (400, 502, 503): warning from (%)',
+  vendor_other_warning_percent: 'Any other refusal: warning from (%)',
+  connector_failing_min_requests: 'Failing requests: only with at least (requests)',
+  connector_failing_warning_percent: 'Failing requests: warning from (%)',
+  connector_failing_problem_percent: 'Failing requests: problem from (%)',
+  connector_errors_min: 'Sync or cloud errors: show after (in a row)',
+  stuck_deleting_minutes: 'Still deleting: show after (minutes)',
+  unhealthy_share_percent: 'Unhealthy proxies: from (%)',
+  unhealthy_min: 'Unhealthy proxies: and at least (proxies)',
+  exits_outside_percent: 'Exits outside the listed countries: from (%)',
+  exits_outside_min: 'Exits outside the listed countries: and at least (proxies)',
+  exits_contradicted_percent: 'Exits not where the vendor says: from (%)',
+  exits_contradicted_min: 'Exits not where the vendor says: and at least (proxies)',
+  site_blocked_percent: 'A site blocking every connector: from (%)',
+  keep_days: 'Keep resolved alerts (days)',
+  install_alert_retention_days: 'Keep install alerts (days)',
 }
 
 // The settings recorded one level down, by the group they show under. Provider fields (`config`) and a
@@ -78,6 +109,7 @@ const FIELD_GROUPS: Record<string, string | null> = {
   rate_limit_config: 'Rate limit',
   traffic_config: 'Traffic',
   health_check_config: 'Health check',
+  alerts: 'Alerts',
 }
 
 // A table's own entry for a key, never one every object inherits: names come from data (a descriptor's field

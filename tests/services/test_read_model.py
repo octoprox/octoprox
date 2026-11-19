@@ -20,6 +20,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.core import utc_now
 from api.core.audit import Actor
 from api.core.demand_tracker import DemandLevel, DemandTracker
@@ -43,6 +44,7 @@ from api.db.repository import MetricsRepository
 from api.feed.state import HealthSoft, RuntimeStateReader
 from api.geo.models import ExitCoverage
 from api.jobs.job import JobBatch
+from api.jobs.queue import JobQueue
 from api.jobs.traffic import TrafficJob
 from api.models.connector import Connector, ConnectorCreate, ProxyTarget
 from api.models.credential import Credential
@@ -154,7 +156,7 @@ async def decide_traffic(
 ) -> None:
     """The traffic decision a worker makes for ``connectors`` from what Postgres and Redis hold now."""
     batch = JobBatch(ids=("1-0",), keys=tuple(connector.id for connector in connectors))
-    await TrafficJob(sessions, redis_client).run(batch)
+    await TrafficJob(sessions, redis_client, alerts=AlertChecks(redis_client, JobQueue(redis_client))).run(batch)
 
 
 @pytest.fixture

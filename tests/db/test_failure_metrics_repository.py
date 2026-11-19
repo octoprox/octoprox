@@ -16,6 +16,7 @@ from api.db.repository import (
     FailureWindowRow,
     MetricsRepository,
     ProjectRepository,
+    RequestTally,
 )
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
@@ -164,7 +165,8 @@ class TestFailureMetrics:
         connector_repo: ConnectorRepository,
         db_session: AsyncSession,
     ) -> None:
-        """Flushed minutes only, since the window began; an entity with none is absent."""
+        """Flushed minutes only, since the window began, a project's successes and newest minute with its requests; an
+        entity with none is absent."""
         project, connector = await _project_with_connector(project_repo, credential_repo, connector_repo, db_session)
         other, other_connector = await _project_with_connector(
             project_repo, credential_repo, connector_repo, db_session, suffix="-2"
@@ -173,16 +175,20 @@ class TestFailureMetrics:
         since = now - timedelta(minutes=15)
         for model, owner in ((ProjectMetricsModel, "project_id"), (ConnectorMetricsModel, "connector_id")):
             entity = project.id if owner == "project_id" else connector.id
-            db_session.add(model(**{owner: entity}, timestamp=now - timedelta(minutes=1), request_count=40, granularity=60))
-            db_session.add(model(**{owner: entity}, timestamp=since, request_count=2, granularity=60))
+            db_session.add(model(
+                **{owner: entity}, timestamp=now - timedelta(minutes=1), request_count=40, success_count=30, granularity=60
+            ))
+            db_session.add(model(**{owner: entity}, timestamp=since, request_count=2, success_count=1, granularity=60))
             db_session.add(model(**{owner: entity}, timestamp=since - timedelta(seconds=1), request_count=900, granularity=60))
             # A compacted hour is never part of a quarter of an hour.
             db_session.add(model(**{owner: entity}, timestamp=now, request_count=5000, granularity=3600))
         await db_session.commit()
 
-        assert await metrics_repo.project_requests_since([project.id, other.id], since) == {project.id: 42}
+        assert await metrics_repo.project_window([project.id, other.id], since) == {
+            project.id: RequestTally(requests=42, successes=31, last_at=now - timedelta(minutes=1))
+        }
         assert await metrics_repo.connector_requests_since([connector.id, other_connector.id], since) == {connector.id: 42}
-        assert await metrics_repo.project_requests_since([], since) == {}
+        assert await metrics_repo.project_window([], since) == {}
         assert await metrics_repo.connector_requests_since([], since) == {}
 
     async def test_compaction_keeps_the_sums(

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.controller import producers
 from api.controller.feed_builder import FeedBuilder
 from api.core.audit import Actor, AuditLog
@@ -176,13 +177,16 @@ def services(
     redis_client: RedisClient,
     registry: ProviderRegistry,
     change_log: ChangeLog,
+    alert_checks: AlertChecks,
 ) -> Services:
-    connectors = ConnectorService(sessions, jobs, redis_client, registry, changes=change_log)
+    connectors = ConnectorService(sessions, jobs, redis_client, registry, changes=change_log, alerts=alert_checks)
     return Services(
-        projects=ProjectService(sessions, jobs, redis_client, changes=change_log, connectors=connectors),
+        projects=ProjectService(
+            sessions, jobs, redis_client, changes=change_log, connectors=connectors, alerts=alert_checks
+        ),
         credentials=CredentialService(sessions, registry, changes=change_log),
         connectors=connectors,
-        proxies=ProxyService(sessions, jobs, redis_client, registry, changes=change_log),
+        proxies=ProxyService(sessions, jobs, redis_client, registry, changes=change_log, alerts=alert_checks),
         actor=AuditLog().actor("user-1", "alice"),
     )
 

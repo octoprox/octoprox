@@ -230,7 +230,11 @@ class Pools:
 
 
 class RuntimeView:
-    """What the api's routes show, read from Postgres and Redis in batches."""
+    """What the api's routes show, read from Postgres and Redis in batches.
+
+    Args:
+        strict: raise when Redis cannot be read, as the alerts job reads, rather than show less, as a page does.
+    """
 
     def __init__(
         self,
@@ -238,11 +242,14 @@ class RuntimeView:
         state_reader: RuntimeStateReader,
         provider_registry: ProviderRegistry,
         demand_tracker: DemandTracker,
+        *,
+        strict: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._state = state_reader
         self._registry = provider_registry
         self._demand = demand_tracker
+        self._strict = strict
 
     # --- Projects ---------------------------------------------------------------------------
 
@@ -286,7 +293,7 @@ class RuntimeView:
             projects = await ProjectRepository(session).get_all()
             rows = await MetricsRepository(session).get_projects_metrics_buckets(now, buckets, bucket_seconds)
         ids = [project.id for project in sorted(projects, key=lambda p: (p.created_at, p.id))]
-        rates = await _soft(self._demand.get_requests_per_minute_of(ids), {}, "demand")
+        rates = await self._soft(self._demand.get_requests_per_minute_of(ids), {}, "demand")
         counters = {project_id: MetricDelta() for project_id in ids}
         trends = {project_id: [0] * buckets for project_id in ids}
         for project_id, bucket, delta in rows:
@@ -325,7 +332,7 @@ class RuntimeView:
                 clouds[connector.id] = config
         instances = pools.statuses(pools.counted.intersection(clouds))
         pool = pools.pool({c.id for c in connectors})
-        demand = await _soft(
+        demand = await self._soft(
             self._demand.get_demand_info(project_id, pool.healthy),
             {"demand_level": "low", "requests_per_minute": 0.0, "rate_per_proxy": 0.0},
             "demand",
@@ -354,7 +361,7 @@ class RuntimeView:
         wanted = list(dict.fromkeys(ids))
         async with self._session_factory() as session:
             totals = await MetricsRepository(session).get_totals(kind, wanted)
-        windows = await _soft(self._state.windows(kind, wanted), {}, f"{kind.name} windows")
+        windows = await self._soft(self._state.windows(kind, wanted), {}, f"{kind.name} windows")
         return {entity_id: kind.counts.summed(totals.get(entity_id), windows.get(entity_id)) for entity_id in wanted}
 
     async def device_counters(self, peer_ids: Iterable[str]) -> dict[str, TunnelPeerMetricDelta]:
@@ -399,11 +406,11 @@ class RuntimeView:
 
     async def quarantined(self) -> dict[str, datetime]:
         """Proxy ID -> quarantine end, as Redis holds them; none, logged, while Redis cannot be read."""
-        return await _soft(self._state.quarantined(), {}, "quarantines")
+        return await self._soft(self._state.quarantined(), {}, "quarantines")
 
     async def blocked(self) -> dict[str, datetime]:
         """Connector ID -> traffic block end, as the traffic job stored them, ended ones included; none, logged, while Redis cannot be read."""
-        return await _soft(self._state.blocked(), {}, "traffic blocks")
+        return await self._soft(self._state.blocked(), {}, "traffic blocks")
 
     async def exit_coverage(self, connector_ids: Iterable[str]) -> dict[str, ExitCoverage]:
         """The exit coverage of each dynamic-sessions connector among ``connector_ids``; others are absent."""
@@ -486,9 +493,9 @@ class RuntimeView:
         Redis is read once the caller's session is closed; without it the history alone is shown, with no block and nothing pending.
         """
         current, blocked, pending = await asyncio.gather(
-            _soft(traffic.with_live(self._state), traffic.plus({}), "connector windows"),
+            self._soft(traffic.with_live(self._state), traffic.plus({}), "connector windows"),
             self._blocked_now(),
-            _soft(self._state.pending(), {}, "pending traffic decisions"),
+            self._soft(self._state.pending(), {}, "pending traffic decisions"),
         )
         return {
             connector_id: window.usage(blocked=connector_id in blocked, pending=connector_id in pending)
@@ -497,7 +504,7 @@ class RuntimeView:
 
     async def _blocked_now(self) -> set[str]:
         """Connectors whose stored traffic block is still in its period; none, logged, without Redis."""
-        return await _soft(self._state.blocked_now(), set(), "traffic blocks")
+        return await self._soft(self._state.blocked_now(), set(), "traffic blocks")
 
     async def _targets(
         self, session: AsyncSession, connectors: Sequence[Connector], credentials: Mapping[str, Credential]
@@ -531,8 +538,8 @@ class RuntimeView:
         """The rows with their soft state: windows, soft health and quarantines read side by side."""
         ids = [proxy.id for proxy in rows]
         windows, health, quarantined = await asyncio.gather(
-            _soft(self._state.windows(PROXY_WINDOWS, ids), {}, "proxy windows"),
-            _soft(self._state.health(ids), {}, "soft health"),
+            self._soft(self._state.windows(PROXY_WINDOWS, ids), {}, "proxy windows"),
+            self._soft(self._state.health(ids), {}, "soft health"),
             self.quarantined(),
         )
         views: list[ProxyView] = []
@@ -549,6 +556,17 @@ class RuntimeView:
             )
         return views
 
+    async def _soft[T](self, read: Awaitable[T], unavailable: T, what: str) -> T:
+        """``read`` from Redis, else ``unavailable`` (logged): without Redis a page shows less instead of failing. A
+        strict view raises instead."""
+        try:
+            return await read
+        except (RedisError, OSError) as exc:
+            if self._strict:
+                raise
+            logger.warning("Runtime state unavailable, shown without it", state=what, error=error_text(exc))
+            return unavailable
+
     def _providers(
         self, connectors: Iterable[tuple[Connector, Credential | None]]
     ) -> dict[str, DescriptorProvider | None]:
@@ -563,15 +581,6 @@ class RuntimeView:
             except ValueError:
                 providers[connector.id] = None
         return providers
-
-
-async def _soft[T](read: Awaitable[T], unavailable: T, what: str) -> T:
-    """``read`` from Redis, else ``unavailable`` (logged): without Redis a page shows less instead of failing."""
-    try:
-        return await read
-    except (RedisError, OSError) as exc:
-        logger.warning("Runtime state unavailable, shown without it", state=what, error=error_text(exc))
-        return unavailable
 
 
 def _sizes(counts: Iterable[ConnectorStatusCount]) -> Counter[str]:

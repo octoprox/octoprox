@@ -25,6 +25,7 @@ from api.services.errors import NameConflictError, NotFoundError, WriteRejectedE
 from api.strategies import strategy_name
 
 if TYPE_CHECKING:
+    from api.attention.requests import AlertChecks
     from api.core.audit import Actor
     from api.db.redis import RedisClient
     from api.db.session import SessionFactory
@@ -46,6 +47,7 @@ class ProjectService:
     Args:
         redis_client: Deletes a deleted project's captures and failure log, under its request deadline.
         connectors: Removes a deleted project's connectors, a cloud one once the scale job has terminated its instances.
+        alerts: Asks for the project's alert check after each write: a new project's first lines, an edit's effect.
     """
 
     def __init__(
@@ -56,12 +58,14 @@ class ProjectService:
         *,
         changes: ChangeLog,
         connectors: ConnectorService,
+        alerts: AlertChecks,
     ) -> None:
         self._session_factory = session_factory
         self._jobs = jobs
         self._redis = redis_client
         self._changes = changes
         self._connectors = connectors
+        self._alerts = alerts
 
     async def create(self, data: ProjectCreate, actor: Actor) -> Project:
         """Store a new project; the saved project."""
@@ -76,6 +80,7 @@ class ProjectService:
             raise _taken(exc, project) from None
         logger.info("Added project", project_id=project.id, name=project.name)
         await self._changes.record(ChangeKind.PROJECT, project.id)
+        await self._alerts.request(project.id)
         return project
 
     async def update(self, project_id: str, data: ProjectUpdate, actor: Actor) -> Project:
@@ -110,6 +115,7 @@ class ProjectService:
         if saved.judgement != current.judgement:
             # The rows were judged under the old rules; a worker re-judges them.
             await self._jobs.request_now(JobKind.REATTRIBUTE, [ReattributeScope(project_id=project_id).key])
+        await self._alerts.request(project_id)
         return saved
 
     async def delete(self, project_id: str, actor: Actor) -> bool:
@@ -137,6 +143,8 @@ class ProjectService:
         if await self.delete_if_emptied(project_id):
             return True
         logger.info("Marked project for deletion", project_id=project_id)
+        # Its alerts resolve: a project being deleted has no lines.
+        await self._alerts.request(project_id)
         return False
 
     async def delete_if_emptied(self, project_id: str) -> bool:

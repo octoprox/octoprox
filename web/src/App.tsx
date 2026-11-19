@@ -14,6 +14,7 @@ import { LogoLoader } from './components/ui'
 import Overview from './pages/Overview'
 import HostsPage from './pages/HostsPage'
 import FailuresPage from './pages/FailuresPage'
+import AlertsPage from './pages/AlertsPage'
 import ProxiesPage from './pages/ProxiesPage'
 import ConnectorsPage from './pages/ConnectorsPage'
 import CountriesPage from './pages/CountriesPage'
@@ -27,6 +28,7 @@ import AppearanceSection from './pages/settings/AppearanceSection'
 import UsersSection from './pages/settings/UsersSection'
 import BackupSection from './pages/settings/BackupSection'
 import ActivitySection from './pages/settings/ActivitySection'
+import AlertsSection from './pages/settings/AlertsSection'
 import ProvidersSection from './pages/settings/ProvidersSection'
 import SystemSection from './pages/settings/SystemSection'
 import GeoSection from './pages/settings/GeoSection'
@@ -156,6 +158,7 @@ function AuthenticatedApp() {
               <Route path="sign-in" element={<SignInSection />} />
               <Route path="backup" element={<BackupSection />} />
               <Route path="activity" element={<ActivitySection />} />
+              <Route path="alerts" element={<AlertsSection />} />
               <Route path="providers" element={<ProvidersSection />} />
               <Route path="geo" element={<GeoSection />} />
               <Route path="wireguard" element={<WireGuardSection />} />
@@ -171,6 +174,7 @@ function AuthenticatedApp() {
               <Route path="overview" element={<Overview />} />
               <Route path="hosts" element={<HostsPage />} />
               <Route path="failures" element={<FailuresPage />} />
+              <Route path="alerts" element={<AlertsPage />} />
               {/* Legacy routes from the previous navigation */}
               <Route path="dashboard" element={<Navigate to="../overview" replace />} />
               <Route path="metrics" element={<Navigate to="../overview" replace />} />

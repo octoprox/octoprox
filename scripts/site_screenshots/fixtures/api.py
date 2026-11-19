@@ -10,11 +10,11 @@ starts calling a new endpoint does not go unnoticed.
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs
 
 from . import analytics, series
-from .common import GB, NOW, VERSION, ago, iso, key_for, short_id, uuid_for
+from .common import GB, NOW, VERSION, ago, from_minute, iso, key_for, short_id, uuid_for
 from .world import (
     CONN_BY_ID,
     CREDENTIAL_CONFIG,
@@ -91,8 +91,42 @@ VENDOR_LINES = [
 ]
 
 
+def check_time(minute: int) -> datetime:
+    """The workers' check that first read ``minute``: they check every project and the install once a minute, 12
+    seconds into the next one, so the last check (minute series.LAST) was 8 seconds before NOW and the card shows
+    neither the re-check spinner nor the out-of-date mark."""
+    return from_minute(minute + 1) + timedelta(seconds=12)
+
+
+CHECKED_AT = check_time(series.LAST)
+
+
+def vendor_lines(c: ConnSpec, end: int = series.LAST) -> list[tuple[str, str, str]]:
+    """The vendor lines (kind, severity, words) of the check that read the 15 minutes up to minute ``end``."""
+    requests, statuses, _ = series.vendor_refusals(c, end=end)
+    found = []
+    for kind, codes, warning, problem, words in VENDOR_LINES:
+        n = sum(count for status, count in statuses.items() if status in codes)
+        share = n / max(requests, n) if n else 0.0
+        severity = ("problem" if problem is not None and share >= problem
+                    else "warning" if warning is not None and share >= warning else None)
+        if n >= 10 and severity:
+            found.append((kind, severity, words.format(pct=round(share * 100))))
+    return found
+
+
+def vendor_opened(c: ConnSpec, kind: str) -> datetime:
+    """When the alert behind a vendor line opened: the first of the checks in a row that found it, a day back at most.
+    The Oxylabs rate limiting began at 17:05, and its 15-minute share passed 5% at the 17:18 check."""
+    first = series.LAST
+    while first > series.LAST - 1440 and any(k == kind for k, _, _ in vendor_lines(c, first - 1)):
+        first -= 1
+    return check_time(first)
+
+
 def attention_json(pid: str) -> dict:
-    """The project's Needs attention lines from the demo data, worded, cut off and ordered as the api does them.
+    """The project's Needs attention lines from the demo data, worded, cut off and ordered as the api does them, each
+    with the stored alert behind it, open since the check that first found it and never reopened.
 
     Only the vendor and traffic lines can show: the unhealthy share and the refusals stay under their cut-offs.
     """
@@ -100,15 +134,9 @@ def attention_json(pid: str) -> dict:
     for c in connectors_of(pid):
         if not c.enabled:
             continue
-        requests, statuses, last = series.vendor_refusals(c)
-        for kind, codes, warning, problem, words in VENDOR_LINES:
-            n = sum(count for status, count in statuses.items() if status in codes)
-            share = n / max(requests, n) if n else 0.0
-            severity = ("problem" if problem is not None and share >= problem
-                        else "warning" if warning is not None and share >= warning else None)
-            if n >= 10 and severity:
-                lines.append(_attention_line(c, kind, severity, words.format(pct=round(share * 100)),
-                                             {"kind": "last_at", "at": iso(last)}))
+        for kind, severity, text in vendor_lines(c):
+            lines.append(_attention_line(c, kind, severity, text, {"kind": "last_at", "at": iso(from_minute(series.LAST))},
+                                         vendor_opened(c, kind)))
         usage = series.traffic_usage(c)
         if usage["limit_bytes"] is None:
             continue
@@ -116,23 +144,30 @@ def attention_json(pid: str) -> dict:
         pct = round(usage["total_bytes"] / usage["limit_bytes"] * 100)
         if usage["status"] == "warning" and usage["action"] in ("block", "interrupt"):
             kind, text = "connector_traffic_near", f" has used {pct}% of its {limit} limit {period}. New requests stop at the limit."
+            # Open since the month's traffic reached the warning share, the day before for Bright Data.
+            reached = series.usage_reached(c.id, c.traffic_config.get("warn_percent", 80) / 100)
         elif usage["status"] == "exceeded" and usage["action"] == "alert":
             kind = "connector_traffic_over_alert"
             text = (f" is at {pct}% of its {limit} limit {period}. The limit is set to alert only, so it keeps taking "
                     "requests.")
+            reached = series.usage_reached(c.id, 1.0)
         else:
             continue
-        lines.append(_attention_line(c, kind, "warning", text, {"kind": "resets", "at": usage["period_end"]}))
+        lines.append(_attention_line(c, kind, "warning", text, {"kind": "resets", "at": usage["period_end"]},
+                                     check_time(reached if reached is not None else series.LAST)))
     lines.sort(key=lambda line: (line["severity"] != "problem", ATTENTION_ORDER.index(line["kind"]),
                                  line["subject"].casefold()))
     problems = sum(1 for line in lines if line["severity"] == "problem")
     return {"generated_at": iso(NOW), "lines": lines, "problems": problems, "warnings": len(lines) - problems,
-            "muted": 0}
+            "muted": 0, "checked_at": iso(CHECKED_AT), "pending": False, "stale": False}
 
 
-def _attention_line(c: ConnSpec, kind: str, severity: str, text: str, when: dict) -> dict:
-    return {"key": f"{kind}:{c.id}", "kind": kind, "severity": severity, "lead": "", "subject": c.name, "text": text,
-            "detail": None, "when": when, "link": f"connectors?open={c.id}", "action": "Open connector", "mute": None}
+def _attention_line(c: ConnSpec, kind: str, severity: str, text: str, when: dict, opened: datetime) -> dict:
+    key = f"{kind}:{c.id}"
+    return {"key": key, "kind": kind, "severity": severity, "lead": "", "subject": c.name, "text": text,
+            "detail": None, "when": when, "link": f"connectors?open={c.id}", "action": "Open connector", "mute": None,
+            "alert_id": uuid_for(f"alert:{c.project}:{key}"), "since": iso(opened), "opened_at": iso(opened),
+            "reopened": 0}
 
 
 def pool_json(pid: str) -> dict:
@@ -318,7 +353,7 @@ def _route(method: str, path: str, q: dict[str, str]) -> object:
             # Warnings only in the demo world: no project has a problem to count.
             return {"projects": [{"project_id": pid, "problems": 0} for pid in PROJECTS]}
         if path == "/attention/install":
-            return {"generated_at": iso(NOW), "lines": []}
+            return {"generated_at": iso(NOW), "lines": [], "checked_at": iso(CHECKED_AT)}
         if path == "/audit/retention":
             return {"days": 365}
         if path == "/audit":

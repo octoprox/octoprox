@@ -179,6 +179,11 @@ class ProjectModel(Base):
     attention_mutes: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
+    # The project's alert cut-offs that differ from the defaults (api.models.alerts.AlertSettings); never read into the
+    # Project model, so the routing feed never carries it.
+    alert_settings: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
@@ -581,6 +586,66 @@ class SystemSettingsModel(Base):
     audit_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=365, server_default="365")
     # As pasted; only an extension reads it.
     license_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Days install-wide alerts are kept after they resolve; 0 keeps them forever.
+    install_alert_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=90, server_default="90")
+
+
+class AlertModel(Base):
+    """One alert: a line of a project's Needs attention card, or of the install's, from when it opened until it
+    resolved; a project's are deleted with it."""
+
+    __tablename__ = "alerts"
+    __table_args__ = (
+        # One open alert per scope and key: what makes the alerts job's insert idempotent.
+        Index(
+            "uq_alerts_open",
+            text("coalesce(project_id, '')"),
+            "key",
+            unique=True,
+            postgresql_where=text("resolved_at IS NULL"),
+        ),
+        # The resolved alerts of a key, newest first: what a returning condition reopens.
+        Index(
+            "ix_alerts_resolved",
+            text("coalesce(project_id, '')"),
+            "key",
+            "resolved_at",
+            postgresql_where=text("resolved_at IS NOT NULL"),
+        ),
+        # A project's history, newest first.
+        Index("ix_alerts_project_opened", "project_id", "opened_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # None for an install alert.
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
+    # The line's key (api.attention.checks.Finding.key), stable while its cause lasts.
+    key: Mapped[str] = mapped_column(String(300), nullable=False)
+    kind: Mapped[str] = mapped_column(String(48), nullable=False)
+    # Now while open, when it resolved once resolved; the worst it reached beside it.
+    severity: Mapped[str] = mapped_column(String(10), nullable=False)
+    worst_severity: Mapped[str] = mapped_column(String(10), nullable=False)
+    lead: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    subject: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    # The line's text after the subject, as the API answers it.
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The line's one time (api.models.attention.AttentionWhen), none when both are null.
+    when_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    when_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    link: Mapped[str] = mapped_column(String(300), nullable=False, default="", server_default="")
+    action: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default="")
+    sort_name: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
+    # The key of the shown line that makes this one redundant; '' while it shows.
+    hidden_by: Mapped[str] = mapped_column(String(300), nullable=False, default="", server_default="")
+    opened_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # When it last came back within the reopen window; null until it does.
+    reopened_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reopened_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
 
 class WireGuardSettingsModel(Base):

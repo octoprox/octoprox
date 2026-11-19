@@ -1042,9 +1042,8 @@ async def project_feed(
     blocked_until: dict[str, datetime] | None = None,
 ) -> dict[str, Section]:
     """One project's feed as the api compiles it for a preview, through the harness's api compiler."""
-    return await harness.preview.compile_project(
-        project_id, quarantined=quarantined or {}, blocked_until=blocked_until or {}
-    )
+    rows = await harness.preview.read_project(project_id)
+    return harness.preview.preview(rows, quarantined=quarantined or {}, blocked_until=blocked_until or {})
 
 
 class TestProjectCompile:
@@ -1203,7 +1202,8 @@ class TestProjectCompile:
         quarantined = {"proxy-project-1": until, "proxy-gone": until}
         blocked = {"connector-project-2": until, "connector-gone": until}
 
-        everything = await harness.preview.compile_projects(quarantined=quarantined, blocked_until=blocked)
+        rows = await harness.preview.read_projects()
+        everything = harness.preview.preview(rows, quarantined=quarantined, blocked_until=blocked)
 
         assert [project.id for project in global_of(everything).projects] == ["project-1", "project-2"]
         assert list(connectors_of(everything)) == ["connector-project-1", "connector-project-2"]

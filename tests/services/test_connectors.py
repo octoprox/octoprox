@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.core import utc_now
 from api.core.audit import Actor
 from api.core.roles import JobKind
@@ -325,7 +326,8 @@ class TestUpdate:
             project.id, static_connector.id, ConnectorUpdate(rate_limit_config=RATE_LIMIT), actor
         )
 
-        assert pipelines == [(True, ["ZREM", "XADD"])]
+        # The project's alert check follows, a MULTI of its own.
+        assert pipelines == [(True, ["ZREM", "XADD"]), (True, ["HSET", "EXPIRE", "XADD"])]
         assert await runtime_entries(redis_client) == [("quarantine", proxy.id)]
 
     async def test_a_connector_of_another_project_is_not_found(
@@ -591,7 +593,8 @@ class TestTrafficAndErrors:
         """Never one without the other: a mark no decision was asked for, or a decision the api never shows as awaited."""
         await connector_service.reset_traffic(project.id, static_connector.id, actor)
 
-        assert pipelines == [(True, ["HSET", "XADD"])]
+        # The project's alert check follows, a MULTI of its own.
+        assert pipelines == [(True, ["HSET", "XADD"]), (True, ["HSET", "EXPIRE", "XADD"])]
 
     async def test_a_traffic_limit_edit_asks_for_a_traffic_decision_and_other_edits_do_not(
         self,
@@ -783,10 +786,11 @@ class TestChangeEntries:
         project: Project,
         static_credential: Credential,
         actor: Actor,
+        alert_checks: AlertChecks,
     ) -> None:
         """A consumer woken by an entry reads Postgres: the write must be there by then, or it is missed."""
         witness = Witness(redis_client, lambda ref: stored(sessions, ref))
-        service = ConnectorService(sessions, jobs, redis_client, registry, changes=witness)
+        service = ConnectorService(sessions, jobs, redis_client, registry, changes=witness, alerts=alert_checks)
 
         connector = await service.create(
             project.id, ConnectorCreate(name="ISP", credential_id=static_credential.id), actor

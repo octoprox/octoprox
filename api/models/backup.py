@@ -83,6 +83,7 @@ class BackupPayload(BaseModel):
     connector_metrics: list[dict[str, Any]] = Field(default_factory=list)
     host_metrics: list[dict[str, Any]] = Field(default_factory=list)
     failure_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    alerts: list[dict[str, Any]] = Field(default_factory=list)
     provider_descriptors: list[dict[str, Any]] = Field(default_factory=list)
     geo_settings: list[dict[str, Any]] = Field(default_factory=list)
     geo_databases: list[dict[str, Any]] = Field(default_factory=list)
@@ -98,13 +99,15 @@ class BackupPayload(BaseModel):
     tunnel_peer_metrics: list[dict[str, Any]] = Field(default_factory=list)
     system_settings: list[dict[str, Any]] = Field(default_factory=list)
     audit_log: list[dict[str, Any]] = Field(default_factory=list)
+    install_alerts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExportRequest(BaseModel):
     """Request body for the export endpoint."""
 
     passphrase: str = Field(min_length=8)
-    # History: proxy and project metrics, IP attribution observations and aggregates, and exit reputation records.
+    # History: proxy and project metrics, IP attribution observations and aggregates, exit reputation records, and
+    # alerts.
     include_metrics: bool = False
     # The bytes of uploaded and downloaded IP databases. Their rows are always included.
     include_database_files: bool = False
@@ -141,6 +144,7 @@ class ImportSummary(BaseModel):
     connector_metrics: int = 0
     host_metrics: int = 0
     failure_metrics: int = 0
+    alerts: int = 0
     provider_descriptors: int = 0
     geo_settings: int = 0
     geo_databases: int = 0
@@ -158,6 +162,8 @@ class ImportSummary(BaseModel):
     system_settings: int = 0
     # The backup's entries added to the install's.
     audit_log: int = 0
+    # The backup's resolved install alerts added to the install's.
+    install_alerts: int = 0
     kept_current_user: bool = False
     user_conflicts: list[UserConflict] = Field(default_factory=list)
     # Cloud connectors the install had that the backup does not carry: moved to

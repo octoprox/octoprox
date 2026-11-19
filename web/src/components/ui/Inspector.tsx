@@ -16,6 +16,8 @@ interface InspectorProps {
   title: ReactNode
   subtitle?: ReactNode
   crumb?: ReactNode
+  /** A row of links under the title and subtitle: pages and panels about the same thing. */
+  actions?: ReactNode
   onBack?: () => void
   onClose: () => void
   footer?: ReactNode
@@ -30,7 +32,7 @@ export const INSPECTOR_WIDTH = 600
 /** Wider variant for dense editors (provider builder). */
 export const INSPECTOR_WIDTH_WIDE = 760
 
-export function Inspector({ title, subtitle, crumb, onBack, onClose, footer, width = INSPECTOR_WIDTH, children, className }: InspectorProps) {
+export function Inspector({ title, subtitle, crumb, actions, onBack, onClose, footer, width = INSPECTOR_WIDTH, children, className }: InspectorProps) {
   return (
     <>
       {/* Below the xl breakpoint the panel floats over the content instead of squeezing it; the backdrop closes it. */}
@@ -65,6 +67,7 @@ export function Inspector({ title, subtitle, crumb, onBack, onClose, footer, wid
           )}
           <div className="text-base font-semibold leading-6 truncate text-fg">{title}</div>
           {subtitle && <div className="text-xs text-fg-muted mt-0.5 truncate">{subtitle}</div>}
+          {actions && <div className="mt-1 flex items-center gap-x-4 gap-y-1 flex-wrap text-xs">{actions}</div>}
         </div>
         <button
           type="button"

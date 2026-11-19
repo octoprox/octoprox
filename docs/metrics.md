@@ -54,9 +54,13 @@ Proxy history goes with its proxy; the running totals of a removed proxy, projec
 
 ## Needs attention
 
-A project's **Overview** opens with a **Needs attention** card: what in the project needs someone now, one line each, with a link to the page that fixes it. A **problem** (a red mark) means requests fail now, such as every connector turned off, no proxy that can take requests, a country nothing can serve, or a vendor rejecting a connector's login. A **warning** (an amber dot) means requests are degraded or about to be, such as a vendor refusing part of a connector's requests, a vendor proxy list that keeps failing to sync, a connector near its traffic limit, or many proxies failing their health checks.
+A project's **Overview** opens with a **Needs attention** card: what in the project needs someone now, one line each, with a link to the page that fixes it. A **problem** (a red mark) means requests fail now, such as every connector turned off, no proxy that can take requests, a country nothing can serve, or a vendor rejecting a connector's login. A **warning** (an amber dot) means requests are degraded or about to be, such as a vendor refusing part of a connector's requests, a vendor proxy list that keeps failing to sync, a connector near its traffic limit, many proxies failing their health checks, or a [low success rate](#thresholds).
 
-The card always shows something and never changes size on its own: the first two lines, problems first, with the number of problems and warnings beside its title; **Checking for problems...** while it loads; **Nothing needs attention right now.** when all is well; and **Could not check for problems right now.** with a way to try again. **Show all** opens the full list beside the page. The card checks again every 30 seconds, and at once after a change to a connector, the countries or the project's settings. Lines about requests cover the last 15 minutes, a minute or so behind live traffic since they read the recorded history, and go five minutes after the last failure they count.
+The lines are what Octoprox's background checks found. They check every project once a minute, and a project again within seconds of a change made in Octoprox: to a connector, its countries, the project's settings, its proxies or its [alert thresholds](#thresholds), or a connector's traffic limit starting or stopping to turn requests away. While such a check is under way the card shows a small spinning icon beside its title, so a fix clears its line within a couple of seconds of the save. Lines about requests cover the last 15 minutes, a minute or so behind live traffic since they read the recorded history, and go five minutes after the last failure they count.
+
+The card always shows something and never changes size on its own: the first two lines, problems first, with the number of problems and warnings beside its title; **Checking for problems...** while it loads, and until the project has been checked for the first time; **Nothing needs attention right now.** when all is well; and **Could not check for problems right now.** with a way to try again. A line without a time of its own (a last failure, a last failed sync, a reset) says since when it has been there. When the last check is more than three minutes old, the card says when it was, since what it shows may be out of date. **Show all** opens the full list beside the page, where each line says since when and how many times it came back, with links to the project's [alerts](#alerts) and, for editors and admins, its alert thresholds.
+
+A wider line stands for the lines that follow from it: every connector turned off, or no proxy that can take requests, covers lines such as connectors with no healthy proxy, countries nothing can serve, requests turned away for want of a proxy and a low success rate; and once more than three connectors have no healthy proxy, one line says how many instead of a line each. A covered line is not shown on the card or counted, but it stays open in the project's alerts, marked **Covered**.
 
 Problems also show in the sidebar, as a red count beside **Overview**, and on the **Projects** page and in the project switcher, as a red mark with the count beside each project's name. Warnings show on the card only.
 
@@ -65,14 +69,69 @@ Problems also show in the sidebar, as a red count beside **Overview**, and on th
 Editors and admins can mute a line from its row or from the full list: for **1 day**, **1 week**, **1 month**, or **until it clears**. A mute is shared by everyone in the project: a muted line leaves the card's rows and counts, the sidebar and the project list, and the full list shows it under **Muted** with who muted it and until when. Viewers see mutes and cannot change them.
 
 - A line that gets worse comes back: a warning muted that becomes a problem shows again while it is a problem, and is hidden again if it falls back to a warning before the mute ends.
-- **Until it clears** ends once the line is gone, so the next time it happens it shows again.
+- **Until it clears** ends once the line has stayed gone for 15 minutes, so a line that comes and goes stays muted, and the next time it happens after that it shows again.
+- A covered line keeps its mute while it is covered.
 - Each mute and unmute is recorded in the project's [History]({{ site.baseurl }}/audit-log), with the line and until when. A mute that ends because its line cleared or its time ran out records nothing, since no one ended it.
 
 ### The Projects page
 
-Above the projects, everyone signed in sees what needs attention in the install itself, in plain words: no gateway accepting proxy connections, changes that have not taken effect yet, background work that is behind (proxy health checks, vendor proxy lists, cloud scaling, new countries, traffic limits, charts, location checks, exit reports), IP databases that could not be loaded or updated, and the database or the live data store out of reach. A line shows once two checks in a row have found it, so a passing moment never flashes up. Admins get a link to **System** or **IP attribution** for the details; everyone else is told that an admin can see more there. These lines cannot be muted.
+Above the projects, everyone signed in sees what needs attention in the install itself, in plain words: no gateway accepting proxy connections, changes that have not taken effect yet, background work that is behind (proxy health checks, vendor proxy lists, cloud scaling, new countries, traffic limits, charts, location checks, exit reports), IP databases that could not be loaded or updated, and the database or the live data store out of reach. The background checks look for these once a minute, and a line shows once two checks about a minute apart have found it, so it shows 1-2 minutes after it starts, and a failover or an update that passes within a minute leaves no line. Each line says since when.
 
-The API serves all of it; see [Needs attention]({{ site.baseurl }}/api#needs-attention).
+A few lines come from the server answering the page rather than from the checks: the database or the live data store out of its reach, and the checks themselves stopped (**Octoprox is not checking for problems**, when no worker runs the `alerts` job) or behind (**Octoprox last checked for problems at...**, when the last check is more than three minutes old). These show once two reads in a row have found them, so a passing moment never flashes up.
+
+Admins get a link to **System** or **IP attribution** for the details; everyone else is told that an admin can see more there. These lines cannot be muted.
+
+### Alerts
+
+Every line the checks find is kept as an alert, with when it opened and when it resolved, so a problem that cleared before anyone looked still leaves a trace. A project's **Alerts** page, after **Failures** in the sidebar, lists them newest first for anyone signed in:
+
+- **Open**, **Resolved** or **All**, with how many of each; a severity (an open alert's now, the worst a resolved one reached), a kind, and a search of the subject, such as a connector's name, applied on Enter or **Apply**.
+- The shared time range, up to 90 days: the alerts open at any point in it.
+- Each alert's sentence, when it opened, how long it lasted, how many times it came back, and its status: **Open**, **Muted**, **Covered** (open, but a wider line stands for it on the card) or **Resolved**.
+- Alerts that open while the page is shown wait behind a button above the list, such as **2 new, show**, so the rows never move under the reader.
+- A row opens its details: the sentence and the counts behind it, when it opened, came back, was last seen and resolved, its severity now and the worst it reached, its mute (which editors and admins can change there), and the link to the page that fixes it.
+
+An alert resolves as soon as a check no longer finds its line, and the card clears at once. A line back within 15 minutes of resolving reopens the same alert instead of adding one, so a condition that comes and goes is one alert with a count of returns, and the card's "since" is its latest return.
+
+Resolved alerts are kept as long as the project's metrics (**Metrics retention** on the **General** tab of Project settings), or for the days set under **Keep resolved alerts** on its **Alert settings** tab; 0 keeps them forever. Open alerts are never deleted. The hourly compaction deletes the older ones, and a [backup]({{ site.baseurl }}/api#backup--migration) carries them with the history.
+
+Admins also see the install's alerts under **Administration → Alerts**: the install-wide lines the checks found, over time, with the same filters but the search, the same details, and a link to **System** or **IP attribution**. Resolved ones are kept for 90 days until an admin changes it on that page's *Retention* card (0 keeps them forever); a change is recorded in its History.
+
+### Thresholds
+
+Where each line starts is a project setting. Editors and admins change it on the **Alert settings** tab of Project settings, which **Show all** on the card links to as well. Each field shows its default and can be reset to it; only the values that differ from the defaults are kept. A save takes effect at once, since the project is checked again within seconds, and is recorded in the project's [History]({{ site.baseurl }}/audit-log), each setting under **Alerts**. A warning cut-off cannot be above its problem cut-off, and the success rate's problem cut-off must be below its warning one.
+
+| Group | Setting | Default |
+|---|---|---|
+| Success rate | Warn about a low success rate | on |
+| | Warning when below | 80% |
+| | Problem when below (0 never makes it a problem) | 50% |
+| | Only with at least | 100 requests |
+| Requests turned away | Only with at least | 10 requests |
+| | Warning from | 5% |
+| | Problem from | 25% |
+| | Locations that could not be read: warning from | 10 requests |
+| Vendor refusals | Only with at least | 10 refused |
+| | Login rejected (407): problem from | 20% |
+| | Too many requests (429): warning from, problem from | 5%, 50% |
+| | Not allowed (403): warning from, problem from | 5%, 50% |
+| | Cannot serve (400, 502, 503): warning from | 30% |
+| | Any other refusal: warning from | 30% |
+| Connectors | Failing requests: only with at least | 50 requests |
+| | Failing requests: warning from, problem from | 30%, 80% |
+| | Sync or cloud errors: show after | 1 in a row |
+| | Still deleting: show after | 30 minutes |
+| Proxies and exits | Unhealthy proxies: from, and at least | 25%, 3 proxies |
+| | Exits outside the listed countries: from, and at least | 10%, 3 proxies |
+| | Exits not where the vendor says: from, and at least | 25%, 3 proxies |
+| | A site blocking every connector: from | 50% blocked |
+| Keep resolved alerts | Keep resolved alerts for | the metrics retention |
+
+Requests turned away and vendor refusals are shares of the last 15 minutes' requests (a connector's own, for a vendor line). A connector near its [traffic limit]({{ site.baseurl }}/traffic-limits) is flagged from the connector's own warning share (`warn_percent`), not from these settings.
+
+**Low success rate** is on for every project until it is turned off: a warning when fewer than 80% of the requests that reached a proxy succeeded in the last 15 minutes, a problem below 50%, once there were at least 100 of them. It is the Overview's success rate; requests turned away before a proxy have lines of their own. It shows beside the lines that name a cause, such as a vendor refusing a connector's requests, rather than being hidden by them, so only every connector turned off or no proxy able to take requests covers it. Its percentage is rounded down: 79.6% reads 79%, never 80% under an 80% cut-off.
+
+The API serves all of it; see [Needs attention]({{ site.baseurl }}/api#needs-attention) and [Alerts]({{ site.baseurl }}/api#alerts).
 
 ## Latency: Where the Time Goes
 

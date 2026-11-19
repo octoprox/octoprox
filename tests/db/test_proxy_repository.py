@@ -5,9 +5,11 @@
 import asyncio
 from datetime import timedelta
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
+from api.db import repository
 from api.db.repository import (
     ConnectorRepository,
     CredentialRepository,
@@ -113,6 +115,42 @@ class TestProxyRepository:
         proxies = await proxy_repo.get_all()
 
         assert len(proxies) == 3
+
+    async def test_a_streamed_read_holds_every_row_in_creation_order_across_its_pieces(
+        self,
+        proxy_repo: ProxyRepository,
+        connector_repo: ConnectorRepository,
+        credential_repo: CredentialRepository,
+        project_repo: ProjectRepository,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """What the previews read: one statement in pieces, every proxy or one project's, as get_all and
+        get_by_project read them."""
+        _project, _credential, connector = await self._create_project_credential_connector(
+            project_repo, credential_repo, connector_repo, db_session
+        )
+        other, _other_credential, elsewhere = await self._create_project_credential_connector(
+            project_repo, credential_repo, connector_repo, db_session, suffix=" 2"
+        )
+        start = utc_now()
+        for i in range(7):
+            owner = connector if i % 3 else elsewhere
+            await proxy_repo.create(
+                Proxy(host=f"p{i}.example.com", port=8080, connector_id=owner.id, created_at=start + timedelta(seconds=i))
+            )
+        await db_session.commit()
+        monkeypatch.setattr(repository, "STREAM_PIECE", 2)
+
+        async with db_session_factory() as session:
+            streamed = await ProxyRepository(session).streamed()
+            every = await ProxyRepository(session).get_all()
+            theirs = await ProxyRepository(session).streamed(other.id)
+
+        assert [proxy.host for proxy in streamed] == [f"p{i}.example.com" for i in range(7)]
+        assert streamed == every
+        assert [proxy.host for proxy in theirs] == ["p0.example.com", "p3.example.com", "p6.example.com"]
 
     async def test_get_by_connector(
         self,

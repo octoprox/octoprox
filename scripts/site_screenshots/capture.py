@@ -64,8 +64,9 @@ LOCALE = "en-US-u-hc-h23"  # US formats with a 24-hour clock
 TIMEZONE = "Europe/London"  # UTC in November, so the charts show the hours the data was made for
 SCALE = 2  # sharp on high-density screens
 DESKTOP: dict[str, Any] = {"viewport": {"width": 1440, "height": 900}}
+# A large iPhone: the whole sidebar rail fits, so no entry sits under its scroll fade.
 PHONE: dict[str, Any] = {
-    "viewport": {"width": 390, "height": 844}, "is_mobile": True, "has_touch": True,
+    "viewport": {"width": 430, "height": 932}, "is_mobile": True, "has_touch": True,
     "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) "
                   "Version/18.5 Mobile/15E148 Safari/604.1",
 }
@@ -137,14 +138,22 @@ CUT_OVERVIEW = """() => {
     return row ? Math.ceil(row.getBoundingClientRect().bottom + 12) : null
 }"""
 
-# A crop line moved off any sidebar entry it would cut through: the nearest clear line at most `slack` px above it
-# (a content cut may lose some of the page's bottom padding), otherwise the first clear line below it.
+# A crop line moved off any sidebar entry it would cut through, and from between a group's heading and its first
+# entry: the nearest clear line at most `slack` px above it (a content cut may lose some of the page's bottom
+# padding), otherwise the first clear line below it.
 SNAP_PAST_SIDEBAR = """([y, slack]) => {
     const nav = document.querySelector('nav')
     const side = nav && nav.parentElement
     if (!side) return y
     const boxes = [...side.querySelectorAll('a, button, div, h2, h3, span')]
         .map((el) => el.getBoundingClientRect()).filter((r) => r.height > 0 && r.height <= 48)
+    // A heading and the entry under it count as one box, so a heading is never left at the bottom on its own.
+    for (const heading of nav.querySelectorAll('div.uppercase')) {
+        const entry = heading.nextElementSibling
+        if (!entry) continue
+        const top = heading.getBoundingClientRect().top, bottom = entry.getBoundingClientRect().bottom
+        boxes.push({top, bottom})
+    }
     const crosses = (c) => boxes.some((r) => r.top < c - 0.5 && r.bottom > c + 0.5)
     for (let c = Math.floor(y); c >= y - slack; c--) if (!crosses(c)) return c
     let c = Math.ceil(y)
@@ -186,8 +195,9 @@ SCREENS = [
            viewport={"width": 1440, "height": 1000}, setup=open_traffic_tab),
     # How often each provider's exits are where the vendor claims, by country, state and city.
     Screen("locations", f"/projects/{P1}/locations", time_range="30d", cut=CUT_CONTENT, crop=True, slack=20),
-    # Why requests failed, by kind, vendor status and connector, with a morning burst of vendor 502s.
-    Screen("failures", f"/projects/{P1}/failures", cut=CUT_LAST_WHOLE_ROW),
+    # Why requests failed, by kind, vendor status and connector, with a morning burst of vendor 502s. Tall enough
+    # that the last whole row still leaves room for the whole sidebar.
+    Screen("failures", f"/projects/{P1}/failures", viewport={"width": 1440, "height": 1000}, cut=CUT_LAST_WHOLE_ROW),
     # The Enterprise audit log with one change open: a traffic limit raised from 120 GB to 160 GB.
     Screen("activity", "/admin/activity", setup=open_limit_change, cut=CUT_LAST_WHOLE_ROW),
     # The provider catalog: the shipped vendors and one added as a YAML descriptor, no code and no redeploy. Without

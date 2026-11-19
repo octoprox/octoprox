@@ -26,6 +26,7 @@ from api.geo.models import IpObservation, ObservationSource
 from api.geo.observations import ObservationRecorder
 from api.geo.runtime import GeoStack
 from api.geo.updater import GeoDatabaseUpdater
+from api.jobs.alerts import AlertsJob
 from api.jobs.messages import ExitReportMessage, SightingMessage
 from api.models.exit_reports import ExitVerdict
 from api.models.project import ExitReputationMode
@@ -122,6 +123,13 @@ class TestLoops:
         assert {name for name in _task_names(runtime) if name.startswith("job_runner_")} == {
             job_runner_name(kind) for kind in JobKind
         }
+
+    async def test_its_alerts_job_takes_a_burst_of_run_now_entries_as_one_run(self, build: Build) -> None:
+        runtime = await build(worker_jobs=[JobKind.ALERTS])
+
+        job = runtime.runners[JobKind.ALERTS]._job
+        assert isinstance(job, AlertsJob) and job.batch_size == 500
+        assert runtime.runners[JobKind.ALERTS].name == WorkerName.JOB_RUNNER_ALERTS
 
     async def test_a_worker_that_takes_no_job_kind_runs_the_refresher_and_the_ingests(self, build: Build) -> None:
         runtime = await build(worker_jobs=[])

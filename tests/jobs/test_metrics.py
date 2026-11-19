@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 import pytest
 import structlog
@@ -29,6 +30,7 @@ from api.core.stats import (
 )
 from api.db.audit_repository import AuditRepository, SystemSettingsRepository
 from api.db.models import (
+    AlertModel,
     AuditLogModel,
     ConnectorExitIpModel,
     ConnectorMetricsModel,
@@ -51,11 +53,12 @@ from api.db.redis import (
     MetricWindows,
     RedisClient,
 )
-from api.db.repository import MetricsRepository
+from api.db.repository import MetricsRepository, ProjectRepository
 from api.db.wireguard_repository import WireGuardPeerRepository
 from api.geo.runtime import GeoStack
 from api.jobs.job import JobBatch
 from api.jobs.metrics import CompactionJob, MetricsFlushJob
+from api.models.alerts import AlertSettings
 from api.models.audit import AuditEntry
 from api.models.connector import Connector
 from api.models.openvpn import OpenVpnPeer
@@ -911,3 +914,58 @@ class TestCompaction:
 
         await compaction.run(COMPACTION)
         assert await audit_ages(sessions, now) == [29, 5000]
+
+    async def test_resolved_alerts_go_with_their_retention_and_open_ones_stay(
+        self, compaction: CompactionJob, sessions: async_sessionmaker[AsyncSession], rows: Rows
+    ) -> None:
+        now = utc_now()
+        # Metrics kept 30 days; alerts kept 10 by the project's own setting; alerts kept forever.
+        metrics, own, forever = await rows.project(metrics_retention_days=30), await rows.project(), await rows.project()
+        async with sessions() as session:
+            projects = ProjectRepository(session)
+            await projects.write_alert_settings(own.id, AlertSettings(keep_days=10))
+            await projects.write_alert_settings(forever.id, AlertSettings(keep_days=0))
+            session.add_all([
+                stored_alert(metrics.id, "a", now, resolved_days=31),
+                stored_alert(metrics.id, "b", now, resolved_days=29),
+                stored_alert(metrics.id, "c", now, resolved_days=None, opened_days=400),
+                stored_alert(own.id, "a", now, resolved_days=11),
+                stored_alert(own.id, "b", now, resolved_days=9),
+                stored_alert(forever.id, "a", now, resolved_days=5000),
+                stored_alert(None, "a", now, resolved_days=91),
+                stored_alert(None, "b", now, resolved_days=89),
+            ])
+            await session.commit()
+
+        with structlog.testing.capture_logs() as logs:
+            await compaction.run(COMPACTION)
+
+        assert await alert_keys(sessions) == {
+            (metrics.id, "b"), (metrics.id, "c"), (own.id, "b"), (forever.id, "a"), (None, "b")
+        }
+        assert [log["alerts_deleted"] for log in logs if log["event"] == "Metrics compaction complete"] == [3]
+
+        # The install's by the retention an admin set, none at 0 days.
+        async with sessions() as session:
+            await SystemSettingsRepository(session).set_install_alert_retention(0)
+            session.add(stored_alert(None, "c", now, resolved_days=5000))
+            await session.commit()
+        await compaction.run(COMPACTION)
+        assert (None, "c") in await alert_keys(sessions)
+
+
+def stored_alert(
+    project_id: str | None, key: str, now: datetime, *, resolved_days: int | None, opened_days: int = 0
+) -> AlertModel:
+    """An alert of ``project_id`` (the install's for None) resolved ``resolved_days`` before ``now``, or open."""
+    opened = now - timedelta(days=max(opened_days, resolved_days or 0) + 1)
+    return AlertModel(
+        id=str(uuid4()), project_id=project_id, key=key, kind="connectors_off", severity="warning",
+        worst_severity="warning", body=" text", opened_at=opened, last_seen_at=opened,
+        resolved_at=now - timedelta(days=resolved_days) if resolved_days is not None else None,
+    )
+
+
+async def alert_keys(sessions: async_sessionmaker[AsyncSession]) -> set[tuple[str | None, str]]:
+    async with sessions() as session:
+        return {(row.project_id, row.key) for row in (await session.execute(select(AlertModel))).scalars()}

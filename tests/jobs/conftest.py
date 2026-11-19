@@ -22,6 +22,7 @@ from redis.asyncio.client import Pipeline, Redis
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.core.config import Settings
 from api.core.roles import JobKind
 from api.db.redis import CHANGES_STREAM_KEY, OBSERVATION_STREAM_KEY, RedisClient
@@ -148,8 +149,9 @@ def proxy_service(
     redis_client: RedisClient,
     registry: ProviderRegistry,
     change_log: ChangeLog,
+    alert_checks: AlertChecks,
 ) -> ProxyService:
-    return ProxyService(sessions, jobs, redis_client, registry, changes=change_log)
+    return ProxyService(sessions, jobs, redis_client, registry, changes=change_log, alerts=alert_checks)
 
 
 @pytest.fixture
@@ -159,8 +161,9 @@ def connector_service(
     redis_client: RedisClient,
     registry: ProviderRegistry,
     change_log: ChangeLog,
+    alert_checks: AlertChecks,
 ) -> ConnectorService:
-    return ConnectorService(sessions, jobs, redis_client, registry, changes=change_log)
+    return ConnectorService(sessions, jobs, redis_client, registry, changes=change_log, alerts=alert_checks)
 
 
 @pytest.fixture
@@ -170,8 +173,11 @@ def project_service(
     redis_client: RedisClient,
     change_log: ChangeLog,
     connector_service: ConnectorService,
+    alert_checks: AlertChecks,
 ) -> ProjectService:
-    return ProjectService(sessions, jobs, redis_client, changes=change_log, connectors=connector_service)
+    return ProjectService(
+        sessions, jobs, redis_client, changes=change_log, connectors=connector_service, alerts=alert_checks
+    )
 
 
 def geo_settings(tmp_path: Path, **overrides: Any) -> Settings:

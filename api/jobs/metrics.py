@@ -16,6 +16,7 @@ import structlog
 from api.core import utc_now
 from api.core.roles import JobKind
 from api.core.stats import HOST_OVERFLOW, MetricDelta, RequestCount
+from api.db.alert_repository import AlertRepository
 from api.db.audit_repository import AuditRepository, SystemSettingsRepository
 from api.db.geo_repository import ObservationRepository
 from api.db.redis import PROJECT_WINDOWS, PROXY_WINDOWS, TUNNEL_PEER_WINDOWS
@@ -245,7 +246,8 @@ class CompactionJob(Job):
 
     async def run(self, batch: JobBatch) -> None:
         """Compact and retain each project's metrics, then drop gone entities' totals, old observations and records,
-        the exit reputation records past their retention, and the audit entries past the install's retention."""
+        the exit reputation records past their retention, the audit entries past the install's retention, and the
+        resolved alerts past theirs."""
         now = utc_now()
         async with self._session_factory() as session:
             projects = await ProjectRepository(session).get_all()
@@ -272,9 +274,10 @@ class CompactionJob(Job):
             await session.commit()
         reputation_ips, reputation_connectors = await self._retain_exit_reputation(now)
         audit_entries = await self._retain_audit_log(now)
+        alerts = await self._retain_alerts(now)
 
         reputation = reputation_ips + reputation_connectors
-        if compacted or retained or totals or observed or exits or flushes or reputation or audit_entries:
+        if compacted or retained or totals or observed or exits or flushes or reputation or audit_entries or alerts:
             logger.info(
                 "Metrics compaction complete",
                 projects=len(projects),
@@ -287,6 +290,7 @@ class CompactionJob(Job):
                 exit_ip_reputation_deleted=reputation_ips,
                 connector_reputation_deleted=reputation_connectors,
                 audit_entries_deleted=audit_entries,
+                alerts_deleted=alerts,
             )
 
     async def _compact(self, project_id: str, now: datetime) -> int:
@@ -349,6 +353,18 @@ class CompactionJob(Job):
             if days == 0:
                 return 0
             deleted = await AuditRepository(session).delete_older_than(now - timedelta(days=days))
+            await session.commit()
+        return deleted
+
+    async def _retain_alerts(self, now: datetime) -> int:
+        """Delete each project's alerts resolved before its alerts setting's days (its metrics retention's when unset),
+        and the install's before the retention an admin set, none at 0 days; open alerts stay. The alerts deleted."""
+        async with self._session_factory() as session:
+            alerts = AlertRepository(session)
+            deleted = await alerts.delete_resolved_of_projects(now)
+            days = (await SystemSettingsRepository(session).get()).install_alert_retention_days
+            if days > 0:
+                deleted += await alerts.delete_resolved_of_install(now - timedelta(days=days))
             await session.commit()
         return deleted
 

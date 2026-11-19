@@ -1,8 +1,8 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The api role's runtime: the admin API's services, read model, previews, Needs attention, attribution, tunnels and
-sign-in.
+"""The api role's runtime: the admin API's services, read model, previews, Needs attention and alerts, attribution,
+tunnels and sign-in.
 
 Its one loop keeps the project map the exit reports route takes its project from; the node runs the process's
 definitions refresher and observation recorder. At start it creates the tunnel settings rows a fresh install lacks.
@@ -10,20 +10,22 @@ definitions refresher and observation recorder. At start it creates the tunnel s
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy.pool import QueuePool
 
-from api.attention.install import InstallAttentionReader
-from api.attention.service import AttentionService
+from api.attention.history import AlertHistory
+from api.attention.requests import AlertChecks
+from api.attention.service import AttentionService, InstallAttentionService
+from api.attention.settings import AlertSettingsService
 from api.core.demand_tracker import DemandTracker
 from api.core.roles import Role
 from api.core.system_stats import ClusterReader
 from api.core.tasks import quietly
 from api.feed.compiler import FeedCompiler
+from api.feed.preview import RoutingPreview
 from api.feed.state import RuntimeStateReader
 from api.geo.attributor import ProxyAttributor
 from api.geo.settings import defaults_from_config
@@ -32,8 +34,6 @@ from api.models.system import ApiSnapshot, InstanceSnapshot
 from api.openvpn.service import OpenVpnService
 from api.roles.refresh import ProjectMap
 from api.roles.runtime import RoleRuntime
-from api.routing.router import Router
-from api.routing.snapshot import RoutingSnapshot
 from api.services.connectors import ConnectorService
 from api.services.credentials import CredentialService
 from api.services.projects import ProjectService
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from api.jobs.queue import JobQueue
     from api.models.tunnel import TunnelEndpointState
     from api.providers.store import ProviderStore
+    from api.routing.router import Router
 
 logger = structlog.get_logger()
 
@@ -92,14 +93,23 @@ class ApiRuntime(RoleRuntime):
         self._cluster = ClusterReader(redis_client)
         self.demand_tracker = DemandTracker(redis_client)
         self.runtime_view = RuntimeView(session_factory, self.state_reader, self.provider_registry, self.demand_tracker)
+        # Asks the workers for a project's alert check after a write, and says when each was last checked.
+        self.alert_checks = AlertChecks(redis_client, jobs)
         self.connector_service = ConnectorService(
-            session_factory, jobs, redis_client, self.provider_registry, changes=changes
+            session_factory, jobs, redis_client, self.provider_registry, changes=changes, alerts=self.alert_checks
         )
         self.project_service = ProjectService(
-            session_factory, jobs, redis_client, changes=changes, connectors=self.connector_service
+            session_factory,
+            jobs,
+            redis_client,
+            changes=changes,
+            connectors=self.connector_service,
+            alerts=self.alert_checks,
         )
         self.credential_service = CredentialService(session_factory, self.provider_registry, changes=changes)
-        self.proxy_service = ProxyService(session_factory, jobs, redis_client, self.provider_registry, changes=changes)
+        self.proxy_service = ProxyService(
+            session_factory, jobs, redis_client, self.provider_registry, changes=changes, alerts=self.alert_checks
+        )
         self.geo = geo
         self.geo_service = geo.geo_service
         self.geo_settings_store = geo.settings_store
@@ -112,17 +122,14 @@ class ApiRuntime(RoleRuntime):
             geo_defaults=defaults_from_config(settings),
             default_strategy=settings.default_strategy,
         )
-        # Needs attention: each project's lines over the previews, and the install's over the heartbeats.
-        self.attention = AttentionService(
-            session_factory,
-            self.runtime_view,
-            self.provider_registry,
-            preview=self.preview_router,
-            preview_all=self.preview_all,
+        self.preview = RoutingPreview(
+            self._compiler, self.runtime_view, self.provider_registry, default_strategy=settings.default_strategy
         )
-        self.install_attention = InstallAttentionReader(
-            redis_client, session_factory, self._cluster, geo_updater_interval=settings.geo_updater_interval
-        )
+        # Needs attention and alerts, read from the alerts the workers store.
+        self.attention = AttentionService(session_factory, self.alert_checks)
+        self.install_attention = InstallAttentionService(session_factory, self.alert_checks, self._cluster)
+        self.alert_history = AlertHistory(session_factory)
+        self.alert_settings = AlertSettingsService(session_factory, self.alert_checks)
         self.attributor = ProxyAttributor(geo.geo_service, lookup_enabled=settings.geo_lookup_enabled)
         # Detect: a store per request (``attribution.store()``), written in one transaction.
         self.attribution = Attribution(
@@ -192,21 +199,7 @@ class ApiRuntime(RoleRuntime):
 
         The quarantines and the traffic blocks the traffic job stored come from Redis, none while it cannot be read.
         """
-        quarantined, blocked = await asyncio.gather(self.runtime_view.quarantined(), self.runtime_view.blocked())
-        sections = await self._compiler.compile_project(project_id, quarantined=quarantined, blocked_until=blocked)
-        return Router(
-            RoutingSnapshot.from_sections(sections, registry=self.provider_registry),
-            default_strategy=self._settings.default_strategy,
-        )
-
-    async def preview_all(self) -> Router:
-        """A router over every project's routing, as :meth:`preview_router` builds one project's; built per request."""
-        quarantined, blocked = await asyncio.gather(self.runtime_view.quarantined(), self.runtime_view.blocked())
-        sections = await self._compiler.compile_projects(quarantined=quarantined, blocked_until=blocked)
-        return Router(
-            RoutingSnapshot.from_sections(sections, registry=self.provider_registry),
-            default_strategy=self._settings.default_strategy,
-        )
+        return await self.preview.project(project_id)
 
     # --- Heartbeats ---------------------------------------------------------------------
 

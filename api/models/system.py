@@ -19,10 +19,12 @@ from api.core.logging import error_label
 from api.core.roles import JobKind, Role
 from api.models.audit import (
     DEFAULT_AUDIT_RETENTION_DAYS,
+    DEFAULT_INSTALL_ALERT_RETENTION_DAYS,
     INSTALL_ENTITY_ID,
     Audited,
     AuditEntityType,
     AuditRetention,
+    InstallAlertRetention,
 )
 from api.models.tunnel import TunnelEndpointState
 
@@ -620,7 +622,8 @@ class SystemMetricsHistory(BaseModel):
 
 
 class SystemSettings(Audited):
-    """What an admin set for the whole install (``system_settings``): the audit log's retention and the license key.
+    """What an admin set for the whole install (``system_settings``): the audit log's and the install alerts'
+    retentions, and the license key.
 
     The public code stores the key and never reads it; an extension does.
     """
@@ -630,6 +633,7 @@ class SystemSettings(Audited):
 
     audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
     license_key: str | None = None
+    install_alert_retention_days: int = DEFAULT_INSTALL_ALERT_RETENTION_DAYS
 
     def audit_id(self) -> str:
         return INSTALL_ENTITY_ID
@@ -640,3 +644,7 @@ class SystemSettings(Audited):
     def audit_retention(self) -> AuditRetention:
         """The audit log's retention as the Activity page shows it."""
         return AuditRetention(days=self.audit_retention_days)
+
+    def install_alert_retention(self) -> InstallAlertRetention:
+        """The install alerts' retention as the Alerts page under Administration shows it."""
+        return InstallAlertRetention(days=self.install_alert_retention_days)

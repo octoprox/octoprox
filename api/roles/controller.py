@@ -45,6 +45,8 @@ COMPACTION_PERIOD_SECONDS = 3600
 INDEX_HYGIENE_PERIOD_SECONDS = 60
 # Hourly, so a new install checks within the hour; the job fetches only once a day.
 UPDATE_CHECK_PERIOD_SECONDS = 3600
+# Every project's and the install's alerts, the install's included: one schedule for every check.
+ALERTS_PERIOD_SECONDS = 60
 
 
 class ControllerRuntime(RoleRuntime):
@@ -151,6 +153,7 @@ class ControllerRuntime(RoleRuntime):
             JobKind.TUNNEL_LAST_SEEN: TUNNEL_STATUS_INTERVAL,
             JobKind.INDEX_HYGIENE: INDEX_HYGIENE_PERIOD_SECONDS,
             JobKind.UPDATE_CHECK: UPDATE_CHECK_PERIOD_SECONDS,
+            JobKind.ALERTS: ALERTS_PERIOD_SECONDS,
         }
         if not settings.system_metrics_interval:
             del periods[JobKind.SNAPSHOT]

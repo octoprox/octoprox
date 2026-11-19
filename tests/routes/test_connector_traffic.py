@@ -252,7 +252,7 @@ def flush_connector_window(client: TestClient, connector_id: str, sent: int, rec
 def decide_traffic(client: TestClient, connector_id: str) -> None:
     """The traffic decision a worker makes for the connector from what the app's Postgres and Redis hold now."""
     runtime = api_runtime(client)
-    job = TrafficJob(runtime.session_factory, runtime.redis_client)
+    job = TrafficJob(runtime.session_factory, runtime.redis_client, alerts=runtime.alert_checks)
     on_app_loop(client, job.run, JobBatch(ids=("1-0",), keys=(connector_id,)))
 
 

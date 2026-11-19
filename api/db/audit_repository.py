@@ -84,7 +84,11 @@ class AuditRepository:
 
 
 # The columns of ``system_settings`` the domain model carries, read as plain values so no loaded row goes stale.
-_SETTINGS_COLUMNS = (SystemSettingsModel.audit_retention_days, SystemSettingsModel.license_key)
+_SETTINGS_COLUMNS = (
+    SystemSettingsModel.audit_retention_days,
+    SystemSettingsModel.license_key,
+    SystemSettingsModel.install_alert_retention_days,
+)
 
 
 class SystemSettingsRepository:
@@ -102,6 +106,11 @@ class SystemSettingsRepository:
         """Store how many days audit entries are kept, the license key left as it is; the settings as stored now."""
         return await self._upsert(audit_retention_days=days)
 
+    async def set_install_alert_retention(self, days: int) -> SystemSettings:
+        """Store how many days the install's resolved alerts are kept, the rest left as it is; the settings as stored
+        now."""
+        return await self._upsert(install_alert_retention_days=days)
+
     async def set_license_key(self, key: str | None) -> SystemSettings:
         """Store the license key, the retention left as it is; the settings as stored now."""
         return await self._upsert(license_key=key)
@@ -114,5 +123,9 @@ class SystemSettingsRepository:
         return self._to_domain(row)
 
     @staticmethod
-    def _to_domain(row: Row[int, str | None]) -> SystemSettings:
-        return SystemSettings(audit_retention_days=row.audit_retention_days, license_key=row.license_key)
+    def _to_domain(row: Row[int, str | None, int]) -> SystemSettings:
+        return SystemSettings(
+            audit_retention_days=row.audit_retention_days,
+            license_key=row.license_key,
+            install_alert_retention_days=row.install_alert_retention_days,
+        )

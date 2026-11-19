@@ -1,14 +1,15 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { ProjectCreate, ProjectUpdate, ProjectSummary } from '../api/client'
+import { AlertSettingsOverrides, ProjectCreate, ProjectUpdate, ProjectSummary } from '../api/client'
 import { Button, Modal, ModalHeader, ModalFooter } from './ui'
 import { ProjectForm } from './ProjectForm'
 
 interface ProjectModalProps {
   project?: ProjectSummary
   onClose: () => void
-  onSave: (data: ProjectCreate | ProjectUpdate) => void
+  /** As ProjectForm's: null for what an edit left as it was. */
+  onSave: (data: ProjectCreate | ProjectUpdate | null, alertOverrides: AlertSettingsOverrides | null) => void
   isLoading: boolean
   error?: string
 }

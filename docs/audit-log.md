@@ -19,7 +19,7 @@ Every change a person makes, in the web UI or through the API:
 
 | What | Recorded when a person |
 |---|---|
-| Project | creates, edits or deletes it, or mutes or unmutes a line of its [Needs attention]({{ site.baseurl }}/metrics#needs-attention) card (with the line, and until when for a mute) |
+| Project | creates, edits or deletes it, or changes its [alert thresholds]({{ site.baseurl }}/metrics#thresholds), or mutes or unmutes a line of its [Needs attention]({{ site.baseurl }}/metrics#needs-attention) card (with the line, and until when for a mute) |
 | Connector | creates, edits or deletes it, changes its countries on the Countries page (one entry per connector changed, with the country), or resets its traffic usage |
 | Credential | creates, edits or deletes it |
 | Proxy | adds it by hand or in an upload (one entry per proxy), edits or removes it |
@@ -29,7 +29,7 @@ Every change a person makes, in the web UI or through the API:
 | User | adds a person or a [service account]({{ site.baseurl }}/sso#service-accounts), invites, edits or deletes one, or sends a new invite link; changes their own email or password under Account; sets their password through an invite link |
 | Sign-in provider | saves its settings under Administration → Sign-in |
 | IP attribution | saves the settings; uploads, adds from a URL, edits (pausing and resuming too) or removes a database |
-| System settings | changes the audit log's retention, or on Octoprox Enterprise the license key |
+| System settings | changes the audit log's retention or the install alerts' retention (under Administration → Alerts), or on Octoprox Enterprise the license key |
 | Backup | restores one |
 
 Each entry's action is one of **Created**, **Updated**, **Deleted**, **Imported** (a provider imported, a backup restored), **Traffic reset**, **Invited**, **Invite reissued**, **Rotated**, **Muted** and **Unmuted**; Octoprox Enterprise adds the [sign-in and token events](#sign-ins).
@@ -50,7 +50,7 @@ A delete is recorded when the person asks for it, even when instances are termin
 - **Created**: every recorded field that has a value, as `[null, value]`.
 - **Deleted**: every recorded field that had a value, as `[value, null]`, so the last state outlives the entity.
 - **Updated**: only the fields whose value changed. A save that changes nothing adds no entry.
-- **Settings kept as a set of keys** are compared key by key: a connector's provider settings and its routing, rate limit, traffic and health check settings, a credential's provider settings, and a provider's descriptor. The History names such a key under its group, as Weight under Routing for `routing_config.weight`. An absent key is at its default and shows as not set.
+- **Settings kept as a set of keys** are compared key by key: a connector's provider settings and its routing, rate limit, traffic and health check settings, a credential's provider settings, a provider's descriptor, and a project's alert thresholds (under Alerts). The History names such a key under its group, as Weight under Routing for `routing_config.weight`. An absent key is at its default and shows as not set.
 - **Only what people set.** What Octoprox writes on an entity itself is left out: a proxy's health, status and exit, a connector's last error and proxy count, a device's last sighting, a user's last sign-in. A proxy entry records the address, protocol, credentials and tags a person sets and a location pinned by hand. A user's theme and the release notes they have seen are set by the person and stored on their user, but left out too.
 
 ### Secrets
@@ -122,7 +122,7 @@ Admins set the [retention](#retention) on this page. On the free edition it also
 
 ## What is not recorded
 
-- **System work**: health checks, provider syncs, cloud provisioning and autoscaling (including the termination that completes a delete a person asked for, and cloud errors), IP attribution (exit lookups, re-attribution, and the location and slot rotation Detect causes), IP database downloads (scheduled and *Download now*), tunnel devices' last sightings, settings rows created at start or on a first read, the first admin, migrations, and the deletes of compaction and retention.
+- **System work**: health checks, provider syncs, cloud provisioning and autoscaling (including the termination that completes a delete a person asked for, and cloud errors), IP attribution (exit lookups, re-attribution, and the location and slot rotation Detect causes), IP database downloads (scheduled and *Download now*), tunnel devices' last sightings, the alert checks (alerts opening, resolving and coming back, and the mutes until a line clears that they end), settings rows created at start or on a first read, the first admin, migrations, and the deletes of compaction and retention.
 - **Actions that store nothing**: lifting a quarantine, clearing MITM captures or the failure log, a re-attribution request, Detect, a backup export, device config downloads, a provider's option lookups, validation and tests, inspecting an IP database file and looking up an IP. A provider sign-in's refresh of the linked account's email and last sign-in is not recorded either.
 - **What a person sets for themselves alone**: their theme and the What's New releases they have seen, which are stored on their user.
 - **Rows deleted with their parent**: a project's credentials and devices, a connector's proxies, a user's tokens and linked sign-ins. The parent's entry covers them.
@@ -138,7 +138,7 @@ A custom provider's history from releases before the audit log was carried over 
 
 ## Backups
 
-A [backup]({{ site.baseurl }}/api#backup--migration) carries the audit log and the install's system settings, its retention and license key. A restore replaces everything else, but keeps the install's audit history and license key and adds the backup's entries; an entry the install already has stays as it is. The backup's settings are taken only when the install has never saved its own, and a missing license key is filled in from the backup's.
+A [backup]({{ site.baseurl }}/api#backup--migration) carries the audit log and the install's system settings, its retentions and license key. A restore replaces everything else, but keeps the install's audit history and license key and adds the backup's entries; an entry the install already has stays as it is. The backup's settings are taken only when the install has never saved its own, and a missing license key is filled in from the backup's.
 
 The restore itself is recorded last, as an **Imported** entry naming the admin, with the date the backup was made, the release that made it, whether it carried history, and whether the admin's account was kept. The *Restore* card's History lists every restore.
 

@@ -4,8 +4,10 @@
 """The project lines of Needs attention: one check per family of lines, each reading a project's stored state and
 finding what fails now (a problem) or is degraded or about to be (a warning).
 
-Thresholds are fixed here; :func:`build_report` drops what a worse line makes redundant and puts the rest in a stable
-order, so a refresh only changes words in place.
+The cut-offs come from the project's alert settings (:class:`~api.models.alerts.AlertSettings`); the windows and what
+the lines show stay here: ``WINDOW`` (the request lines' 15 minutes, which their sentences name), ``FRESH``,
+``REPUTATION_RECENT``, ``REPUTATION_SITES`` and ``FOLD_CONNECTORS_ABOVE``. :func:`build_report` sets apart what a worse
+line makes redundant and puts the rest in a stable order, so a refresh only changes words in place.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from typing import TYPE_CHECKING, ClassVar
 from api.core.stats import FailureKind
 from api.geo.models import META_LOCATION_VERDICT, ContradictedAction, LocationVerdict
 from api.geo.service import GeoService
-from api.models.attention import AttentionLine, AttentionMute, AttentionWhen, Severity
+from api.models.attention import AttentionWhen, Severity
 from api.models.connector import BYTES_PER_GB, TrafficLimitAction, TrafficPeriod
 from api.models.location import LocationTarget
 from api.models.proxy import ProxyStatus
@@ -30,18 +32,15 @@ from api.reputation.split import place_label
 
 if TYPE_CHECKING:
     from api.attention.data import FailureCount, ProjectData
+    from api.attention.install import InstallKind
+    from api.models.alerts import AlertSettings
     from api.models.connector import Connector
     from api.reputation.record import ConnectorSiteReputation
 
 # The request lines' window.
 WINDOW = timedelta(minutes=15)
-# A request line whose newest failure row is older is dropped.
+# A request line whose newest row is older is dropped.
 FRESH = timedelta(minutes=5)
-# Every vendor and refusal line needs this many.
-MIN_REFUSED = 10
-# A connector_failing line needs this many requests.
-MIN_FAILING_REQUESTS = 50
-STUCK_DELETING = timedelta(minutes=30)
 REPUTATION_RECENT = timedelta(hours=1)
 # As many sites as Exit locations' reputation table (MAX_TABLE_SITES).
 REPUTATION_SITES = 8
@@ -74,6 +73,8 @@ class AttentionKind(StrEnum):
     VENDOR_REFUSED_OTHER = "vendor_refused_other"
     CONNECTOR_FAILING = "connector_failing"
     REFUSALS = "refusals"
+    # Below every line that names a cause, and shown beside them.
+    SUCCESS_RATE = "success_rate"
     CONNECTOR_SYNC_FAILING = "connector_sync_failing"
     CONNECTOR_CLOUD_ERROR = "connector_cloud_error"
     CONNECTOR_NO_HEALTHY_PROXY = "connector_no_healthy_proxy"
@@ -87,15 +88,17 @@ class AttentionKind(StrEnum):
     CONNECTOR_STUCK_DELETING = "connector_stuck_deleting"
 
 
-_KIND_ORDER = {kind: position for position, kind in enumerate(AttentionKind)}
+# A project line's kind -> its place among lines of one severity.
+KIND_ORDER: dict[str, int] = {kind.value: position for position, kind in enumerate(AttentionKind)}
 
 
 @dataclass(frozen=True)
 class Finding:
-    """One line a check found, before its mute is looked up; what it makes redundant goes with it."""
+    """One line a check found, a project's or the install's, as its alert stores it; what it makes redundant goes
+    with it."""
 
     key: str
-    kind: AttentionKind
+    kind: AttentionKind | InstallKind
     severity: Severity
     lead: str
     subject: str
@@ -108,37 +111,17 @@ class Finding:
     sort_name: str = ""
     # Line keys or kinds it makes redundant.
     suppresses: frozenset[str] = frozenset()
-    # Keys of the lines a folded line stands for.
-    covers: frozenset[str] = frozenset()
 
     @property
     def sentence(self) -> str:
         """The whole line, as History records it."""
         return self.lead + self.subject + self.text
 
-    def line(self, mute: AttentionMute | None) -> AttentionLine:
-        """The line as the api answers it, with its mute."""
-        return AttentionLine(
-            key=self.key,
-            kind=self.kind.value,
-            severity=self.severity,
-            lead=self.lead,
-            subject=self.subject,
-            text=self.text,
-            detail=self.detail,
-            when=self.when,
-            link=self.link,
-            action=self.action,
-            mute=mute,
-        )
-
 
 class AttentionCheck(ABC):
     """One family of lines: the findings it reads off one project's data."""
 
     kinds: ClassVar[tuple[AttentionKind, ...]]
-    # Whether one of its lines can be a problem: the project list's counts run only these.
-    can_be_problem: ClassVar[bool] = False
 
     @abstractmethod
     def findings(self, data: ProjectData) -> list[Finding]:
@@ -157,7 +140,7 @@ class ConnectorCheck(AttentionCheck):
 
 
 class RequestWindowCheck(AttentionCheck):
-    """A family read off the last 15 minutes of failure counts: fresh rows only, shares of a request count."""
+    """A family read off the last 15 minutes of request and failure counts: fresh rows only, shares of a request count."""
 
     @staticmethod
     def _fresh(rows: Collection[FailureCount], now: datetime) -> bool:
@@ -186,7 +169,6 @@ class ConnectorsOffCheck(AttentionCheck):
     """No connector, or every connector turned off: nothing serves the project."""
 
     kinds = (AttentionKind.CONNECTORS_OFF,)
-    can_be_problem = True
 
     def findings(self, data: ProjectData) -> list[Finding]:
         live = [connector for connector in data.connectors if not connector.pending_deletion]
@@ -214,6 +196,7 @@ class ConnectorsOffCheck(AttentionCheck):
                     _refusal_key(FailureKind.NO_PROXY_AVAILABLE),
                     _refusal_key(FailureKind.ALL_PROXIES_QUARANTINED),
                     _refusal_key(FailureKind.TRAFFIC_LIMIT_EXCEEDED),
+                    AttentionKind.SUCCESS_RATE,
                 }),
             )
         ]
@@ -223,7 +206,6 @@ class PoolCheck(AttentionCheck):
     """The project's pool as the hero counts it: nothing can take requests, or many proxies keep failing their checks."""
 
     kinds = (AttentionKind.POOL_NO_ROUTABLE, AttentionKind.POOL_UNHEALTHY_SHARE)
-    can_be_problem = True
 
     def findings(self, data: ProjectData) -> list[Finding]:
         return [finding for finding in (self._no_routable(data), self._unhealthy_share(data)) if finding is not None]
@@ -236,6 +218,7 @@ class PoolCheck(AttentionCheck):
             AttentionKind.POOL_UNHEALTHY_SHARE,
             AttentionKind.COUNTRIES_UNSERVED,
             _refusal_key(FailureKind.NO_PROXY_AVAILABLE),
+            AttentionKind.SUCCESS_RATE,
         }
         if takers and all(connector.id in data.blocked for connector in takers):
             return _pool_finding(
@@ -275,8 +258,8 @@ class PoolCheck(AttentionCheck):
 
     @staticmethod
     def _unhealthy_share(data: ProjectData) -> Finding | None:
-        """A quarter or more of the counted rows keep failing their health checks, outside the connectors that have no
-        healthy row at all (their own line)."""
+        """A share of the counted rows (a quarter by default) keep failing their health checks, outside the connectors
+        that have no healthy row at all (their own line)."""
         rows = 0
         failing: Counter[str] = Counter()
         for connector in data.connectors:
@@ -292,7 +275,8 @@ class PoolCheck(AttentionCheck):
             )
             failing[connector.id] = statuses[ProxyStatus.UNHEALTHY]
         unhealthy = sum(failing.values())
-        if unhealthy < 3 or unhealthy / rows < 0.25:
+        thresholds = data.thresholds
+        if unhealthy < thresholds.unhealthy_min or unhealthy / rows < thresholds.unhealthy_share_percent / 100:
             return None
         names = {connector.id: connector.name for connector in data.connectors}
         most = max(failing, key=lambda connector_id: failing[connector_id])
@@ -312,7 +296,6 @@ class CountriesCheck(AttentionCheck):
     """Countries a connector lists or reserves that nothing can serve now, as the Countries page finds them."""
 
     kinds = (AttentionKind.COUNTRIES_UNSERVED,)
-    can_be_problem = True
 
     def findings(self, data: ProjectData) -> list[Finding]:
         project_id = data.project.id
@@ -354,7 +337,6 @@ class VendorRefusalCheck(RequestWindowCheck):
         AttentionKind.VENDOR_CANNOT_SERVE,
         AttentionKind.VENDOR_REFUSED_OTHER,
     )
-    can_be_problem = True
     # The vendor statuses each kind reads; the last kind takes every other status, and none.
     _STATUSES: ClassVar[dict[AttentionKind, frozenset[int]]] = {
         AttentionKind.VENDOR_LOGIN: frozenset({407}),
@@ -378,7 +360,7 @@ class VendorRefusalCheck(RequestWindowCheck):
                 by_kind.setdefault(self._kind_of(row.upstream_status), []).append(row)
             requests = data.connector_requests.get(connector.id, 0)
             for kind, rows in by_kind.items():
-                finding = self._finding(kind, connector, rows, requests, data.now)
+                finding = self._finding(kind, connector, rows, requests, data)
                 if finding is not None:
                     found.append(finding)
         return found
@@ -390,13 +372,13 @@ class VendorRefusalCheck(RequestWindowCheck):
         )
 
     def _finding(
-        self, kind: AttentionKind, connector: Connector, rows: list[FailureCount], requests: int, now: datetime
+        self, kind: AttentionKind, connector: Connector, rows: list[FailureCount], requests: int, data: ProjectData
     ) -> Finding | None:
         n = sum(row.count for row in rows)
         share = self._share(n, requests)
         total = max(requests, n)
-        severity = self._severity(kind, share)
-        if n < MIN_REFUSED or severity is None or not self._fresh(rows, now):
+        severity = self._severity(kind, share, data.thresholds)
+        if n < data.thresholds.vendor_min or severity is None or not self._fresh(rows, data.now):
             return None
         pct = round(share * 100)
         if kind == AttentionKind.VENDOR_LOGIN:
@@ -430,24 +412,33 @@ class VendorRefusalCheck(RequestWindowCheck):
         )
 
     @staticmethod
-    def _severity(kind: AttentionKind, share: float) -> Severity | None:
+    def _severity(kind: AttentionKind, share: float, thresholds: AlertSettings) -> Severity | None:
         """How bad a share of refusals of ``kind`` is; None under its cut-off."""
         if kind == AttentionKind.VENDOR_LOGIN:
-            return Severity.PROBLEM if share >= 0.20 else None
-        if kind in (AttentionKind.VENDOR_RATE_LIMITED, AttentionKind.VENDOR_FORBIDDEN):
-            if share >= 0.50:
-                return Severity.PROBLEM
-            return Severity.WARNING if share >= 0.05 else None
-        return Severity.WARNING if share >= 0.30 else None
+            return Severity.PROBLEM if share >= thresholds.vendor_login_problem_percent / 100 else None
+        if kind == AttentionKind.VENDOR_RATE_LIMITED:
+            warning, problem = (
+                thresholds.vendor_rate_limited_warning_percent,
+                thresholds.vendor_rate_limited_problem_percent,
+            )
+        elif kind == AttentionKind.VENDOR_FORBIDDEN:
+            warning, problem = thresholds.vendor_forbidden_warning_percent, thresholds.vendor_forbidden_problem_percent
+        elif kind == AttentionKind.VENDOR_CANNOT_SERVE:
+            return Severity.WARNING if share >= thresholds.vendor_cannot_serve_warning_percent / 100 else None
+        else:
+            return Severity.WARNING if share >= thresholds.vendor_other_warning_percent / 100 else None
+        if share >= problem / 100:
+            return Severity.PROBLEM
+        return Severity.WARNING if share >= warning / 100 else None
 
 
 class ConnectorFailingCheck(RequestWindowCheck):
     """A connector whose proxies fail a large share of its requests in the window, by the main reason."""
 
     kinds = (AttentionKind.CONNECTOR_FAILING,)
-    can_be_problem = True
 
     def findings(self, data: ProjectData) -> list[Finding]:
+        thresholds = data.thresholds
         found: list[Finding] = []
         for connector in data.connectors:
             if not _takes_requests(connector):
@@ -458,7 +449,11 @@ class ConnectorFailingCheck(RequestWindowCheck):
             failed = sum(row.count for row in rows)
             total = max(data.connector_requests.get(connector.id, 0), failed)
             share = self._share(failed, total)
-            if total < MIN_FAILING_REQUESTS or share < 0.30 or not self._fresh(rows, data.now):
+            if (
+                total < thresholds.connector_failing_min_requests
+                or share < thresholds.connector_failing_warning_percent / 100
+                or not self._fresh(rows, data.now)
+            ):
                 continue
             by_kind: Counter[str] = Counter()
             for row in rows:
@@ -469,7 +464,9 @@ class ConnectorFailingCheck(RequestWindowCheck):
                 _connector_finding(
                     AttentionKind.CONNECTOR_FAILING,
                     connector,
-                    Severity.PROBLEM if share >= 0.80 else Severity.WARNING,
+                    Severity.PROBLEM
+                    if share >= thresholds.connector_failing_problem_percent / 100
+                    else Severity.WARNING,
                     f": {round(share * 100)}% of its requests failed in the last 15 minutes, "
                     f"mostly because {_FAILING_REASONS[main]}.",
                     detail=f"{failed} of {total} requests failed.",
@@ -483,7 +480,6 @@ class RefusalCheck(RequestWindowCheck):
     """Requests the project's gateways refused in the window, a line per kind of refusal."""
 
     kinds = (AttentionKind.REFUSALS,)
-    can_be_problem = True
     # Each kind read, in the order its lines show, and the rest of its sentence.
     _TEXTS: ClassVar[dict[str, str]] = {
         FailureKind.NO_PROXY_AVAILABLE: (
@@ -510,12 +506,14 @@ class RefusalCheck(RequestWindowCheck):
         # Requests the metrics counted, and those refused before a proxy, which they did not.
         attempts = data.project_requests + sum(row.count for row in data.failures if row.connector_id is None)
         found: list[Finding] = []
+        thresholds = data.thresholds
         for index, (kind, text) in enumerate(self._TEXTS.items()):
             rows = [row for row in data.failures if row.kind == kind]
             n = sum(row.count for row in rows)
             share = self._share(n, attempts)
-            severity = self._severity(kind, share)
-            if n < MIN_REFUSED or severity is None or not self._fresh(rows, data.now):
+            severity = self._severity(kind, share, thresholds)
+            least = thresholds.invalid_location_min if kind == FailureKind.INVALID_LOCATION else thresholds.refusals_min
+            if n < least or severity is None or not self._fresh(rows, data.now):
                 continue
             found.append(
                 Finding(
@@ -535,13 +533,52 @@ class RefusalCheck(RequestWindowCheck):
         return found
 
     @staticmethod
-    def _severity(kind: str, share: float) -> Severity | None:
+    def _severity(kind: str, share: float, thresholds: AlertSettings) -> Severity | None:
         """How bad a share of refusals of ``kind`` is: a location that could not be read is a warning at any share."""
         if kind == FailureKind.INVALID_LOCATION:
             return Severity.WARNING
-        if share >= 0.25:
+        if share >= thresholds.refusals_problem_percent / 100:
             return Severity.PROBLEM
-        return Severity.WARNING if share >= 0.05 else None
+        return Severity.WARNING if share >= thresholds.refusals_warning_percent / 100 else None
+
+
+class SuccessRateCheck(RequestWindowCheck):
+    """The project's requests that reached a proxy succeeding too seldom in the window, as the Overview's success rate
+    counts them; the refusals before a proxy are the refusal lines'."""
+
+    kinds = (AttentionKind.SUCCESS_RATE,)
+
+    def findings(self, data: ProjectData) -> list[Finding]:
+        thresholds, tally = data.thresholds, data.success
+        requests, successes = tally.requests, min(tally.successes, tally.requests)
+        if (
+            not thresholds.success_rate
+            or requests < thresholds.success_min_requests
+            or tally.last_at is None
+            or tally.last_at < data.now - FRESH
+            # Whole numbers, so a rate on the cut-off is never on the wrong side of it.
+            or successes * 100 >= thresholds.success_warning_below * requests
+        ):
+            return []
+        problem = thresholds.success_problem_below
+        worse = f", below {problem}% a problem" if problem else ""
+        return [
+            Finding(
+                key=AttentionKind.SUCCESS_RATE.value,
+                kind=AttentionKind.SUCCESS_RATE,
+                severity=Severity.PROBLEM if successes * 100 < problem * requests else Severity.WARNING,
+                lead="Only ",
+                # Rounded down: 79.6% under an 80% cut-off never reads 80%.
+                subject=f"{successes * 100 // requests}% of requests",
+                text=" succeeded in the last 15 minutes.",
+                link="failures",
+                action="Failures",
+                detail=(
+                    f"{successes} of {requests} requests succeeded. "
+                    f"Below {thresholds.success_warning_below}% is a warning{worse}."
+                ),
+            )
+        ]
 
 
 class ConnectorErrorCheck(ConnectorCheck):
@@ -550,7 +587,11 @@ class ConnectorErrorCheck(ConnectorCheck):
     kinds = (AttentionKind.CONNECTOR_SYNC_FAILING, AttentionKind.CONNECTOR_CLOUD_ERROR)
 
     def _of(self, connector: Connector, data: ProjectData) -> Iterable[Finding]:
-        if not _takes_requests(connector) or not connector.last_error or connector.consecutive_errors < 1:
+        if (
+            not _takes_requests(connector)
+            or not connector.last_error
+            or connector.consecutive_errors < data.thresholds.connector_errors_min
+        ):
             return []
         n = connector.consecutive_errors
         times = "the last time" if n == 1 else f"the last {n} times"
@@ -567,7 +608,8 @@ class ConnectorErrorCheck(ConnectorCheck):
 
 
 class NoHealthyProxyCheck(ConnectorCheck):
-    """A connector that takes requests with no healthy proxy, every one checked and failing; folded past three."""
+    """A connector that takes requests with no healthy proxy, every one checked and failing; past three, one combined
+    line stands for them on the card."""
 
     kinds = (AttentionKind.CONNECTOR_NO_HEALTHY_PROXY,)
 
@@ -586,6 +628,7 @@ class NoHealthyProxyCheck(ConnectorCheck):
             return found
         names = sorted((finding.subject for finding in found), key=str.casefold)
         return [
+            *found,
             Finding(
                 key=AttentionKind.CONNECTOR_NO_HEALTHY_PROXY.value,
                 kind=AttentionKind.CONNECTOR_NO_HEALTHY_PROXY,
@@ -598,8 +641,8 @@ class NoHealthyProxyCheck(ConnectorCheck):
                 ),
                 link="connectors",
                 action="Connectors",
-                covers=frozenset(finding.key for finding in found),
-            )
+                suppresses=frozenset(finding.key for finding in found),
+            ),
         ]
 
     def _of(self, connector: Connector, data: ProjectData) -> Iterable[Finding]:
@@ -671,8 +714,12 @@ class ExitLocationCheck(ConnectorCheck):
         outside = {
             proxy.id for proxy in rows if GeoService.outside_declared_countries(proxy, view.declared_countries)
         }
+        thresholds = data.thresholds
         found: list[Finding] = []
-        if len(outside) >= 3 and len(outside) / len(rows) >= 0.10:
+        if (
+            len(outside) >= thresholds.exits_outside_min
+            and len(outside) / len(rows) >= thresholds.exits_outside_percent / 100
+        ):
             found.append(
                 _connector_finding(
                     AttentionKind.EXITS_OUTSIDE_COUNTRIES,
@@ -694,7 +741,7 @@ class ExitLocationCheck(ConnectorCheck):
             and not (rule == ContradictedAction.REFUSE and proxy.metadata.get(META_SESSION_ID))
         ]
         n = sum(1 for proxy in judged if proxy.metadata.get(META_LOCATION_VERDICT) == LocationVerdict.CONTRADICTED)
-        if n >= 3 and n / len(judged) >= 0.25:
+        if n >= thresholds.exits_contradicted_min and n / len(judged) >= thresholds.exits_contradicted_percent / 100:
             effect = (
                 "so they are skipped"
                 if rule == ContradictedAction.REFUSE
@@ -712,7 +759,8 @@ class ExitLocationCheck(ConnectorCheck):
 
 
 class ReputationCheck(AttentionCheck):
-    """A site blocking at least half of the requests on every connector that serves it, by exit reputation."""
+    """A site blocking a share of the requests (half by default) on every connector that serves it, by exit
+    reputation."""
 
     kinds = (AttentionKind.REPUTATION_SITE_BLOCKED,)
 
@@ -721,6 +769,8 @@ class ReputationCheck(AttentionCheck):
         if reputation is None:
             return []
         names = {connector.id: connector.name for connector in data.connectors}
+        percent = data.thresholds.site_blocked_percent
+        share = "at least half" if percent == 50 else f"at least {percent}%"
         found: list[Finding] = []
         for site in reputation.sites:
             serving = list(reputation.split.groups_for(site))
@@ -733,12 +783,13 @@ class ReputationCheck(AttentionCheck):
                 else shares[connector_id].reputation.value
                 for connector_id in serving
             ]
-            if any(value > 0.5 for value in values):
+            # The whole numbers first, so 80 reads 0.2 exactly, as a stored factor does.
+            if any(value > (100 - percent) / 100 for value in values):
                 continue
             text = (
-                f" is blocking at least half of the requests through {names.get(serving[0], serving[0])}."
+                f" is blocking {share} of the requests through {names.get(serving[0], serving[0])}."
                 if len(serving) == 1
-                else " is blocking at least half of the requests on every connector."
+                else f" is blocking {share} of the requests on every connector."
             )
             found.append(
                 Finding(
@@ -779,7 +830,7 @@ class StuckDeletingCheck(ConnectorCheck):
 
     def _of(self, connector: Connector, data: ProjectData) -> Iterable[Finding]:
         age = data.now - connector.updated_at
-        if not connector.pending_deletion or age < STUCK_DELETING:
+        if not connector.pending_deletion or age < timedelta(minutes=data.thresholds.stuck_deleting_minutes):
             return []
         return [
             _connector_finding(
@@ -799,6 +850,7 @@ CHECKS: tuple[AttentionCheck, ...] = (
     VendorRefusalCheck(),
     ConnectorFailingCheck(),
     RefusalCheck(),
+    SuccessRateCheck(),
     ConnectorErrorCheck(),
     NoHealthyProxyCheck(),
     TrafficCheck(),
@@ -810,33 +862,46 @@ CHECKS: tuple[AttentionCheck, ...] = (
 
 @dataclass(frozen=True)
 class Report:
-    """The lines to show in display order, and the key of every line found, those a worse or folded line stands in for
-    included, so an until-clear mute ends only when its line is really gone."""
+    """The lines to show in display order, and each line a shown one makes redundant, with the key of the line that
+    stands for it: its alert stays open, covered, while the card skips it."""
 
     findings: list[Finding]
-    present: frozenset[str]
+    hidden: list[tuple[Finding, str]]
 
 
 def build_report(data: ProjectData, checks: Sequence[AttentionCheck]) -> Report:
-    """The checks' findings in display order, those a present finding makes redundant dropped.
+    """The checks' findings in display order, those a found line makes redundant set apart with the line covering it.
 
     Problems first, then warnings, each by kind, then by name and key: a refresh only changes words in place.
     """
-    findings = [finding for check in checks for finding in check.findings(data)]
-    redundant: set[str] = set()
-    for finding in findings:
-        redundant |= finding.suppresses
-    kept = [finding for finding in findings if finding.key not in redundant and finding.kind not in redundant]
-    ordered = sorted(
-        kept,
+    findings = sorted(
+        (finding for check in checks for finding in check.findings(data)),
         key=lambda f: (
             0 if f.severity == Severity.PROBLEM else 1,
-            _KIND_ORDER[f.kind],
+            KIND_ORDER[f.kind],
             f.sort_name.casefold(),
             f.key,
         ),
     )
-    return Report(ordered, frozenset(key for finding in findings for key in (finding.key, *finding.covers)))
+    redundant: set[str] = set()
+    for finding in findings:
+        redundant |= finding.suppresses
+    shown = [finding for finding in findings if finding.key not in redundant and finding.kind not in redundant]
+    hidden = [
+        (finding, _covering(finding, [*shown, *findings]))
+        for finding in findings
+        if finding.key in redundant or finding.kind in redundant
+    ]
+    return Report(shown, hidden)
+
+
+def _covering(finding: Finding, candidates: Iterable[Finding]) -> str:
+    """The key of the first of ``candidates`` that makes ``finding`` redundant: a shown line, when one does."""
+    return next(
+        candidate.key
+        for candidate in candidates
+        if finding.key in candidate.suppresses or finding.kind in candidate.suppresses
+    )
 
 
 # --- Helpers --------------------------------------------------------------------------------------

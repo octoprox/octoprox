@@ -3,7 +3,7 @@
 
 """The project lines of Needs attention, each kind at the edges of its cut-offs, read off a project's data built in
 memory: definitions compiled into the routing preview by the feed's rules, and the counts and runtime state the loader
-would have read beside them."""
+would have read beside them; each cut-off a project's alert settings move, and the lines a wider line covers."""
 
 from __future__ import annotations
 
@@ -24,8 +24,9 @@ from api.attention.checks import (
 )
 from api.attention.data import FailureCount, ProjectData, SiteReputation
 from api.core import utc_now
-from api.db.repository import ConnectorStatusCount, ProxyPlacement
+from api.db.repository import ConnectorStatusCount, ProxyPlacement, RequestTally
 from api.geo.models import META_LOCATION_VERDICT, ContradictedAction
+from api.models.alerts import AlertSettings
 from api.models.attention import Severity
 from api.models.connector import (
     BYTES_PER_GB,
@@ -56,8 +57,12 @@ class Scene:
         self.now = utc_now()
         self.project = Project(id=PROJECT, name="Shop", username="client", password="pw", **project)
         self.feed = FeedBuilder().add(self.project)
+        self.thresholds = AlertSettings()
         self.failures: list[FailureCount] = []
         self.project_requests = 0
+        # None: every request succeeded.
+        self.successes: int | None = None
+        self.requests_at = self.now - timedelta(minutes=1)
         self.connector_requests: dict[str, int] = {}
         self.blocked: set[str] = set()
         self.traffic: dict[str, TrafficUsage] = {}
@@ -123,14 +128,16 @@ class Scene:
             },
             counted=enabled - self.blocked,
         )
+        successes = self.project_requests if self.successes is None else self.successes
         return ProjectData(
             project=self.project,
+            thresholds=self.thresholds,
             connectors=connectors,
             statuses=statuses,
             pool=pools.pool([c.id for c in connectors]),
             blocked=frozenset(enabled & self.blocked),
             failures=tuple(self.failures),
-            project_requests=self.project_requests,
+            success=RequestTally(requests=self.project_requests, successes=successes, last_at=self.requests_at),
             connector_requests=self.connector_requests,
             preview=self.feed.router(),
             registry=self.feed.registry,
@@ -144,9 +151,9 @@ class Scene:
         found = build_report(self.data(), CHECKS).findings
         return [finding for finding in found if not kinds or finding.kind in kinds]
 
-    def present(self) -> frozenset[str]:
-        """Every line key the checks found, those a worse or folded line stands in for included."""
-        return build_report(self.data(), CHECKS).present
+    def hidden(self) -> dict[str, str]:
+        """Each line a shown one makes redundant, by key, with the key of the line covering it."""
+        return {finding.key: by for finding, by in build_report(self.data(), CHECKS).hidden}
 
 
 def _serving(scene: Scene, name: str = "Healthy", n: int = 4) -> Connector:
@@ -185,8 +192,11 @@ class TestConnectorsOff:
         scene.fail(None, "no_proxy_available", 500)
 
         assert [finding.key for finding in scene.lines()] == ["connectors_off"]
-        # Still found, so an until-clear mute on a hidden line holds while it is hidden.
-        assert {"connectors_off", "refusals:no_proxy_available"} <= scene.present()
+        # Still found, so its alert stays open, covered, and an until-clear mute on it holds while it is hidden.
+        assert scene.hidden() == {
+            "countries_unserved": "connectors_off",
+            "refusals:no_proxy_available": "connectors_off",
+        }
 
 
 class TestPool:
@@ -654,14 +664,20 @@ class TestNoHealthyProxy:
             "connector_no_healthy_proxy", "4 connectors", "connectors", "Connectors"
         )
         assert line.text == " have no healthy proxy, so they take no requests: Alpha, Bravo and 2 more."
-        # Each folded connector's own line still counts as there, for its until-clear mute.
-        assert sum(key.startswith("connector_no_healthy_proxy:") for key in scene.present()) == 4
+        # Each folded connector's own line stays found, covered by the combined one, for its alert and its mute.
+        hidden = scene.hidden()
+        assert len(hidden) == 4
+        assert all(
+            key.startswith("connector_no_healthy_proxy:") and by == "connector_no_healthy_proxy"
+            for key, by in hidden.items()
+        )
 
         scene = Scene()
         _serving(scene, n=40)
         for name in ("Alpha", "Bravo", "Charlie"):
             scene.proxies(scene.connector(name), 1, ProxyStatus.UNHEALTHY)
         assert [line.subject for line in scene.lines()] == ["Alpha", "Bravo", "Charlie"]
+        assert scene.hidden() == {}
 
 
 def _usage(
@@ -927,11 +943,307 @@ class TestReport:
 
     def test_every_kind_has_a_family_and_every_family_runs(self) -> None:
         assert sorted(kind for check in CHECKS for kind in check.kinds) == sorted(AttentionKind)
-        assert [type(check).__name__ for check in CHECKS if check.can_be_problem] == [
-            "ConnectorsOffCheck",
-            "PoolCheck",
-            "CountriesCheck",
-            "VendorRefusalCheck",
-            "ConnectorFailingCheck",
-            "RefusalCheck",
+
+
+# --- Alert settings -----------------------------------------------------------------------------
+
+
+def _vendor(scene: Scene, status: int, refused: int, requests: int = 1000) -> list[Finding]:
+    """The lines of one connector whose vendor refused ``refused`` of ``requests`` with ``status``."""
+    connector = _serving(scene)
+    scene.connector_requests[connector.id] = requests
+    scene.fail(connector, "upstream_rejected", refused, status)
+    return scene.lines()
+
+
+class TestThresholds:
+    """Each cut-off the project's alert settings set moves its line's edge, the share compared exactly."""
+
+    @pytest.mark.parametrize(
+        ("status", "warning", "problem"),
+        [
+            (429, "vendor_rate_limited_warning_percent", "vendor_rate_limited_problem_percent"),
+            (403, "vendor_forbidden_warning_percent", "vendor_forbidden_problem_percent"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("refused", "severity"),
+        [(99, None), (100, Severity.WARNING), (599, Severity.WARNING), (600, Severity.PROBLEM)],
+    )
+    def test_the_429_and_403_pairs(
+        self, status: int, warning: str, problem: str, refused: int, severity: Severity | None
+    ) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(**{warning: 10, problem: 60})
+
+        assert [line.severity for line in _vendor(scene, status, refused)] == ([severity] if severity else [])
+
+    @pytest.mark.parametrize(("refused", "shown"), [(39, False), (40, True)])
+    def test_the_login_problem(self, refused: int, shown: bool) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(vendor_login_problem_percent=40)
+
+        assert bool(_vendor(scene, 407, refused, 100)) is shown
+
+    @pytest.mark.parametrize(
+        ("status", "field"), [(502, "vendor_cannot_serve_warning_percent"), (418, "vendor_other_warning_percent")]
+    )
+    @pytest.mark.parametrize(("refused", "shown"), [(99, False), (100, True)])
+    def test_cannot_serve_and_other_refusals(self, status: int, field: str, refused: int, shown: bool) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(**{field: 10})
+
+        assert bool(_vendor(scene, status, refused)) is shown
+
+    @pytest.mark.parametrize(("refused", "shown"), [(19, False), (20, True)])
+    def test_the_vendor_minimum_is_its_own(self, refused: int, shown: bool) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(vendor_min=20, refusals_min=1)
+
+        assert bool(_vendor(scene, 407, refused, refused)) is shown
+
+    @pytest.mark.parametrize(
+        ("refused", "severity"),
+        [(99, None), (100, Severity.WARNING), (399, Severity.WARNING), (400, Severity.PROBLEM)],
+    )
+    def test_the_refusal_pair(self, refused: int, severity: Severity | None) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(refusals_warning_percent=10, refusals_problem_percent=40)
+        _serving(scene)
+        scene.project_requests = 1000 - refused
+        scene.fail(None, "no_proxy_available", refused)
+
+        assert [line.severity for line in scene.lines()] == ([severity] if severity else [])
+
+    @pytest.mark.parametrize(
+        ("kind", "field"), [("no_proxy_available", "refusals_min"), ("invalid_location", "invalid_location_min")]
+    )
+    @pytest.mark.parametrize(("refused", "shown"), [(29, False), (30, True)])
+    def test_the_refusal_minimums(self, kind: str, field: str, refused: int, shown: bool) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(**{field: 30})
+        _serving(scene)
+        scene.fail(None, kind, refused)
+
+        assert bool(scene.lines()) is shown
+
+    @pytest.mark.parametrize(
+        ("failed", "requests", "severity"),
+        [
+            pytest.param(99, 99, None, id="99 requests are too few"),
+            pytest.param(100, 100, Severity.PROBLEM, id="100 requests"),
+            pytest.param(499, 1000, None, id="49.9 percent"),
+            pytest.param(500, 1000, Severity.WARNING, id="50 percent"),
+            pytest.param(899, 1000, Severity.WARNING, id="89.9 percent"),
+            pytest.param(900, 1000, Severity.PROBLEM, id="90 percent"),
+        ],
+    )
+    def test_the_connector_failing_cut_offs(self, failed: int, requests: int, severity: Severity | None) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(
+            connector_failing_min_requests=100,
+            connector_failing_warning_percent=50,
+            connector_failing_problem_percent=90,
+        )
+        connector = _serving(scene)
+        scene.connector_requests[connector.id] = requests
+        scene.fail(connector, "upstream_timeout", failed)
+
+        assert [line.severity for line in scene.lines()] == ([severity] if severity else [])
+
+    @pytest.mark.parametrize(("errors", "shown"), [(2, False), (3, True)])
+    def test_the_errors_in_a_row(self, errors: int, shown: bool) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(connector_errors_min=3)
+        _serving(scene)
+        scene.connector("Oxylabs", "oxylabs", credential=OXYLABS, last_error="timeout", consecutive_errors=errors)
+
+        assert bool(scene.lines()) is shown
+
+    @pytest.mark.parametrize(("minutes", "shown"), [(59, False), (60, True)])
+    def test_the_minutes_a_delete_may_take(self, minutes: int, shown: bool) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(stuck_deleting_minutes=60)
+        _serving(scene)
+        scene.connector(
+            "AWS", "aws", enabled=False, pending_deletion=True, updated_at=scene.now - timedelta(minutes=minutes)
+        )
+
+        assert bool(scene.lines()) is shown
+
+    @pytest.mark.parametrize(
+        ("unhealthy", "healthy", "shown"),
+        [
+            pytest.param(4, 4, False, id="4 rows are too few"),
+            pytest.param(5, 5, True, id="half"),
+            pytest.param(5, 6, False, id="under half"),
+        ],
+    )
+    def test_the_unhealthy_share(self, unhealthy: int, healthy: int, shown: bool) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(unhealthy_share_percent=50, unhealthy_min=5)
+        connector = scene.connector("Mixed")
+        scene.proxies(connector, healthy)
+        scene.proxies(connector, unhealthy, ProxyStatus.UNHEALTHY)
+
+        assert bool(scene.lines(AttentionKind.POOL_UNHEALTHY_SHARE)) is shown
+
+    @pytest.mark.parametrize(("outside", "shown"), [(4, False), (5, True)])
+    def test_the_exits_outside_cut_offs(self, outside: int, shown: bool) -> None:
+        scene = Scene()
+        scene.thresholds = AlertSettings(exits_outside_percent=50, exits_outside_min=5)
+        connector = scene.connector("German", config={"countries": ["DE"]})
+        scene.proxies(connector, 5, metadata={"country": "DE", "vendor_country": "DE"})
+        scene.proxies(connector, outside, metadata={"country": "FR", "vendor_country": "DE"})
+
+        assert bool(scene.lines(AttentionKind.EXITS_OUTSIDE_COUNTRIES)) is shown
+
+    @pytest.mark.parametrize(("contradicted", "shown"), [(3, False), (4, True)])
+    def test_the_contradicted_cut_offs(self, contradicted: int, shown: bool) -> None:
+        scene = Scene(location_contradicted=ContradictedAction.REFUSE)
+        scene.thresholds = AlertSettings(exits_contradicted_percent=50, exits_contradicted_min=4)
+        connector = _serving(scene, "Vendor", n=0)
+        scene.proxies(connector, 4, metadata={META_LOCATION_VERDICT: "confirmed"})
+        scene.proxies(connector, contradicted, metadata={META_LOCATION_VERDICT: "contradicted"})
+
+        assert bool(scene.lines(AttentionKind.EXITS_CONTRADICTED)) is shown
+
+
+class TestSiteBlockedThreshold:
+    @pytest.mark.parametrize(("factor", "shown"), [(0.25, False), (0.2, True)])
+    def test_a_share_other_than_half_is_named(self, factor: float, shown: bool) -> None:
+        scene = TestReputation()._scene(dyn_factors={"": (factor, 30.0)}, avoided={"192.0.2.1", "192.0.2.2"})
+        scene.thresholds = AlertSettings(site_blocked_percent=80)
+
+        found = scene.lines()
+
+        assert [line.text for line in found] == (
+            [" is blocking at least 80% of the requests on every connector."] if shown else []
+        )
+
+
+# --- Covered lines ------------------------------------------------------------------------------
+
+
+class TestCovered:
+    def test_no_routable_proxy_covers_the_lines_it_explains(self) -> None:
+        scene = Scene()
+        connector = scene.connector("Static")
+        scene.proxies(connector, 3, ProxyStatus.UNHEALTHY)
+        scene.fail(None, "no_proxy_available", 500)
+
+        assert [line.key for line in scene.lines()] == ["pool_no_routable"]
+        assert scene.hidden() == {
+            f"connector_no_healthy_proxy:{connector.id}": "pool_no_routable",
+            "refusals:no_proxy_available": "pool_no_routable",
+        }
+
+    def test_the_fold_covers_past_three_connectors_and_uncovers_back_at_three(self) -> None:
+        scene = Scene()
+        _serving(scene, n=40)
+        dead = [scene.connector(name) for name in ("Alpha", "Bravo", "Charlie", "Delta")]
+        for connector in dead:
+            scene.proxies(connector, 1, ProxyStatus.UNHEALTHY)
+        assert set(scene.hidden()) == {f"connector_no_healthy_proxy:{connector.id}" for connector in dead}
+
+        scene.feed.proxies = {key: proxy for key, proxy in scene.feed.proxies.items() if proxy.connector_id != dead[-1].id}
+        assert scene.hidden() == {}
+        assert [line.subject for line in scene.lines()] == ["Alpha", "Bravo", "Charlie"]
+
+
+# --- Success rate -------------------------------------------------------------------------------
+
+
+class TestSuccessRate:
+    def _scene(self, requests: int, successes: int, **thresholds: Any) -> Scene:
+        scene = Scene()
+        scene.thresholds = AlertSettings(**thresholds)
+        _serving(scene)
+        scene.project_requests = requests
+        scene.successes = successes
+        return scene
+
+    @pytest.mark.parametrize(
+        ("successes", "severity"),
+        [
+            pytest.param(800, None, id="80 percent"),
+            pytest.param(799, Severity.WARNING, id="79.9 percent"),
+            pytest.param(500, Severity.WARNING, id="50 percent"),
+            pytest.param(499, Severity.PROBLEM, id="49.9 percent"),
+        ],
+    )
+    def test_the_warning_and_the_problem(self, successes: int, severity: Severity | None) -> None:
+        found = self._scene(1000, successes).lines()
+
+        assert [line.severity for line in found] == ([severity] if severity else [])
+        if severity:
+            line = found[0]
+            assert (line.key, line.kind) == ("success_rate", AttentionKind.SUCCESS_RATE)
+            assert (line.lead, line.text) == ("Only ", " succeeded in the last 15 minutes.")
+            assert line.detail == (
+                f"{successes} of 1000 requests succeeded. Below 80% is a warning, below 50% a problem."
+            )
+            assert (line.when, line.link, line.action) == (None, "failures", "Failures")
+
+    def test_the_rate_is_rounded_down_so_it_never_reads_as_the_cut_off(self) -> None:
+        line = _one(self._scene(1000, 799).lines())
+
+        assert line.subject == "79% of requests"
+
+    @pytest.mark.parametrize(("requests", "shown"), [(99, False), (100, True)])
+    def test_it_needs_the_minimum_of_requests(self, requests: int, shown: bool) -> None:
+        assert bool(self._scene(requests, 0).lines()) is shown
+        assert bool(self._scene(requests, 0, success_min_requests=requests + 1).lines()) is False
+
+    def test_problem_at_zero_is_never_a_problem(self) -> None:
+        line = _one(self._scene(1000, 0, success_problem_below=0).lines())
+
+        assert line.severity == Severity.WARNING
+        assert line.detail == "0 of 1000 requests succeeded. Below 80% is a warning."
+
+    def test_it_can_be_turned_off(self) -> None:
+        assert self._scene(1000, 0, success_rate=False).lines() == []
+
+    def test_a_window_whose_newest_row_is_stale_is_no_line(self) -> None:
+        scene = self._scene(1000, 0)
+        scene.requests_at = scene.now - timedelta(minutes=5, seconds=1)
+
+        assert scene.lines() == []
+
+    def test_connectors_off_and_no_routable_cover_it(self) -> None:
+        scene = Scene()
+        scene.connector("Off", enabled=False)
+        scene.project_requests, scene.successes = 1000, 0
+        assert [line.key for line in scene.lines()] == ["connectors_off"]
+        assert scene.hidden() == {"success_rate": "connectors_off"}
+
+        scene = Scene()
+        scene.proxies(scene.connector("Static"), 3, ProxyStatus.UNHEALTHY)
+        scene.project_requests, scene.successes = 1000, 0
+        assert scene.hidden()["success_rate"] == "pool_no_routable"
+
+        scene = Scene()
+        blocked = scene.connector("Static")
+        scene.proxies(blocked, 3)
+        scene.block(blocked)
+        scene.project_requests, scene.successes = 1000, 0
+        assert [line.subject for line in scene.lines()] == ["Every connector"]
+        assert scene.hidden()["success_rate"] == "pool_no_routable"
+
+    def test_it_shows_beside_the_lines_that_name_a_cause_after_the_refusals(self) -> None:
+        scene = self._scene(1000, 100)
+        rejected = _serving(scene, "Rejected")
+        scene.connector_requests[rejected.id] = 100
+        scene.fail(rejected, "upstream_rejected", 30, 407)
+        failing = _serving(scene, "Failing")
+        scene.connector_requests[failing.id] = 100
+        scene.fail(failing, "upstream_timeout", 90)
+        scene.fail(None, "no_proxy_available", 400)
+
+        assert [line.kind for line in scene.lines()] == [
+            AttentionKind.VENDOR_LOGIN,
+            AttentionKind.CONNECTOR_FAILING,
+            AttentionKind.REFUSALS,
+            AttentionKind.SUCCESS_RATE,
         ]
+        assert scene.hidden() == {}

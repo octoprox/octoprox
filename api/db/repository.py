@@ -69,6 +69,7 @@ from api.db.models import (
 )
 from api.db.redis import PROJECT_WINDOWS, PROXY_WINDOWS, TUNNEL_PEER_WINDOWS, TotalledWindows
 from api.geo.models import META_LOCATION_CHECKED_AT, ConflictRule, ContradictedAction, UnknownAction
+from api.models.alerts import AlertSettings
 from api.models.connector import Connector
 from api.models.credential import Credential
 from api.models.project import ExitReputationMode, MitmBrowser, MitmEngine, MitmMode, Project
@@ -76,6 +77,9 @@ from api.models.provider import ProviderRecord
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.models.user import User, UserKind, UserRole
 from api.providers.sdk.strategies import META_DYNAMIC_SESSIONS
+
+# The proxy rows a streamed read builds between awaits (ProxyRepository.streamed): about 15 ms of the event loop each.
+STREAM_PIECE = 1000
 
 
 @dataclass
@@ -112,6 +116,15 @@ class ProxyPlacement:
 
 
 @dataclass(frozen=True)
+class RequestTally:
+    """A project's flushed requests in a window, those that succeeded, and its newest row's time (None without one)."""
+
+    requests: int = 0
+    successes: int = 0
+    last_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class FailureWindowRow:
     """A project's failures of one kind and vendor status on one connector (None: before a proxy) in a window."""
 
@@ -124,21 +137,23 @@ class FailureWindowRow:
     last_at: datetime
 
 
-# Drops the until-clear mutes (no ``until``) among the keys, a guarded update: a row holding none is not written, and a
-# timed mute set on one of the keys meanwhile stays. A text statement, so the column's onupdate leaves updated_at alone.
-_CLEAR_ATTENTION_MUTES = text(
-    "UPDATE projects "
-    "SET attention_mutes = ("
-    "SELECT coalesce(jsonb_object_agg(e.key, e.value), '{}'::jsonb) "
-    "FROM jsonb_each(attention_mutes) AS e "
-    "WHERE NOT (e.key = ANY(:keys) AND e.value->>'until' IS NULL)"
-    ") "
-    "WHERE id = :id "
-    "AND EXISTS ("
-    "SELECT 1 FROM jsonb_each(attention_mutes) AS e "
-    "WHERE e.key = ANY(:keys) AND e.value->>'until' IS NULL"
-    ")"
-).bindparams(bindparam("keys", type_=ARRAY(Text)), bindparam("id", type_=String()))
+# Ends the until-clear mutes (no ``until``) of the projects ``:ids`` whose alert is not open and has not resolved within
+# the reopen window: a flapping line comes back still muted. A mute set at or after ``:now`` (the run's data time) is
+# never ended by that run. A guarded update, so a row with none to end is not written; a text statement, so the
+# column's onupdate leaves updated_at alone.
+_END_CLEARED_MUTES = text("""
+UPDATE projects p
+SET attention_mutes = (
+  SELECT coalesce(jsonb_object_agg(e.key, e.value), '{}'::jsonb) FROM jsonb_each(p.attention_mutes) e
+  WHERE NOT (e.value->>'until' IS NULL AND (e.value->>'at')::timestamp < CAST(:now AS timestamp)
+             AND NOT EXISTS (SELECT 1 FROM alerts a WHERE a.project_id = p.id AND a.key = e.key
+                             AND (a.resolved_at IS NULL OR a.resolved_at >= CAST(:reopen_since AS timestamp)))))
+WHERE p.id = ANY(CAST(:ids AS text[])) AND EXISTS (
+  SELECT 1 FROM jsonb_each(p.attention_mutes) e
+  WHERE e.value->>'until' IS NULL AND (e.value->>'at')::timestamp < CAST(:now AS timestamp)
+    AND NOT EXISTS (SELECT 1 FROM alerts a WHERE a.project_id = p.id AND a.key = e.key
+                    AND (a.resolved_at IS NULL OR a.resolved_at >= CAST(:reopen_since AS timestamp))))
+""")
 
 
 class ProjectRepository:
@@ -342,12 +357,44 @@ class ProjectRepository:
         )
         return bool(result.rowcount)  # type: ignore[attr-defined]
 
-    async def clear_attention_mutes(self, project_id: str, keys: Collection[str]) -> bool:
-        """Remove the until-clear mutes among ``keys``; writes nothing when none is stored, so any number of readers may."""
-        if not keys:
-            return False
+    async def end_cleared_mutes(self, project_ids: Collection[str], now: datetime, *, reopen: timedelta) -> int:
+        """End the until-clear mutes of ``project_ids`` whose alert is not open and has stayed resolved for ``reopen``,
+        as the alerts stored now say; one statement, which writes no project with none to end. The projects written."""
+        if not project_ids:
+            return 0
         result = await self._session.execute(
-            _CLEAR_ATTENTION_MUTES, {"id": project_id, "keys": sorted(set(keys))}
+            _END_CLEARED_MUTES, {"ids": sorted(set(project_ids)), "now": now, "reopen_since": now - reopen}
+        )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    # Alert settings: their own column, never in the domain project, written without stamping updated_at.
+
+    async def alert_settings(self, project_ids: Iterable[str]) -> dict[str, AlertSettings]:
+        """Each project's alert settings in force by project id, each value it cannot read at its default; one
+        statement."""
+        result = await self._session.execute(
+            select(ProjectModel.id, ProjectModel.alert_settings).where(
+                any_of(ProjectModel.id, sorted(set(project_ids)))
+            )
+        )
+        return {project_id: AlertSettings.read(stored or {}) for project_id, stored in result.all()}
+
+    async def lock_alert_settings(self, project_id: str) -> AlertSettings | None:
+        """The project's alert settings in force, its row held until the transaction ends; None when it is gone."""
+        result = await self._session.execute(
+            select(ProjectModel.alert_settings).where(ProjectModel.id == project_id).with_for_update()
+        )
+        row = result.one_or_none()
+        return None if row is None else AlertSettings.read(row[0] or {})
+
+    async def write_alert_settings(self, project_id: str, settings: AlertSettings) -> bool:
+        """Store the project's alert settings as the values that differ from the defaults, ``updated_at`` as it was:
+        the routing feed carries none of them."""
+        result = await self._session.execute(
+            update(ProjectModel)
+            .where(ProjectModel.id == project_id)
+            .values(alert_settings=settings.stored(), updated_at=ProjectModel.updated_at)
+            .execution_options(synchronize_session=False)
         )
         return bool(result.rowcount)  # type: ignore[attr-defined]
 
@@ -773,6 +820,20 @@ class ProxyRepository:
         )
         models = result.scalars().all()
         return [self._to_domain(m) for m in models]
+
+    async def streamed(self, project_id: str | None = None) -> list[Proxy]:
+        """Every proxy, or every proxy of the project's connectors, in creation order: one statement read in pieces of
+        ``STREAM_PIECE`` rows, so building tens of thousands of rows leaves the event loop free between pieces."""
+        statement = self._select().order_by(ProxyModel.created_at, ProxyModel.id)
+        if project_id is not None:
+            statement = statement.join(ConnectorModel, ProxyModel.connector_id == ConnectorModel.id).where(
+                ConnectorModel.project_id == project_id
+            )
+        result = await self._session.stream(statement.execution_options(yield_per=STREAM_PIECE))
+        proxies: list[Proxy] = []
+        async for piece in result.scalars().partitions(STREAM_PIECE):
+            proxies.extend(self._to_domain(model) for model in piece)
+        return proxies
 
     async def get_by_id(self, proxy_id: str) -> Proxy | None:
         """Get proxy by ID."""
@@ -2109,17 +2170,23 @@ class MetricsRepository:
             for project_id, connector_id, kind, upstream_status, count, last_at in result.all()
         ]
 
-    async def project_requests_since(self, project_ids: Collection[str], since: datetime) -> dict[str, int]:
-        """Each project's flushed requests since ``since``; a project with none is absent. One statement."""
+    async def project_window(self, project_ids: Collection[str], since: datetime) -> dict[str, RequestTally]:
+        """Each project's flushed requests and successes since ``since``, with its newest row's time; a project with
+        none is absent. One statement."""
         if not project_ids:
             return {}
         model = ProjectMetricsModel
         result = await self._session.execute(
-            select(model.project_id, func.sum(model.request_count))
+            select(
+                model.project_id, func.sum(model.request_count), func.sum(model.success_count), func.max(model.timestamp)
+            )
             .where(any_of(model.project_id, sorted(set(project_ids))), model.granularity == 60, model.timestamp >= since)
             .group_by(model.project_id)
         )
-        return {project_id: int(count or 0) for project_id, count in result.all()}
+        return {
+            project_id: RequestTally(requests=int(requests or 0), successes=int(successes or 0), last_at=last_at)
+            for project_id, requests, successes, last_at in result.all()
+        }
 
     async def connector_requests_since(self, connector_ids: Collection[str], since: datetime) -> dict[str, int]:
         """Each connector's flushed requests since ``since``; a connector with none is absent. One statement."""

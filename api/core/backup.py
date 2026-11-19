@@ -21,7 +21,19 @@ import structlog
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from sqlalchemy import Date, DateTime, LargeBinary, and_, delete, func, inspect, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Date,
+    DateTime,
+    LargeBinary,
+    and_,
+    delete,
+    func,
+    inspect,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import TypeEngine
@@ -30,6 +42,7 @@ from api.core import utc_now
 from api.db.base import Base
 from api.db.migrations import current_revision
 from api.db.models import (
+    AlertModel,
     ApiTokenModel,
     AuditLogModel,
     AuthIdentityModel,
@@ -126,6 +139,8 @@ class _EntitySpec:
     # preserving it would clash with the table's sequence on later inserts, so
     # we drop it on import and let the sequence assign fresh ids.
     preserve_id: bool = True
+    # The rows an export carries; every row when None.
+    only: ColumnElement[bool] | None = None
 
     def travels(self, include_metrics: bool, include_database_files: bool) -> bool:
         """Whether an export made with these options carries the entity's rows."""
@@ -221,6 +236,9 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     _EntitySpec("connector_metrics", ConnectorMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("host_metrics", HostMetricsModel, is_metric=True, preserve_id=False),
     _EntitySpec("failure_metrics", FailureMetricsModel, is_metric=True, preserve_id=False),
+    # A project's alerts are history: they ride the metrics flag, and the wipe takes them with their projects. Their
+    # ids are uuids that clash with nothing once wiped; an open one is refreshed or resolved by the next check.
+    _EntitySpec("alerts", AlertModel, is_metric=True, only=AlertModel.project_id.is_not(None)),
     _EntitySpec("provider_descriptors", ProviderDescriptorModel),
     # IP attribution. Settings and database rows are configuration and always
     # travel; the files are opt-in; the history rides the metrics flag. The
@@ -249,6 +267,15 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     # gains the backup's entries.
     _KeptEntitySpec("system_settings", SystemSettingsModel, filled=("license_key",)),
     _KeptEntitySpec("audit_log", AuditLogModel),
+    # The install's alert history, like its audit trail: it rides the metrics flag and an import adds it to this
+    # install's. Resolved ones only: an open one describes the old install's processes, and could meet this install's
+    # open alert of the same key.
+    _KeptEntitySpec(
+        "install_alerts",
+        AlertModel,
+        is_metric=True,
+        only=and_(AlertModel.project_id.is_(None), AlertModel.resolved_at.is_not(None)),
+    ),
 )
 
 
@@ -492,7 +519,8 @@ class BackupRepository:
         for spec in _ENTITY_SPECS:
             rows: list[dict[str, Any]] = []
             if spec.travels(include_metrics, include_database_files):
-                instances = (await self._session.execute(select(spec.model))).scalars().all()
+                query = select(spec.model) if spec.only is None else select(spec.model).where(spec.only)
+                instances = (await self._session.execute(query)).scalars().all()
                 rows = [spec.dump(instance) for instance in instances]
             payload[spec.key] = rows
         return payload

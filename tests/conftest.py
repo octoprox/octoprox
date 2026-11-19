@@ -20,11 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.redis import RedisContainer
 
+from api.attention.requests import AlertChecks
 from api.core.config import Settings
 from api.core.roles import JobKind, Role
 from api.db.migrations import MIGRATIONS_DIR, run_migrations
 from api.db.redis import JOB_STREAM_KEY, RedisClient
 from api.db.streams import ChangeLog
+from api.jobs.queue import JobQueue
 
 if TYPE_CHECKING:
     from api.roles.api import ApiRuntime
@@ -226,6 +228,12 @@ async def redis_client(test_redis_url: str) -> AsyncGenerator[RedisClient, None]
     # Clean up all keys after each test
     await client.client.flushdb()
     await client.close()
+
+
+@pytest.fixture
+def alert_checks(redis_client: RedisClient) -> AlertChecks:
+    """What services and jobs ask for alert checks with: a run-now entry on the test Redis's alerts job stream."""
+    return AlertChecks(redis_client, JobQueue(redis_client))
 
 
 async def queued_job_keys(redis_client: RedisClient, kind: JobKind) -> list[str]:

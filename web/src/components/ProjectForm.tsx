@@ -1,23 +1,23 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useRef, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Eye, EyeOff, Info, AlertTriangle, Shield, ShieldCheck, MapPin } from 'lucide-react'
-import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchGeoDatabases, fetchGeoSettings, updateProject } from '../api/client'
-import type { ConflictRule, ContradictedAction, ExitReputationMode, UnknownAction } from '../api/client'
+import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchAlertSettings, fetchGeoDatabases, fetchGeoSettings } from '../api/client'
+import type { AlertSettingsOverrides, ConflictRule, ContradictedAction, ExitReputationMode, UnknownAction } from '../api/client'
+import { AlertSettingsForm, draftErrors, draftOf, overridesOf, sameOverrides, type AlertDraft } from './AlertSettingsForm'
 import { locationExamples, scenarioSteps, ROW_KIND_FACTS } from './locationExamples'
 import type { RowKind, Ask } from './locationExamples'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { AdminLink } from './AdminLink'
 import { EntityHistory } from './audit/EntityHistory'
-import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, Segmented, InfoTip } from './ui'
+import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, Segmented, InfoTip, QueryContent } from './ui'
 import { isInUse } from '../utils/geo'
 import { DOCS_URL } from '../utils/docs'
 import { plural } from '../utils/format'
 import { useToast } from '../contexts/ToastContext'
-import { useProject } from '../contexts/ProjectContext'
-import { invalidateAttention } from '../hooks/useProjectAttention'
+import { useProjectSettingsSave } from '../hooks/useProjectSettingsSave'
 
 const engineOptions: RichSelectOption[] = [
   { value: 'curl_cffi', label: 'curl_cffi', description: 'C/libcurl - mature, Chrome-grade fingerprinting' },
@@ -63,7 +63,7 @@ const mitmModeInfo: Record<string, { color: string; icon: typeof Info; text: str
 }
 
 /** A tab a link elsewhere can open the project settings on. */
-export type ProjectSettingsTab = 'general' | 'tls' | 'location' | 'reputation'
+export type ProjectSettingsTab = 'general' | 'tls' | 'location' | 'reputation' | 'alerts'
 type SettingsTab = ProjectSettingsTab | 'history'
 
 const contradictedOptions: RichSelectOption[] = [
@@ -104,9 +104,19 @@ const minutesText = (minutes: number): string =>
 const boundedInt = (text: string, min: number, max: number): number | undefined =>
   text === '' ? undefined : Math.min(max, Math.max(min, parseInt(text) || min))
 
+/** Whether a field differs from what was loaded; an empty override and none are the same. */
+const projectChanged = (loaded: ProjectCreate, now: ProjectCreate): boolean =>
+  (Object.keys(now) as (keyof ProjectCreate)[]).some((key) => (now[key] ?? '') !== (loaded[key] ?? ''))
+
 interface ProjectFormProps {
   project?: ProjectSummary
-  onSave: (data: ProjectCreate | ProjectUpdate) => void
+  /**
+   * The project's fields, null when an edit changed none of them, and the alert overrides, null when they are as
+   * stored (always null for a new project, which starts on the defaults).
+   */
+  onSave: (data: ProjectCreate | ProjectUpdate | null, alertOverrides: AlertSettingsOverrides | null) => void
+  /** Told whether the draft can be saved: the Alert settings tab checks its values as they are typed. */
+  onValidityChange?: (valid: boolean) => void
   error?: string
   /** id used by the footer submit button living outside the form */
   formId: string
@@ -120,14 +130,29 @@ interface ProjectFormProps {
  * Project settings form body. Rendered inside the docked Inspector opened from
  * the project switcher and on the project selection page (create and edit).
  */
-export function ProjectForm({ project, onSave, error, formId, onHistoryChange, tabRequest }: ProjectFormProps) {
+export function ProjectForm({ project, onSave, onValidityChange, error, formId, onHistoryChange, tabRequest }: ProjectFormProps) {
   const isEdit = !!project
   const toast = useToast()
   // The install default the Location tab inherits, for the worked example; the form works without it.
   const { data: geo } = useQuery({ queryKey: ['geo-settings'], queryFn: fetchGeoSettings, staleTime: 60_000, retry: false })
   // Which databases are open where requests are judged (the gateways), for the warnings about refusing unknown exits.
   const { data: databases } = useQuery({ queryKey: ['geo-databases'], queryFn: fetchGeoDatabases, staleTime: 60_000, retry: false })
-  const [formData, setFormData] = useState<ProjectCreate>({
+  // The thresholds an edit's Alert settings tab shows, read once the tab is, and what was typed there; null until
+  // something is.
+  const [activeTab, setActiveTab] = useState<SettingsTab>(tabRequest?.tab ?? 'general')
+  const alertQuery = useQuery({
+    queryKey: ['alert-settings', project?.id],
+    queryFn: () => fetchAlertSettings(project!.id),
+    enabled: isEdit && activeTab === 'alerts',
+  })
+  const [alertDraft, setAlertDraft] = useState<AlertDraft | null>(null)
+  const alertResponse = alertQuery.data
+  const shownDraft = alertDraft ?? (alertResponse ? draftOf(alertResponse) : null)
+  const alertErrors = shownDraft && alertResponse ? draftErrors(shownDraft, alertResponse.defaults) : {}
+  const valid = Object.keys(alertErrors).length === 0
+  useEffect(() => { onValidityChange?.(valid) }, [valid])
+  // What the edit started from, so a save sends the project's fields only when one of them changed.
+  const [loaded] = useState<ProjectCreate>(() => ({
     name: project?.name ?? '',
     description: project?.description ?? '',
     username: project?.username ?? '',
@@ -152,15 +177,18 @@ export function ProjectForm({ project, onSave, error, formId, onHistoryChange, t
     exit_reputation_connector_half_life_requests: project?.exit_reputation_connector_half_life_requests ?? 100,
     exit_reputation_bad_reports: project?.exit_reputation_bad_reports ?? 1,
     exit_reputation_bad_share: project?.exit_reputation_bad_share ?? 50,
-  })
+  }))
+  const [formData, setFormData] = useState<ProjectCreate>(loaded)
   const [showPassword, setShowPassword] = useState(false)
-  const [activeTab, setActiveTab] = useState<SettingsTab>(tabRequest?.tab ?? 'general')
   const changeTab = (tab: SettingsTab) => {
     setActiveTab(tab)
     onHistoryChange?.(tab === 'history')
   }
   // A link asking again while the form is open switches it there, keeping what was typed.
   useEffect(() => { if (tabRequest) changeTab(tabRequest.tab) }, [tabRequest])
+  // A refused save says why at the top of the form: bring it into view from however far down the form was scrolled.
+  const errorRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { if (error) errorRef.current?.scrollIntoView({ block: 'nearest' }) }, [error])
   // The worked example: what the operator has and what a client asks for.
   const [exampleKind, setExampleKind] = useState<RowKind>('pooled')
   const [exampleAsk, setExampleAsk] = useState<Ask>('country')
@@ -191,20 +219,33 @@ export function ProjectForm({ project, onSave, error, formId, onHistoryChange, t
   const reputationMode: ExitReputationMode = formData.exit_reputation ?? 'off'
   const reputationAvoids = reputationMode === 'avoid'
 
+  const submit = () => {
+    if (!valid) return
+    const data = !isEdit || projectChanged(loaded, formData) ? formData : null
+    // Thresholds go only when the draft keeps other overrides than the stored ones.
+    let overrides: AlertSettingsOverrides | null = null
+    if (alertDraft && alertResponse) {
+      const typed = overridesOf(alertDraft, alertResponse.defaults)
+      if (!sameOverrides(typed, overridesOf(draftOf(alertResponse), alertResponse.defaults))) overrides = typed
+    }
+    onSave(data, overrides)
+  }
+
   return (
-    <form id={formId} onSubmit={(e) => { e.preventDefault(); onSave(formData) }} className="space-y-4">
+    <form id={formId} onSubmit={(e) => { e.preventDefault(); submit() }} className="space-y-4">
       <Tabs<SettingsTab>
         tabs={[
           { id: 'general', label: 'General' }, { id: 'tls', label: 'TLS' }, { id: 'location', label: 'Location' },
           { id: 'reputation', label: 'Exit reputation' },
-          ...(isEdit ? [{ id: 'history' as const, label: 'History' }] : []),
+          ...(isEdit ? [{ id: 'alerts' as const, label: 'Alert settings' }, { id: 'history' as const, label: 'History' }] : []),
         ]}
         active={activeTab}
         onChange={changeTab}
+        reveal={tabRequest}
         className="pointer-coarse:*:min-h-11"
       />
 
-      {error && activeTab !== 'history' && <Alert>{error}</Alert>}
+      {error && activeTab !== 'history' && <Alert ref={errorRef}>{error}</Alert>}
 
       {activeTab === 'general' && (
         <div className="space-y-4">
@@ -627,6 +668,20 @@ export function ProjectForm({ project, onSave, error, formId, onHistoryChange, t
         </div>
       )}
 
+      {activeTab === 'alerts' && isEdit && (
+        <QueryContent query={alertQuery} what="the alert settings">
+          {(response) => (
+            <AlertSettingsForm
+              response={response}
+              draft={shownDraft ?? draftOf(response)}
+              errors={alertErrors}
+              onChange={setAlertDraft}
+              metricsRetentionDays={formData.metrics_retention_days ?? 90}
+            />
+          )}
+        </QueryContent>
+      )}
+
       {activeTab === 'history' && project && <EntityHistory entityType="project" entityId={project.id} />}
     </form>
   )
@@ -634,22 +689,10 @@ export function ProjectForm({ project, onSave, error, formId, onHistoryChange, t
 
 /** Settings of the open project in a docked panel; the shell shows it beside any project page. */
 export function ProjectPanel({ project, onClose, tabRequest }: { project: ProjectSummary; onClose: () => void; tabRequest?: { tab: ProjectSettingsTab } | null }) {
-  const queryClient = useQueryClient()
-  const { refreshProject } = useProject()
-  const toast = useToast()
   // Which project's History is showing: the form starts on General again for another project.
   const [historyOf, setHistoryOf] = useState<string | null>(null)
-  const save = useMutation({
-    mutationFn: (data: ProjectUpdate) => updateProject(project.id, data),
-    onSuccess: async () => {
-      queryClient.invalidateQueries({ queryKey: ['metrics', project.id] })
-      queryClient.invalidateQueries({ queryKey: ['projects'] })
-      invalidateAttention(queryClient, project.id)
-      await refreshProject()
-      onClose()
-      toast.show('Project settings saved')
-    },
-  })
+  const [valid, setValid] = useState(true)
+  const save = useProjectSettingsSave(project, { onSaved: onClose })
   return (
     <Inspector
       title="Project settings"
@@ -659,11 +702,20 @@ export function ProjectPanel({ project, onClose, tabRequest }: { project: Projec
         <>
           <span className="flex-1" />
           <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-          <Button type="submit" form="project-form" size="sm" disabled={save.isPending}>{save.isPending ? 'Saving…' : 'Save changes'}</Button>
+          <Button type="submit" form="project-form" size="sm" disabled={save.isPending || !valid}>{save.isPending ? 'Saving…' : 'Save changes'}</Button>
         </>
       )}
     >
-      <ProjectForm key={project.id} project={project} onSave={(data) => save.mutate(data)} error={save.error?.message} formId="project-form" onHistoryChange={(showing) => setHistoryOf(showing ? project.id : null)} tabRequest={tabRequest} />
+      <ProjectForm
+        key={project.id}
+        project={project}
+        onSave={(data, alerts) => save.mutate({ data, alerts })}
+        onValidityChange={setValid}
+        error={save.error?.message}
+        formId="project-form"
+        onHistoryChange={(showing) => setHistoryOf(showing ? project.id : null)}
+        tabRequest={tabRequest}
+      />
     </Inspector>
   )
 }

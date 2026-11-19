@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { type HTMLAttributes } from 'react'
+import { type ComponentProps } from 'react'
 import { cn } from '../../utils/cn'
 
 const alertVariants = {
@@ -11,7 +11,7 @@ const alertVariants = {
   success: 'bg-success-soft border border-success/30 text-success',
 } as const
 
-interface AlertProps extends HTMLAttributes<HTMLDivElement> {
+interface AlertProps extends ComponentProps<'div'> {
   variant?: keyof typeof alertVariants
 }
 

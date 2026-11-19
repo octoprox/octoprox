@@ -3,23 +3,24 @@
 
 import { type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { BellOff, CheckCircle2, ChevronRight, CircleOff } from 'lucide-react'
-import type { AttentionLine, MuteDuration } from '../../api/client'
+import { BellOff, CheckCircle2, ChevronRight, CircleOff, RefreshCw } from 'lucide-react'
+import type { AttentionLine, MuteDuration, ProjectAttention } from '../../api/client'
 import { useAuth } from '../../contexts/AuthContext'
 import { useAttentionMutes, useProjectAttention } from '../../hooks/useProjectAttention'
 import { cn } from '../../utils/cn'
-import { plural } from '../../utils/format'
+import { formatClock, plural } from '../../utils/format'
 import { Button, Card, Legend, LogoLoader } from '../ui'
 import { MuteMenu } from './MuteMenu'
 import { SeverityMark } from './SeverityMark'
-import { lineSentence, whenText } from './lineText'
+import { lineSentence, sinceText, whenText } from './lineText'
 
 /** The rows the card holds; the rest are a Show all away, in the side panel. */
 const ROWS = 2
 
 /**
- * The top of a project's Overview: what needs attention now, two rows at most. Its height never changes on its own
- * (only with the page's width and pointer), so a refresh, a fix or a failed check never moves the page under the reader.
+ * The top of a project's Overview: what needs attention now, two rows at most, as the workers' last check found it.
+ * Its height never changes on its own (only with the page's width and pointer), so a refresh, a fix, a re-check or a
+ * failed read never moves the page under the reader.
  */
 export function AttentionCard({ projectId, onShowAll }: { projectId: string; onShowAll: () => void }) {
   const { data, isPending, isError, isFetching, refetch } = useProjectAttention(projectId)
@@ -32,6 +33,8 @@ export function AttentionCard({ projectId, onShowAll }: { projectId: string; onS
   const muted = data?.muted ?? 0
   const unmuted = problems + warnings
   const more = unmuted > ROWS || muted > 0
+  // A project the workers have not checked yet has nothing to say either way.
+  const unchecked = !!data && data.checked_at === null && data.lines.length === 0
 
   return (
     <Card className="overflow-hidden">
@@ -39,6 +42,7 @@ export function AttentionCard({ projectId, onShowAll }: { projectId: string; onS
         {/* A narrow card has no room for the words: the counts alone, as one button that opens the full list. */}
         <div className="h-10 pointer-coarse:h-11 px-4 flex items-center gap-2 @md:gap-3 border-b border-line whitespace-nowrap overflow-hidden">
           <h2 className="text-sm font-semibold text-fg">Needs attention</h2>
+          {data && <CheckState attention={data} />}
           {data && (
             <>
               <div className="hidden @md:flex flex-1 min-w-0 items-center gap-3 text-[12.5px] text-fg-muted tabular-nums">
@@ -60,7 +64,7 @@ export function AttentionCard({ projectId, onShowAll }: { projectId: string; onS
         </div>
 
         <div className="h-28 @xl:h-[68px] @xl:pointer-coarse:h-[88px]">
-          {isPending ? (
+          {isPending || unchecked ? (
             <State>
               <LogoLoader size="sm" label="Checking for problems" />
               <span aria-hidden>Checking for problems…</span>
@@ -70,6 +74,11 @@ export function AttentionCard({ projectId, onShowAll }: { projectId: string; onS
               <CircleOff className="w-4 h-4 flex-none text-fg-subtle" />
               <span className="flex-1 min-w-0">Could not check for problems right now.</span>
               <Button variant="ghost" size="sm" onClick={() => refetch()} disabled={isFetching} className="flex-none -mr-2 pointer-coarse:h-11">Try again</Button>
+            </State>
+          ) : shown.length === 0 && data?.stale ? (
+            <State>
+              <CircleOff className="w-4 h-4 flex-none text-fg-subtle" />
+              <span className="flex-1 min-w-0">Last checked for problems at {formatClock(data.checked_at)}.</span>
             </State>
           ) : shown.length === 0 ? (
             <State>
@@ -86,6 +95,30 @@ export function AttentionCard({ projectId, onShowAll }: { projectId: string; onS
         </div>
       </section>
     </Card>
+  )
+}
+
+/**
+ * Beside the title, in one 12px slot: a spinner while a check asked for after a change is waiting, else a mark when the
+ * last check is more than a few minutes old, with its time where the card has room. Left out on the narrowest phones,
+ * where the counts need the room.
+ */
+function CheckState({ attention }: { attention: ProjectAttention }) {
+  if (attention.pending) {
+    return (
+      <span className="flex-none hidden @2xs:inline-flex text-fg-subtle" title="Re-checking for problems after a change">
+        <RefreshCw className="w-3 h-3 animate-spin" aria-hidden />
+        <span className="sr-only">Re-checking</span>
+      </span>
+    )
+  }
+  if (!attention.stale) return null
+  const clock = formatClock(attention.checked_at)
+  return (
+    <span className="flex-none hidden @2xs:inline-flex items-center gap-1 text-xs text-fg-muted" title={`Octoprox last checked for problems at ${clock}, so this may be out of date.`}>
+      <CircleOff className="w-3 h-3" aria-hidden />
+      <span className="sr-only @lg:not-sr-only">checked {clock}</span>
+    </span>
   )
 }
 
@@ -107,7 +140,8 @@ function NarrowCounts({ problems, warnings, muted, onShowAll }: { problems: numb
     <button type="button" onClick={onShowAll} className={`${classes} -mr-1 px-1 hover:text-fg pointer-coarse:min-h-11`}>
       <span className="sr-only">Show all: </span>
       {counts}
-      <ChevronRight className="w-3.5 h-3.5 text-fg-subtle" />
+      {/* Two-digit counts do not leave it room on a 320 px phone; the counts stay the button. */}
+      <ChevronRight className="hidden @2xs:block w-3.5 h-3.5 text-fg-subtle" />
     </button>
   )
 }
@@ -120,7 +154,8 @@ function State({ children }: { children: ReactNode }) {
 /** One line: one row on a wide card, at most two lines of text on a narrow one, at a fixed height either way. */
 function AttentionRow({ projectId, line, onMute, muting }: { projectId: string; line: AttentionLine; onMute?: (duration: MuteDuration) => void; muting: boolean }) {
   const sentence = lineSentence(line)
-  const title = [line.when ? `${sentence} (${whenText(line.when)})` : sentence, line.detail].filter(Boolean).join('\n')
+  const since = sinceText(line)
+  const title = [`${sentence} (${line.when ? `${whenText(line.when)}, ${since}` : since})`, line.detail].filter(Boolean).join('\n')
   return (
     <li className="h-14 @xl:h-[34px] @xl:pointer-coarse:h-11 flex items-center">
       <Link to={`/projects/${projectId}/${line.link}`} title={title} className={cn('flex-1 min-w-0 h-full flex items-center gap-2 @xl:gap-2.5 pl-4 text-[12.5px] text-fg hover:bg-surface-raised transition-colors', onMute ? 'pr-2' : 'pr-4')}>
@@ -128,7 +163,8 @@ function AttentionRow({ projectId, line, onMute, muting }: { projectId: string; 
         <span className="flex-1 min-w-0 line-clamp-2 @xl:line-clamp-1 leading-[18px]">
           {line.lead}<span className="font-medium">{line.subject}</span>{line.text}
         </span>
-        {line.when && <span className="hidden @xl:inline flex-none text-fg-muted whitespace-nowrap">{whenText(line.when)}</span>}
+        {/* The line's own time where it has one, since when it has held otherwise. */}
+        <span className="hidden @xl:inline flex-none text-fg-muted whitespace-nowrap">{line.when ? whenText(line.when) : since}</span>
         <span className="hidden @xl:inline flex-none font-medium text-primary whitespace-nowrap">{line.action}</span>
         <ChevronRight className="@xl:hidden w-4 h-4 flex-none text-fg-subtle" aria-hidden />
         <span className="sr-only @xl:hidden">{line.action}</span>

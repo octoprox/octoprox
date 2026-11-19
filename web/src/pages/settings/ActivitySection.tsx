@@ -1,33 +1,31 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMemo, useState, type ReactNode } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Download, History, Lock } from 'lucide-react'
 import {
   exportActivity, fetchActivity, fetchAuditRetention, fetchProjects, updateAuditRetention,
-  type ActivityFilters, type AuditEntityType, type AuditEntry, type AuditRetention, type LicenseStatus,
+  type ActivityFilters, type AuditEntityType, type AuditEntry, type LicenseStatus,
 } from '../../api/client'
 import { AdminLink } from '../../components/AdminLink'
 import { AuditEntryView } from '../../components/audit/EntityHistory'
-import { HistoryButton } from '../../components/audit/HistoryButton'
 import { DataTable, type DataTableFeatures } from '../../components/DataTable'
 import { EnterpriseCard, type EnterpriseFeature } from '../../components/EnterpriseCard'
 import { UntilPicker } from '../../components/geo/UntilPicker'
 import { EmptyState, Page } from '../../components/layout/Page'
+import { RetentionCard } from '../../components/RetentionCard'
 import { useToast } from '../../contexts/ToastContext'
 import { activityReadable, isEnterprise, useEdition, useLicense } from '../../hooks/useEdition'
+import { useWidth } from '../../hooks/useWidth'
 import { ACTION_LABELS, ENTITY_LABELS, actionLabel, actionTone, entityLabel } from '../../utils/audit'
 import { cn } from '../../utils/cn'
 import { formatDateTime, relativeTime } from '../../utils/format'
 import {
-  Alert, Badge, Button, Card, CardHeader, CopyButton, Input, Inspector, InspectorSection, KeyValue, LogoLoader, QueryContent, Select,
+  Alert, Badge, Button, Card, CardHeader, CopyButton, Input, Inspector, InspectorSection, KeyValue, QueryContent, Select,
 } from '../../components/ui'
 import { LoadError, loadFailed } from '../../components/ui/LoadError'
-
-// The most days the api keeps entries for, short of forever (0).
-const MAX_RETENTION_DAYS = 36_500
 
 // Tailwind's @lg container width: narrower, the log leaves out the project and the address.
 const WIDE_MIN_PX = 512
@@ -103,7 +101,7 @@ function WithoutLog({ aside }: { aside: ReactNode }) {
         <Alert variant="info" className="text-sm">
           Every change is recorded with who made it, when and the fields it changed. Projects, connectors, credentials, proxies, devices, users and custom providers show theirs on the History tab of their inspector, and install-wide settings on the History button of their card.
         </Alert>
-        <RetentionCard />
+        <AuditRetentionCard />
       </div>
       {aside}
     </div>
@@ -125,78 +123,17 @@ function UnlicensedCard({ license }: { license: LicenseStatus }) {
 }
 
 /** How many days the audit log keeps its entries; the hourly compaction deletes older ones. */
-function RetentionCard() {
-  const queryClient = useQueryClient()
-  const toast = useToast()
-  const retentionQuery = useQuery({ queryKey: ['audit-retention'], queryFn: fetchAuditRetention })
-  const save = useMutation({
-    mutationFn: (days: number) => updateAuditRetention(days),
-    onSuccess: (saved) => {
-      queryClient.setQueryData(['audit-retention'], saved)
-      toast.show(saved.days === 0 ? 'Audit entries are kept forever' : `Audit entries are kept for ${saved.days.toLocaleString()} days`)
-    },
-    onError: (e: Error) => toast.show(e.message || 'Failed to save the retention', 'error'),
-  })
+function AuditRetentionCard() {
   return (
-    <Card className="p-4 @2xl:p-5">
-      <CardHeader title="Retention" action={<HistoryButton entityType="system_settings" entityId="1" />} />
-      <QueryContent query={retentionQuery} what="the retention" loader={<LogoLoader className="py-4" />}>
-        {/* Keyed by the stored value, so a save or another admin's starts the field afresh. */}
-        {(retention) => <RetentionForm key={retention.days} retention={retention} saving={save.isPending} onSave={(days) => save.mutate(days)} />}
-      </QueryContent>
-    </Card>
+    <RetentionCard
+      queryKey="audit-retention"
+      fetch={fetchAuditRetention}
+      update={updateAuditRetention}
+      label="Keep entries for"
+      inputId="audit-retention"
+      noun="Audit entries"
+    />
   )
-}
-
-function RetentionForm({ retention, saving, onSave }: { retention: AuditRetention; saving: boolean; onSave: (days: number) => void }) {
-  const [text, setText] = useState(String(retention.days))
-  const days = /^\d+$/.test(text.trim()) ? Number(text.trim()) : NaN
-  const valid = days >= 0 && days <= MAX_RETENTION_DAYS
-  return (
-    <form className="mt-1 space-y-1.5" onSubmit={(e) => { e.preventDefault(); if (valid) onSave(days) }}>
-      {/* The words stay together, and the field with its unit and Save, so a narrow card wraps between the two. */}
-      <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-sm text-fg">
-        <label htmlFor="audit-retention" className="whitespace-nowrap">Keep entries for</label>
-        <span className="inline-flex items-center gap-2">
-          <Input
-            id="audit-retention"
-            type="number"
-            inputMode="numeric"
-            min={0}
-            max={MAX_RETENTION_DAYS}
-            step={1}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            aria-invalid={!valid}
-            className={cn('w-24 px-3 py-1.5 text-base pointer-fine:text-[13px] pointer-coarse:h-11 tabular-nums', !valid && 'border-danger text-danger')}
-          />
-          days
-          <Button type="submit" size="sm" disabled={!valid || days === retention.days || saving} className="ml-1 pointer-coarse:h-11">
-            {saving ? 'Saving…' : 'Save'}
-          </Button>
-        </span>
-      </div>
-      <p className="text-[11px] text-fg-subtle">
-        {valid ? '0 keeps them forever; the hourly compaction deletes older ones.' : `A whole number of days, from 0 to ${MAX_RETENTION_DAYS.toLocaleString()}.`}
-      </p>
-    </form>
-  )
-}
-
-/** An element's width, kept current as it resizes; measured before the first paint. */
-function useWidth(): [RefObject<HTMLDivElement | null>, number] {
-  const ref = useRef<HTMLDivElement>(null)
-  const [width, setWidth] = useState(0)
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const read = () => setWidth(el.clientWidth)
-    read()
-    const observer = new ResizeObserver(read)
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [])
-  return [ref, width]
 }
 
 /**
@@ -277,7 +214,7 @@ function ActivityLog({ filters, onFiltersChange, selectedId, onSelect }: {
   const filtering = Object.values(filters).some((value) => value !== undefined)
   return (
     <>
-      <RetentionCard />
+      <AuditRetentionCard />
       <div ref={ref} className="flex flex-col gap-3 min-w-0">
         <div className="flex flex-col @lg:flex-row @lg:flex-wrap @lg:items-center gap-2">
           <Select

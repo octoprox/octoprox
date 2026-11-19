@@ -18,6 +18,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.core.audit import Actor
 from api.core.roles import JobKind
 from api.db.redis import TRAFFIC_PENDING_KEY, RedisClient
@@ -110,8 +111,8 @@ class TestCommittedWritesStand:
         async with sessions() as session:
             assert await ProxyRepository(session).get_by_id(proxy.id) == proxy
         assert failed_requests(logs) == ["health", "enrich"]
-        # One attempt each, not one wait per key.
-        assert redis_down == ["health", "enrich"]
+        # One attempt each, not one wait per key; the alert check is a MULTI of its own.
+        assert redis_down == ["health", "enrich", "MULTI"]
 
     async def test_a_connector_that_syncs_is_saved_without_its_first_sync(
         self, connect: Connect, project: Project, sessions: async_sessionmaker[AsyncSession], redis_down: list[str]
@@ -137,10 +138,11 @@ class TestCommittedWritesStand:
             saved = await connector_service.reset_traffic(project.id, static_connector.id, actor)
 
         assert saved.traffic_reset_at is not None
-        assert redis_down == ["MULTI"]
+        # The decision's MULTI, then the alert check's.
+        assert redis_down == ["MULTI", "MULTI"]
         assert [
-            (log["step"], log["connector_id"]) for log in logs if log["event"] == "Redis step after a write failed"
-        ] == [("ask for a traffic decision", static_connector.id)]
+            log["step"] for log in logs if log["event"] == "Redis step after a write failed"
+        ] == ["ask for a traffic decision", "ask for an alert check"]
         assert await redis_client.client.exists(TRAFFIC_PENDING_KEY) == 0
         assert await queued_job_keys(redis_client, JobKind.TRAFFIC) == []
 
@@ -162,7 +164,7 @@ class TestCommittedWritesStand:
             assert await ConnectorRepository(session).get_by_id(static_connector.id) is None
             assert await ProjectRepository(session).get_by_id(project.id) is None
         steps = [log["step"] for log in logs if log["event"] == "Redis step after a write failed"]
-        assert steps == ["delete the connector's scale state", "delete the project's keys"]
+        assert steps == ["ask for an alert check", "delete the connector's scale state", "delete the project's keys"]
 
     async def test_a_save_on_a_stalled_redis_stands_and_is_announced_once_redis_answers(
         self,
@@ -177,7 +179,8 @@ class TestCommittedWritesStand:
     ) -> None:
         """Each step after the commit waits its deadline, no more; the change entry waits for Redis, and lands."""
         log = ChangeLog(stalling)
-        service = ProxyService(sessions, JobQueue(stalling), stalling, registry, changes=log)
+        jobs = JobQueue(stalling)
+        service = ProxyService(sessions, jobs, stalling, registry, changes=log, alerts=AlertChecks(stalling, jobs))
         await forget_announcements(redis_client)
         try:
             await stall()
@@ -186,8 +189,8 @@ class TestCommittedWritesStand:
                 proxy = await service.create(
                     project.id, ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id), actor
                 )
-            # Three steps (the entry, the health and enrich requests), each cut at its deadline.
-            assert time.monotonic() - started < DEADLINE * 3 + MARGIN
+            # Four steps (the entry, the health and enrich requests, the alert check), each cut at its deadline.
+            assert time.monotonic() - started < DEADLINE * 4 + MARGIN
             async with sessions() as session:
                 assert await ProxyRepository(session).get_by_id(proxy.id) == proxy
             assert failed_requests(logs) == ["health", "enrich"]
@@ -216,7 +219,8 @@ class TestCommittedWritesStand:
             await ProxyRepository(session).bulk_create(rows)
             await session.commit()
         log = ChangeLog(stalling)
-        service = ProxyService(sessions, JobQueue(stalling), stalling, registry, changes=log)
+        jobs = JobQueue(stalling)
+        service = ProxyService(sessions, jobs, stalling, registry, changes=log, alerts=AlertChecks(stalling, jobs))
         try:
             await stall()
             started = time.monotonic()

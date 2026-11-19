@@ -93,7 +93,7 @@ On Kubernetes, the same layout is one Deployment per role: see [Running on Kuber
 | controller | 2, small | Never: one leads, the other waits | A Postgres pool; its compile grows with the number of proxies |
 | echo | Optional | Echo traffic | Nothing shared |
 
-In the compose files, add a replica by copying a service under a new name (`gateway-3`, with its own `OCTOPROX_INSTANCE_ID`) and, for an api or a gateway, a `server` line in `nginx/nginx.conf`. `OCTOPROX_WORKER_JOBS` gives a worker only some job kinds (`health`, or `sync,scale`), so a set of workers can be kept for health checks and never hold up syncs and scaling, or the hourly IP database downloads (`geo_update`) can run on a worker sized for them; make sure every kind has a worker that takes it. Every worker takes every kind by default.
+In the compose files, add a replica by copying a service under a new name (`gateway-3`, with its own `OCTOPROX_INSTANCE_ID`) and, for an api or a gateway, a `server` line in `nginx/nginx.conf`. `OCTOPROX_WORKER_JOBS` gives a worker only some job kinds (`health`, or `sync,scale`), so a set of workers can be kept for health checks and never hold up syncs and scaling, or the hourly IP database downloads (`geo_update`) can run on a worker sized for them; make sure every kind has a worker that takes it, `alerts` included, or the [Needs attention]({{ site.baseurl }}/metrics#needs-attention) lines stop updating (the Projects page then says Octoprox is not checking for problems). Every worker takes every kind by default.
 
 Adding replicas does not divide the controller's work (one leader compiles the feed and publishes the periodic jobs), nor the writes Postgres takes, nor what Redis carries. Those are the ceilings of an install: the controller's compile time, which grows with the number of proxies; Postgres write throughput; and one Redis for every gateway's per-key request state.
 
@@ -200,7 +200,7 @@ redis HGETALL o6:scale:creating:<connector id>   # cloud instances a scale job i
 redis SMEMBERS o6:instance_index                 # processes that heartbeat (and some just gone)
 ```
 
-Replace `health` with any other job kind (`sync`, `scale`, `provision`, `reattribute`, `enrich`, `traffic`, `metrics_flush`, `compaction`, `snapshot`, `geo_update`, `tunnel_last_seen`, `index_hygiene`, `update_check`) for its stream; the queued backlog is the stream's length less the group's pending count. In Postgres, `SELECT version_num FROM alembic_version` is the schema revision the install migrated to, and `SELECT application_name, count(*) FROM pg_stat_activity GROUP BY 1` shows the connections of each role.
+Replace `health` with any other job kind (`sync`, `scale`, `provision`, `reattribute`, `enrich`, `traffic`, `metrics_flush`, `compaction`, `snapshot`, `geo_update`, `tunnel_last_seen`, `index_hygiene`, `update_check`, `alerts`) for its stream; the queued backlog is the stream's length less the group's pending count. In Postgres, `SELECT version_num FROM alembic_version` is the schema revision the install migrated to, and `SELECT application_name, count(*) FROM pg_stat_activity GROUP BY 1` shows the connections of each role.
 
 ### Failover smoke test
 

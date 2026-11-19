@@ -1664,9 +1664,9 @@ export const setCountryRoles = async (projectId: string, country: string, connec
 export type AttentionSeverity = 'problem' | 'warning'
 export type MuteDuration = 'day' | 'week' | 'month' | 'until_clear'
 
-/** The one time a line shows on a wide row: never when it started. */
+/** The one time a line shows on a wide row: never when it started. `at` is an install alert's own time, its `{time}`. */
 export interface AttentionWhen {
-  kind: 'last_at' | 'last_failed' | 'resets'
+  kind: 'last_at' | 'last_failed' | 'resets' | 'at'
   at: string
 }
 
@@ -1699,15 +1699,29 @@ export interface AttentionLine {
   link: string
   action: string
   mute: AttentionMute | null
+  /** The stored alert behind the line, for its history: `alerts?open=<id>`. */
+  alert_id: string
+  /** When the line's current spell began: its last reopen, else its opening. */
+  since: string
+  /** When the alert first opened, kept across reopens. */
+  opened_at: string
+  /** Times it came back within 15 minutes of clearing. */
+  reopened: number
 }
 
-/** A project's lines in display order, muted ones included, with the unmuted counts. */
+/** A project's lines in display order, muted ones included, with the unmuted counts and when they were checked. */
 export interface ProjectAttention {
   generated_at: string
   lines: AttentionLine[]
   problems: number
   warnings: number
   muted: number
+  /** When the workers last checked the project (the time of the data they read); null before the first check. */
+  checked_at: string | null
+  /** A check asked for after a change is still waiting for a worker. */
+  pending: boolean
+  /** The last check is more than 3 minutes old. */
+  stale: boolean
 }
 
 export interface ProjectProblems {
@@ -1728,11 +1742,18 @@ export interface InstallAttentionLine {
   at: string | null
   /** Where an admin sees more: System or IP attribution. */
   admin_page: 'system' | 'geo'
+  /**
+   * When the stored alert's current spell began, its last reopen or else its opening; null on a line the api adds as
+   * it answers (Postgres or Redis out of reach, the checks behind or not running).
+   */
+  since: string | null
 }
 
 export interface InstallAttention {
   generated_at: string
   lines: InstallAttentionLine[]
+  /** When the workers last checked the install; null before the first check. */
+  checked_at: string | null
 }
 
 export const fetchProjectAttention = async (projectId: string): Promise<ProjectAttention> =>
@@ -1746,6 +1767,138 @@ export const unmuteAttention = async (projectId: string, key: string): Promise<v
 /** Every project's unmuted problems, by the same checks as its own lines. */
 export const fetchProjectsAttention = async (): Promise<ProjectsAttention> => (await api.get('/attention/projects')).data
 export const fetchInstallAttention = async (): Promise<InstallAttention> => (await api.get('/attention/install')).data
+
+// --- Alerts (docs/api.md) ---------------------------------------------------------------
+
+/** Every range the shared time range has: the alerts pages draw no chart that stops at 30 days, and keep 90 by default. */
+export const ALERT_RANGES = ['1h', '6h', '24h', '7d', '30d', '90d'] as const
+export type AlertRange = (typeof ALERT_RANGES)[number]
+
+export type AlertStatus = 'open' | 'resolved' | 'all'
+
+/** One alert: a line of a Needs attention card (a project's, or the install's) from when it opened until it resolved. */
+export interface AlertEntry {
+  id: string
+  key: string
+  kind: string
+  /** Now while open; when it resolved once resolved. */
+  severity: AttentionSeverity
+  /** The worst it reached. */
+  worst_severity: AttentionSeverity
+  lead: string
+  subject: string
+  /** An install alert's may hold `{time}`, which reads as the local time of `when.at`. */
+  text: string
+  detail: string | null
+  when: AttentionWhen | null
+  /** Relative to the project's pages; an install alert's is its admin page, `system` or `geo`. */
+  link: string
+  /** Empty on an install alert. */
+  action: string
+  /** The key of the line that stands for it on the card while it is open and covered; null otherwise. */
+  hidden_by: string | null
+  opened_at: string
+  reopened_at: string | null
+  last_seen_at: string
+  resolved_at: string | null
+  /** Times it came back within 15 minutes of resolving. */
+  reopened: number
+  /** Only on an open project alert. */
+  mute: AttentionMute | null
+}
+
+/** A page of alerts, newest first, with counts under the filters and how many opened after `until`. */
+export interface AlertPage {
+  alerts: AlertEntry[]
+  more: boolean
+  /** Open and resolved alerts under every filter but the status, `until` and the cursor. */
+  open: number
+  resolved: number
+  /** The latest opening the page covers: the value asked for, or the server's time then. */
+  until: string
+  /** Alerts under every filter that opened after `until`. */
+  newer: number
+}
+
+/** An alerts list's filters; an absent one does not narrow. */
+export interface AlertFilters {
+  status?: AlertStatus
+  /** The severity now for an open alert, the worst reached for a resolved one. */
+  severity?: AttentionSeverity
+  kind?: string
+  /** Text in the subject (project alerts only). */
+  q?: string
+  /** Alerts open at any point since this ISO time. */
+  since?: string
+  /** Only alerts opened at or before this ISO time; now by default. */
+  until?: string
+}
+
+/** A project's alert cut-offs. Percent fields are whole percent. */
+export interface AlertSettings {
+  success_rate: boolean
+  success_warning_below: number
+  /** 0 never makes a low success rate a problem. */
+  success_problem_below: number
+  success_min_requests: number
+  refusals_min: number
+  refusals_warning_percent: number
+  refusals_problem_percent: number
+  invalid_location_min: number
+  vendor_min: number
+  vendor_login_problem_percent: number
+  vendor_rate_limited_warning_percent: number
+  vendor_rate_limited_problem_percent: number
+  vendor_forbidden_warning_percent: number
+  vendor_forbidden_problem_percent: number
+  vendor_cannot_serve_warning_percent: number
+  vendor_other_warning_percent: number
+  connector_failing_min_requests: number
+  connector_failing_warning_percent: number
+  connector_failing_problem_percent: number
+  connector_errors_min: number
+  stuck_deleting_minutes: number
+  unhealthy_share_percent: number
+  unhealthy_min: number
+  exits_outside_percent: number
+  exits_outside_min: number
+  exits_contradicted_percent: number
+  exits_contradicted_min: number
+  site_blocked_percent: number
+  /** Days resolved alerts are kept (0 forever); null follows the project's metrics retention. */
+  keep_days: number | null
+}
+
+/** The settings in force and the defaults beside them. */
+export interface AlertSettingsResponse {
+  settings: AlertSettings
+  defaults: AlertSettings
+}
+
+/** The values a project sets apart from the defaults; a field left out is at its default. */
+export type AlertSettingsOverrides = Partial<AlertSettings>
+
+/** How long resolved install-wide alerts are kept: 0 keeps them forever. */
+export interface InstallAlertRetention {
+  days: number
+}
+
+/** A page of a project's alerts: `before` is the id of the last alert shown, none for the newest page. */
+export const fetchProjectAlerts = async (projectId: string, filters: AlertFilters, before?: string): Promise<AlertPage> =>
+  (await api.get(`/projects/${projectId}/alerts`, { params: { ...filters, before } })).data
+export const fetchProjectAlert = async (projectId: string, alertId: string): Promise<AlertEntry> =>
+  (await api.get(`/projects/${projectId}/alerts/${encodeURIComponent(alertId)}`)).data
+export const fetchAlertSettings = async (projectId: string): Promise<AlertSettingsResponse> =>
+  (await api.get(`/projects/${projectId}/alert-settings`)).data
+/** Replaces every override the project keeps; a refused value is a 422 whose message says why. */
+export const updateAlertSettings = async (projectId: string, overrides: AlertSettingsOverrides): Promise<AlertSettingsResponse> =>
+  (await api.put(`/projects/${projectId}/alert-settings`, overrides)).data
+/** A page of the install's alerts (admins). */
+export const fetchInstallAlerts = async (filters: AlertFilters, before?: string): Promise<AlertPage> =>
+  (await api.get('/alerts/install', { params: { ...filters, before } })).data
+export const fetchInstallAlertRetention = async (): Promise<InstallAlertRetention> => (await api.get('/alerts/install/retention')).data
+export const updateInstallAlertRetention = async (days: number): Promise<InstallAlertRetention> =>
+  (await api.put('/alerts/install/retention', { days })).data
 
 // Project-scoped Proxy API functions
 export const fetchProjectProxies = async (projectId: string): Promise<ProxyListResponse> => {

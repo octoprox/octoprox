@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.core.audit import Actor
 from api.core.roles import JobKind
 from api.core.stats import FailureKind, MetricDelta
@@ -388,10 +389,13 @@ class TestChangeEntries:
         redis_client: RedisClient,
         connector_service: ConnectorService,
         actor: Actor,
+        alert_checks: AlertChecks,
     ) -> None:
         """A consumer woken by an entry reads Postgres: the write must be there by then, or it is missed."""
         witness = Witness(redis_client, lambda ref: stored(sessions, ref))
-        service = ProjectService(sessions, jobs, redis_client, changes=witness, connectors=connector_service)
+        service = ProjectService(
+            sessions, jobs, redis_client, changes=witness, connectors=connector_service, alerts=alert_checks
+        )
 
         project = await service.create(create(), actor)
         renamed = await service.update(project.id, ProjectUpdate(name="Renamed"), actor)

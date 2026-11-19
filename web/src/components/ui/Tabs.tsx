@@ -1,6 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { useEffect, useRef } from 'react'
 import { cn } from '../../utils/cn'
 
 export interface TabItem<T extends string> {
@@ -14,14 +15,27 @@ interface TabsProps<T extends string> {
   onChange: (id: T) => void
   size?: 'sm' | 'md'
   className?: string
+  /** A link's request for a tab (a new object each time): the active tab is scrolled into view for it, the first too. */
+  reveal?: object | null
 }
 
-export function Tabs<T extends string>({ tabs, active, onChange, size = 'md', className }: TabsProps<T>) {
+export function Tabs<T extends string>({ tabs, active, onChange, size = 'md', className, reveal }: TabsProps<T>) {
+  // A strip wider than a phone scrolls sideways: the active tab is brought into view when it changes or a link asks
+  // for it. Not on a plain first render, where the strip may sit below the fold and the page must not jump to it.
+  const activeRef = useRef<HTMLButtonElement>(null)
+  const shown = useRef(active)
+  useEffect(() => {
+    if (shown.current === active && !reveal) return
+    shown.current = active
+    activeRef.current?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }, [active, reveal])
+
   return (
     <div className={cn('flex gap-0.5 border-b border-line overflow-x-auto', className)} role="tablist">
       {tabs.map((tab) => (
         <button
           key={tab.id}
+          ref={active === tab.id ? activeRef : undefined}
           type="button"
           role="tab"
           aria-selected={active === tab.id}

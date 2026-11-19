@@ -4,7 +4,8 @@
 """The worker runtime: what a ``worker`` process (and ``all``) runs besides the node's own loops.
 
 A job runner per kind it takes (``worker_jobs``), the sighting, observation and exit report ingests and the definitions
-refresher, all reading Redis streams; what its jobs write is announced on the change stream.
+refresher, all reading Redis streams; what its jobs write is announced on the change stream. The alerts job reads the
+runtime state strictly and builds its routing previews off the event loop.
 """
 
 from __future__ import annotations
@@ -13,11 +14,20 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from api.attention.data import ProjectDataLoader
+from api.attention.install import InstallChecks
+from api.attention.requests import AlertChecks
 from api.core.demand_tracker import DemandTracker
 from api.core.job_stats import job_stats
 from api.core.roles import JobKind
+from api.core.system_stats import ClusterReader
+from api.feed.compiler import FeedCompiler
+from api.feed.preview import RoutingPreview
+from api.feed.state import RuntimeStateReader
 from api.geo.attributor import ProxyAttributor
 from api.geo.observations import ObservationIngest
+from api.geo.settings import defaults_from_config
+from api.jobs.alerts import AlertsJob
 from api.jobs.attribution import Attribution, EnrichJob, ReattributeJob, SightingIngest
 from api.jobs.health import HealthCheckJob
 from api.jobs.housekeeping import (
@@ -41,6 +51,7 @@ from api.roles.runtime import RoleRuntime
 from api.services.connectors import ConnectorService
 from api.services.projects import ProjectService
 from api.services.proxies import ProxyService
+from api.services.read_model import RuntimeView
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -76,6 +87,7 @@ class WorkerRuntime(RoleRuntime):
         super().__init__()
         registry = provider_store.registry
         self.jobs = JobQueue(redis_client)
+        self.alert_checks = AlertChecks(redis_client, self.jobs)
         self.refresher = DefinitionsRefresher(
             provider_store,
             geo.settings_store,
@@ -90,9 +102,19 @@ class WorkerRuntime(RoleRuntime):
             registry,
             lookup_enabled=settings.geo_lookup_enabled,
             changes=changes,
+            alerts=self.alert_checks,
         )
-        connectors = ConnectorService(session_factory, self.jobs, redis_client, registry, changes=changes)
-        projects = ProjectService(session_factory, self.jobs, redis_client, changes=changes, connectors=connectors)
+        connectors = ConnectorService(
+            session_factory, self.jobs, redis_client, registry, changes=changes, alerts=self.alert_checks
+        )
+        projects = ProjectService(
+            session_factory,
+            self.jobs,
+            redis_client,
+            changes=changes,
+            connectors=connectors,
+            alerts=self.alert_checks,
+        )
         attribution = Attribution(
             ProxyAttributor(geo.geo_service, lookup_enabled=settings.geo_lookup_enabled),
             session_factory,
@@ -101,6 +123,22 @@ class WorkerRuntime(RoleRuntime):
             changes=changes,
         )
         updater = geo.updater(settings, session_factory=session_factory, changes=changes, jobs=self.jobs)
+        # The alerts job's reads: Redis strictly, so a check never runs on missing state, and the router off the loop.
+        strict_view = RuntimeView(
+            session_factory, RuntimeStateReader(redis_client), registry, DemandTracker(redis_client), strict=True
+        )
+        preview = RoutingPreview(
+            FeedCompiler(
+                session_factory,
+                registry,
+                geo_defaults=defaults_from_config(settings),
+                default_strategy=settings.default_strategy,
+            ),
+            strict_view,
+            registry,
+            default_strategy=settings.default_strategy,
+            off_loop=True,
+        )
         every_job: list[Job] = [
             HealthCheckJob(
                 session_factory,
@@ -118,7 +156,7 @@ class WorkerRuntime(RoleRuntime):
             ProvisionJob(session_factory, registry, proxies),
             ReattributeJob(attribution, geo.geo_service),
             EnrichJob(attribution),
-            TrafficJob(session_factory, redis_client),
+            TrafficJob(session_factory, redis_client, alerts=self.alert_checks),
             MetricsFlushJob(session_factory, redis_client),
             CompactionJob(
                 session_factory,
@@ -135,6 +173,18 @@ class WorkerRuntime(RoleRuntime):
             TunnelLastSeenJob(session_factory, redis_client),
             IndexHygieneJob(redis_client, self.jobs),
             UpdateCheckJob(redis_client),
+            AlertsJob(
+                session_factory,
+                ProjectDataLoader(session_factory, strict_view, registry, preview),
+                InstallChecks(
+                    redis_client,
+                    session_factory,
+                    ClusterReader(redis_client),
+                    geo_updater_interval=settings.geo_updater_interval,
+                ),
+                self.alert_checks,
+                redis_client,
+            ),
         ]
         by_kind = {job.kind: job for job in every_job}
         # One runner per kind this worker takes, in the order the settings list them.

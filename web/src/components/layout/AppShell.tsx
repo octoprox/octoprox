@@ -7,7 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   BarChart3, Server, Link2, KeyRound, Eye, Settings as SettingsIcon, ChevronLeft, ChevronRight,
   ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
-  Activity, Globe, Router, Shield, ShieldCheck, Target, LogIn, Plug, AlertTriangle, Flag, History,
+  Activity, Globe, Router, Shield, ShieldCheck, Target, LogIn, Plug, AlertTriangle, Flag, History, Bell,
 } from 'lucide-react'
 import octoproxLogo from '../../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../../assets/logos/octoprox_horizontal_dark.svg'
@@ -45,6 +45,7 @@ const PAGE_TITLES: Record<string, string> = {
   overview: 'Overview',
   hosts: 'Hosts',
   failures: 'Failures',
+  alerts: 'Alerts',
   proxies: 'Proxies',
   connectors: 'Connectors',
   countries: 'Countries',
@@ -231,6 +232,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
                 <NavItem to="/admin/geo" icon={<Globe />} label="IP attribution" collapsed={collapsed} />
                 <NavItem to="/admin/backup" icon={<DatabaseBackup />} label="Backup & Migration" collapsed={collapsed} />
                 <NavItem to="/admin/activity" icon={<History />} label="Activity" collapsed={collapsed} />
+                <NavItem to="/admin/alerts" icon={<Bell />} label="Alerts" collapsed={collapsed} />
                 <NavItem to="/admin/system" icon={<Activity />} label="System" collapsed={collapsed} />
                 <NavGroup label="Tunnels" collapsed={collapsed} />
                 <NavItem to="/admin/wireguard" icon={<Router />} label="WireGuard" collapsed={collapsed} />
@@ -242,6 +244,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
                 <NavItem to={`${base}/overview`} icon={<BarChart3 />} label="Overview" collapsed={collapsed} badge={problems > 0 ? { count: problems, label: `${problems} ${plural(problems, 'problem', 'problems')}` } : undefined} />
                 <NavItem to={`${base}/hosts`} icon={<Target />} label="Hosts" collapsed={collapsed} />
                 <NavItem to={`${base}/failures`} icon={<AlertTriangle />} label="Failures" collapsed={collapsed} />
+                <NavItem to={`${base}/alerts`} icon={<Bell />} label="Alerts" collapsed={collapsed} />
                 <NavGroup label="Pool" collapsed={collapsed} />
                 <NavItem to={`${base}/proxies`} icon={<Server />} label="Proxies" collapsed={collapsed} />
                 <NavItem to={`${base}/connectors`} icon={<Link2 />} label="Connectors" collapsed={collapsed} />

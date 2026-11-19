@@ -332,3 +332,46 @@ class TestSitesAndPlaces:
         }
         # Three bad reports avoid for "Avoid for", an hour at the default.
         assert await repository.avoided_ips(project.id, ["google.com"], at(2)) == {}
+
+
+class TestEveryRecordingProjectAtOnce:
+    """The reads the alerts job makes for every recording project at once agree with the one-project reads."""
+
+    async def test_each_read_holds_what_each_project_s_own_read_finds(
+        self, db_session: AsyncSession, project: Project
+    ) -> None:
+        other = await make_project(db_session, "globex")
+        await TestSitesAndPlaces()._reported(db_session, project)
+        await TestSitesAndPlaces()._reported(db_session, other)
+        repository = ExitReputationRepository(db_session)
+        since = at(-1)
+        ids = [project.id, other.id]
+
+        sites = await repository.recent_sites_of(ids, since, limit=8)
+        assert sites == {owner: await repository.recent_sites(owner, since, limit=8) for owner in ids}
+        assert sites[project.id] == ["google.com", "bing.com"]
+        # The limit holds for each project.
+        assert await repository.recent_sites_of(ids, since, limit=1) == {owner: ["google.com"] for owner in ids}
+        assert await repository.recent_sites_of(ids, at(1), limit=8) == {}
+
+        pairs = [(owner, site) for owner in ids for site in sites[owner]]
+        assert await repository.avoided_ips_of(pairs, at(0.5)) == {
+            (owner, site): ips
+            for owner in ids
+            for site, ips in (await repository.avoided_ips(owner, sites[owner], at(0.5))).items()
+        }
+        assert await repository.connector_records_of(pairs, ["US", ""]) == sorted(
+            [
+                record
+                for owner in ids
+                for record in await repository.connector_records(owner, sites[owner], ["US", ""])
+            ],
+            key=lambda record: record.key,
+        )
+        assert await repository.coarse_records_of(pairs, since) == sorted(
+            [record for owner in ids for record in await repository.coarse_records(owner, sites[owner], since)],
+            key=lambda record: record.key,
+        )
+        # Only the pairs asked about.
+        assert await repository.connector_records_of([(project.id, "bing.com")], [""]) == []
+        assert await repository.avoided_ips_of([], at(0.5)) == {}

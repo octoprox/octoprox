@@ -3,7 +3,7 @@
 
 """The install-wide lines of Needs attention, which every signed-in user sees on the Projects page in plain words.
 
-Read from the heartbeats and stream positions in Redis, cheap enough for a poll every 30 seconds, and a handful of IP
+The alerts job checks them once a minute, from the heartbeats and stream positions in Redis and a handful of IP
 database rows from Postgres; never the System page's full read. A line carries no deployment detail: no instance, host,
 version, size or raw error, so it reads the same for every role.
 """
@@ -14,18 +14,19 @@ import asyncio
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from redis.exceptions import RedisError
 
-from api.core import utc_now
+from api.attention.checks import Finding
 from api.core.logging import error_text
 from api.core.roles import JobKind, Role
 from api.db.geo_repository import GeoDatabaseRepository
 from api.db.redis import CHANGES_STREAM_KEY, FEED_STREAM_KEY, JOB_STREAM_KEY, StreamId, StreamInfo
 from api.geo.updater import next_update_at
-from api.models.attention import InstallAttention, InstallAttentionLine, Severity
+from api.models.attention import AttentionWhen, Severity
 
 if TYPE_CHECKING:
     from api.core.system_stats import ClusterReader, ClusterReading
@@ -65,6 +66,26 @@ _POSTGRES_UNREACHABLE = "Postgres unreachable"
 _HYGIENE_STREAM = JOB_STREAM_KEY.format(kind=JobKind.INDEX_HYGIENE)
 
 
+class InstallKind(StrEnum):
+    """A kind of install line, in the order the lines show."""
+
+    NO_GATEWAY_SERVING = "no_gateway_serving"
+    STORE_UNREACHABLE = "store_unreachable"
+    CHANGES_NOT_APPLIED = "changes_not_applied"
+    BACKGROUND_BEHIND = "background_behind"
+    IP_DATABASES = "ip_databases"
+
+
+# Each kind's place among the lines of one severity, as its alerts sort.
+_POSITIONS = {kind: f"{position}" for position, kind in enumerate(InstallKind)}
+# What a heartbeat saying Postgres is out of reach leaves unjudged: those lines read Postgres, or are skipped then.
+_UNJUDGED_WITHOUT_DATABASE = frozenset({
+    InstallKind.CHANGES_NOT_APPLIED.value,
+    InstallKind.BACKGROUND_BEHIND.value,
+    InstallKind.IP_DATABASES.value,
+})
+
+
 @dataclass(frozen=True)
 class _Area:
     """A part of the background work as the line names it, and when its streams are behind."""
@@ -100,7 +121,8 @@ _AREAS: tuple[_Area, ...] = (
     _Area("exit reports", (("exit_reports", None),), 300.0, counts_failures=False),
 )
 
-_TEXTS = {
+# The lines' texts; the api answers the live data and database ones itself when its own reads fail.
+TEXTS = {
     "no_gateway_serving": "No gateway is accepting proxy connections right now, so requests through Octoprox fail.",
     "live_data": (
         "Octoprox cannot reach its live data store. Requests still go through but may be slower, and live numbers may "
@@ -129,8 +151,17 @@ class _Positions:
     feed: list[tuple[str, str]] | None
 
 
-class InstallAttentionReader:
-    """The install-wide lines every signed-in user sees on the Projects page, read from the heartbeats in Redis.
+@dataclass(frozen=True)
+class InstallReport:
+    """What the install check found now, and the condition keys it could not judge this time, whose alerts stay as
+    they are."""
+
+    findings: list[Finding]
+    held: frozenset[str]
+
+
+class InstallChecks:
+    """The install-wide conditions, read from the heartbeats and stream positions in Redis and the IP database rows.
 
     Args:
         geo_updater_interval: seconds between the ``geo_update`` job's looks, past which a due download is late.
@@ -149,9 +180,9 @@ class InstallAttentionReader:
         self._cluster = cluster
         self._geo_updater_interval = geo_updater_interval
 
-    async def read(self) -> InstallAttention:
-        """The lines now, problems first; Redis not answering is itself a line, alone."""
-        now = utc_now()
+    async def report(self, now: datetime) -> InstallReport | None:
+        """What needs attention in the install now, problems first; None when a read failed, so the run leaves install
+        alerts as they are rather than resolve them on missing data."""
         try:
             async with asyncio.timeout(INSTALL_READ_TIMEOUT_SECONDS):
                 reading, streams = await asyncio.gather(self._cluster.read(), self._cluster.streams())
@@ -159,22 +190,29 @@ class InstallAttentionReader:
                     raise ConnectionError(reading.error or streams.error)
                 positions = await self._positions(reading)
         except (TimeoutError, RedisError, OSError) as exc:
-            logger.warning("Install attention unavailable: Redis not answering", error=error_text(exc))
-            return InstallAttention(generated_at=now, lines=[_line("store_unreachable:live_data", _TEXTS["live_data"])])
+            logger.warning("Install alert checks skipped", error=error_text(exc))
+            return None
         lines = _Lines(reading, streams, positions)
         database_down = lines.database_unreachable()
-        records = None if database_down else await self._databases()
-        found: list[InstallAttentionLine] = []
+        records: list[GeoDatabaseRecord] | None = None
+        if not database_down:
+            try:
+                records = await self._databases()
+            except Exception as exc:
+                logger.warning("Install alert checks skipped", error=error_text(exc))
+                return None
+        found: list[Finding] = []
         if lines.no_gateway_serving():
-            found.append(_line("no_gateway_serving", _TEXTS["no_gateway_serving"], Severity.PROBLEM))
+            found.append(_finding(InstallKind.NO_GATEWAY_SERVING, TEXTS["no_gateway_serving"], Severity.PROBLEM))
         if database_down:
-            found.append(_line("store_unreachable:database", _TEXTS["database"]))
-        else:
-            found.extend(lines.changes_not_applied())
-            found.extend(lines.background_behind())
+            # Some process cannot reach Postgres while this worker can: its lines that read Postgres wait.
+            found.append(_finding(InstallKind.STORE_UNREACHABLE, TEXTS["database"], key="store_unreachable:database"))
+            return InstallReport(findings=found, held=_UNJUDGED_WITHOUT_DATABASE)
+        found.extend(lines.changes_not_applied())
+        found.extend(lines.background_behind())
         if records is not None:
             found.extend(lines.ip_databases(records, now, self._geo_updater_interval))
-        return InstallAttention(generated_at=now, lines=found)
+        return InstallReport(findings=found, held=frozenset())
 
     async def _positions(self, reading: ClusterReading) -> _Positions:
         """Redis's clock, the index hygiene stream, and where the leader and the gateways stand on the changes and feed
@@ -210,14 +248,10 @@ class InstallAttentionReader:
             feed=feed,
         )
 
-    async def _databases(self) -> list[GeoDatabaseRecord] | None:
-        """The stored IP databases; None, logged, when Postgres does not answer."""
-        try:
-            async with self._session_factory() as session:
-                return await GeoDatabaseRepository(session).get_all()
-        except Exception as exc:
-            logger.warning("Install attention: IP databases not read", error=error_text(exc))
-            return None
+    async def _databases(self) -> list[GeoDatabaseRecord]:
+        """The stored IP databases; raises when Postgres does not answer."""
+        async with self._session_factory() as session:
+            return await GeoDatabaseRepository(session).get_all()
 
 
 class _Lines:
@@ -248,7 +282,7 @@ class _Lines:
             for instance in gateways
         )
 
-    def changes_not_applied(self) -> list[InstallAttentionLine]:
+    def changes_not_applied(self) -> list[Finding]:
         """No leader, its compile or publish failing, or changes it has not compiled, or a gateway has not applied, for
         a minute or more."""
         leader = self._leader
@@ -258,21 +292,25 @@ class _Lines:
         late = [at for at in (self._changes_waiting(), self._feed_missed()) if at is not None]
         if late:
             at = _datetime(min(late))
-            return [_line("changes_not_applied", _TEXTS["changes_since"], at=at)]
-        return [_line("changes_not_applied", _TEXTS["changes"])] if stalled else []
+            return [_finding(InstallKind.CHANGES_NOT_APPLIED, TEXTS["changes_since"], at=at)]
+        return [_finding(InstallKind.CHANGES_NOT_APPLIED, TEXTS["changes"])] if stalled else []
 
-    def background_behind(self) -> list[InstallAttentionLine]:
+    def background_behind(self) -> list[Finding]:
         """Each area of background work stopped or far behind, named in one line."""
         scheduling_stopped = self._scheduling_stopped()
         behind = [area.name for area in _AREAS if (scheduling_stopped and area.scheduled) or self._behind(area)]
         if not behind:
             return []
         verb = "is" if len(behind) == 1 else "are"
-        return [_line("background_behind", f"Background work is behind: {_joined(behind)} {verb} not up to date.")]
+        return [
+            _finding(
+                InstallKind.BACKGROUND_BEHIND, f"Background work is behind: {_joined(behind)} {verb} not up to date."
+            )
+        ]
 
     def ip_databases(
         self, records: Sequence[GeoDatabaseRecord], now: datetime, updater_interval: float
-    ) -> list[InstallAttentionLine]:
+    ) -> list[Finding]:
         """An IP database a gateway up five minutes cannot load, or one whose scheduled update fails or is late."""
         by_id = {record.id: record for record in records}
         settled = now - timedelta(seconds=DATABASE_LOAD_SECONDS)
@@ -293,11 +331,11 @@ class _Lines:
             for record in records
         )
         if load and update:
-            return [_line("ip_databases", _TEXTS["ip_both"], admin_page="geo")]
+            return [_finding(InstallKind.IP_DATABASES, TEXTS["ip_both"], admin_page="geo")]
         if load:
-            return [_line("ip_databases", _TEXTS["ip_load"], admin_page="geo")]
+            return [_finding(InstallKind.IP_DATABASES, TEXTS["ip_load"], admin_page="geo")]
         if update:
-            return [_line("ip_databases", _TEXTS["ip_update"], admin_page="geo")]
+            return [_finding(InstallKind.IP_DATABASES, TEXTS["ip_update"], admin_page="geo")]
         return []
 
     # --- Changes --------------------------------------------------------------------------------
@@ -386,15 +424,29 @@ class _Lines:
 # --- Helpers ------------------------------------------------------------------------------------------
 
 
-def _line(
-    key: str,
+def _finding(
+    kind: InstallKind,
     text: str,
     severity: Severity = Severity.WARNING,
     *,
+    key: str | None = None,
     at: datetime | None = None,
     admin_page: _AdminPage = "system",
-) -> InstallAttentionLine:
-    return InstallAttentionLine(key=key, severity=severity, text=text, at=at, admin_page=admin_page)
+) -> Finding:
+    """An install line as its alert stores it: no subject, its admin page for its link, and ``{time}`` in its text read
+    from ``at``."""
+    return Finding(
+        key=key or kind.value,
+        kind=kind,
+        severity=severity,
+        lead="",
+        subject="",
+        text=text,
+        link=admin_page,
+        action="",
+        when=AttentionWhen(kind="at", at=at) if at is not None else None,
+        sort_name=_POSITIONS[kind],
+    )
 
 
 def _leader_instance(reading: ClusterReading) -> InstanceInfo | None:

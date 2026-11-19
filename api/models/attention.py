@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """What the Needs attention endpoints answer: a project's lines with their mutes, every project's problem count, and the
-install-wide lines of the Projects page; see docs/api.md (Needs attention)."""
+install-wide lines of the Projects page, all read from the alerts the workers store; see docs/api.md (Needs attention)."""
 
 from __future__ import annotations
 
@@ -30,9 +30,10 @@ class MuteDuration(StrEnum):
 
 
 class AttentionWhen(BaseModel):
-    """The one time a line shows: its last failure, its last failed sync, or when its traffic period resets."""
+    """The one time a line shows: its last failure, its last failed sync, when its traffic period resets, or an install
+    alert's own time (``at``, its ``{time}``)."""
 
-    kind: Literal["last_at", "last_failed", "resets"]
+    kind: Literal["last_at", "last_failed", "resets", "at"]
     at: datetime
 
 
@@ -61,16 +62,25 @@ class AttentionLine(BaseModel):
     link: str = Field(description="The page that fixes it, relative to /projects/{project_id}/")
     action: str = Field(description="The link's label")
     mute: AttentionMute | None = Field(description="Its mute; null when none or a timed one has ended")
+    alert_id: str = Field(description="The stored alert behind the line, for its history")
+    since: datetime = Field(description="When the current spell began: the last reopen, else the opening")
+    opened_at: datetime = Field(description="When the alert first opened, kept across reopens")
+    reopened: int = Field(description="Times it came back within 15 minutes of clearing")
 
 
 class ProjectAttention(BaseModel):
-    """A project's lines, muted or not, in display order, and how many of each kind show."""
+    """A project's lines, muted or not, in display order, how many of each kind show, and when they were checked."""
 
     generated_at: datetime
     lines: list[AttentionLine]
     problems: int = Field(description="Problem lines whose mute is not active")
     warnings: int = Field(description="Warning lines whose mute is not active")
     muted: int = Field(description="Lines whose mute is active")
+    checked_at: datetime | None = Field(
+        description="When the workers last checked the project (the time of the data they read); null before the first"
+    )
+    pending: bool = Field(description="A check asked for after a change is still waiting")
+    stale: bool = Field(description="The last check is more than 3 minutes old")
 
 
 class ProjectProblems(BaseModel):
@@ -101,10 +111,15 @@ class InstallAttentionLine(BaseModel):
     text: str = Field(description="May hold {time}, which a client replaces with the local time of at")
     at: datetime | None
     admin_page: Literal["system", "geo"] = Field(description="Where an admin sees more")
+    since: datetime | None = Field(
+        description="When the stored alert's current spell began: its last reopen, else its opening; null on a line the "
+        "api adds as it answers"
+    )
 
 
 class InstallAttention(BaseModel):
-    """The install-wide lines, the same for every role."""
+    """The install-wide lines, the same for every role, and when the workers last checked the install."""
 
     generated_at: datetime
     lines: list[InstallAttentionLine]
+    checked_at: datetime | None = Field(description="When the workers last checked the install; null before the first")

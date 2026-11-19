@@ -3,8 +3,8 @@
 
 """The feed compiler: the definitions in Postgres, cut into the sections gateways route on.
 
-The controller compiles the whole feed, the api one project or every one for its previews; the caller passes the runtime
-state in.
+The controller compiles the whole feed, the api one project for its previews and the alerts job one project or every
+one (:mod:`api.feed.preview`); the caller passes the runtime state in.
 The controller's compile also carries the exit reputation section, read from Postgres apart from the compiles
 (:mod:`api.feed.reputation`); the previews carry none.
 """
@@ -128,9 +128,22 @@ class CompiledFeed:
     reputation_owed: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True)
+class PreviewRows:
+    """What a preview compile read from Postgres: one project's rows or every project's, before anything is built."""
+
+    projects: tuple[Project, ...]
+    credentials: tuple[Credential, ...]
+    connectors: tuple[Connector, ...]
+    proxies: tuple[Proxy, ...]
+    descriptors: tuple[ProviderRecord, ...]
+    # The stored geo settings row; None while none is saved.
+    geo_settings: GeoSettings | None
+
+
 class FeedCompiler:
-    """Compiles one project's routing feed, or every project's, from Postgres for the api's previews; it holds no store
-    and keeps nothing.
+    """Compiles one project's routing feed, or every project's, from Postgres for the previews; it holds no store and
+    keeps nothing.
 
     Args:
         geo_defaults: what the install runs with, and the feed carries, while no geo settings row is saved.
@@ -150,81 +163,59 @@ class FeedCompiler:
         self._geo_defaults = geo_defaults
         self._default_strategy = default_strategy
 
-    async def compile_project(
-        self, project_id: str, *, quarantined: Mapping[str, datetime], blocked_until: Mapping[str, datetime]
-    ) -> dict[str, Section]:
-        """One project's feed for the api's previews, built as the full compile builds it, in a session of its own.
-
-        It applies nothing, keeps and logs nothing, and carries no database list, no tunnels and no exit reputation.
-
-        Args:
-            quarantined: proxy ID -> its quarantine's end (naive UTC), as the api read it; other projects' are ignored.
-            blocked_until: connector ID -> its block's end (naive UTC), as the api read it; other projects' are ignored.
-        """
+    async def read_project(self, project_id: str) -> PreviewRows:
+        """What one project's preview is built from, in a session of its own; no project when it is gone."""
         async with self._session_factory() as session:
             project = await ProjectRepository(session).get_by_id(project_id)
             credentials = await CredentialRepository(session).get_by_project(project_id)
             connectors = await ConnectorRepository(session).get_by_project(project_id)
-            proxies = await ProxyRepository(session).get_by_project(project_id)
+            proxies = await ProxyRepository(session).streamed(project_id)
             descriptors = await ProviderDescriptorRepository(session).get_all()
             stored_settings = await GeoSettingsRepository(session).get()
-        return self._preview(
-            [project] if project is not None else [],
-            credentials,
-            connectors,
-            proxies,
-            descriptors,
-            stored_settings,
-            quarantined=quarantined,
-            blocked_until=blocked_until,
+        return PreviewRows(
+            projects=(project,) if project is not None else (),
+            credentials=tuple(credentials),
+            connectors=tuple(connectors),
+            proxies=tuple(proxies),
+            descriptors=tuple(descriptors),
+            geo_settings=stored_settings,
         )
 
-    async def compile_projects(
-        self, *, quarantined: Mapping[str, datetime], blocked_until: Mapping[str, datetime]
-    ) -> dict[str, Section]:
-        """Every project's feed for the api's previews at once, built as :meth:`compile_project` builds each, in a session
-        of its own: six statements however many projects there are.
-
-        It applies, keeps and logs nothing, and carries no database list, no tunnels and no exit reputation.
-        """
+    async def read_projects(self) -> PreviewRows:
+        """What every project's preview is built from, in a session of its own: six statements however many projects
+        there are, the proxy rows streamed in pieces."""
         async with self._session_factory() as session:
             projects = await ProjectRepository(session).get_all()
             credentials = await CredentialRepository(session).get_all()
             connectors = await ConnectorRepository(session).get_all()
-            proxies = await ProxyRepository(session).get_all()
+            proxies = await ProxyRepository(session).streamed()
             descriptors = await ProviderDescriptorRepository(session).get_all()
             stored_settings = await GeoSettingsRepository(session).get()
-        return self._preview(
-            projects,
-            credentials,
-            connectors,
-            proxies,
-            descriptors,
-            stored_settings,
-            quarantined=quarantined,
-            blocked_until=blocked_until,
+        return PreviewRows(
+            projects=tuple(projects),
+            credentials=tuple(credentials),
+            connectors=tuple(connectors),
+            proxies=tuple(proxies),
+            descriptors=tuple(descriptors),
+            geo_settings=stored_settings,
         )
 
-    def _preview(
-        self,
-        projects: Iterable[Project],
-        credentials: Iterable[Credential],
-        connectors: Collection[Connector],
-        proxies: Iterable[Proxy],
-        descriptors: Iterable[ProviderRecord],
-        stored_settings: GeoSettings | None,
-        *,
-        quarantined: Mapping[str, datetime],
-        blocked_until: Mapping[str, datetime],
+    def preview(
+        self, rows: PreviewRows, *, quarantined: Mapping[str, datetime], blocked_until: Mapping[str, datetime]
     ) -> dict[str, Section]:
-        """The previews' sections from the rows read: the full compile's build, with nothing applied, kept or logged."""
+        """The previews' sections from the rows read: the full compile's build, with nothing applied, kept or logged.
+
+        Pure over values already read, so it may run off the event loop.
+        """
         # Not logged: a preview compiles per request, and the controller logs these once.
         workarounds: _Workarounds = {}
-        global_section = self._global_section(projects, _enabled_specs(descriptors), stored_settings, workarounds)
-        connector_sections = self._connector_sections(connectors, credentials, proxies, workarounds)
+        global_section = self._global_section(
+            rows.projects, _enabled_specs(rows.descriptors), rows.geo_settings, workarounds
+        )
+        connector_sections = self._connector_sections(rows.connectors, rows.credentials, rows.proxies, workarounds)
         held = {proxy.id for section in connector_sections.values() for proxy in section.proxies}
         # Every connector keeps its block, those left out of the sections too: the traffic split asks.
-        owned = {connector.id for connector in connectors}
+        owned = {connector.id for connector in rows.connectors}
         runtime = self._runtime_section(quarantined, blocked_until, held, owned)
         return self._sections(global_section, connector_sections, runtime)
 

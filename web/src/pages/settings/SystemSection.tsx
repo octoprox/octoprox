@@ -21,7 +21,7 @@ import { Page } from '../../components/layout/Page'
 import { LicenseCard } from '../../components/license/LicenseCard'
 import { useTheme } from '../../contexts/ThemeContext'
 import { formatRangeTick, rangeTicks, useTimeRange } from '../../contexts/TimeRangeContext'
-import { bytesShort, bytesTick, elideMiddle, formatBytes, formatDateTime, parseApiDate, plural, relativeTime } from '../../utils/format'
+import { bytesShort, bytesTick, elideMiddle, formatBytes, formatDateTime, formatDuration, parseApiDate, plural, relativeTime } from '../../utils/format'
 import {
   Alert, Badge, Button, Card, CardHeader, FlowDiagram, FlowNode, Inspector, InspectorSection, KeyValue, LogoLoader, Reloading, Segmented,
   type FlowAnchor, type FlowEdge, type FlowTone,
@@ -2956,15 +2956,6 @@ const COMPACT_FROM = 10_000
 
 function compactCount(value: number): string {
   return Math.abs(value) < COMPACT_FROM ? value.toLocaleString() : bandFormatter.format(value)
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`
-  const m = Math.floor(seconds / 60)
-  if (m < 60) return `${m}m`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ${m % 60}m`
-  return `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
 function formatInterval(seconds: number): string {

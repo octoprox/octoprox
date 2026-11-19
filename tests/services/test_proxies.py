@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from api.attention.requests import AlertChecks
 from api.core import utc_now
 from api.core.audit import Actor
 from api.core.roles import JobKind
@@ -132,9 +133,12 @@ class TestCreate:
         project: Project,
         static_connector: Connector,
         actor: Actor,
+        alert_checks: AlertChecks,
     ) -> None:
         """``geo_lookup_enabled`` off: the enrich job would only drop the run, so none is queued."""
-        service = ProxyService(sessions, jobs, redis_client, registry, changes=change_log, lookup_enabled=False)
+        service = ProxyService(
+            sessions, jobs, redis_client, registry, changes=change_log, alerts=alert_checks, lookup_enabled=False
+        )
 
         added = ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id)
         proxy = await service.create(project.id, added, actor)
@@ -589,7 +593,8 @@ class TestUnquarantine:
 
         assert await proxy_service.unquarantine(project.id, manual.id) is True
 
-        assert pipelines == [(True, ["ZREM", "DEL", "XADD"])]
+        # The project's alert check follows, a MULTI of its own.
+        assert pipelines == [(True, ["ZREM", "DEL", "XADD"]), (True, ["HSET", "EXPIRE", "XADD"])]
 
     async def test_a_proxy_not_quarantined_is_left_alone(
         self, proxy_service: ProxyService, project: Project, manual: Proxy, redis_client: RedisClient
@@ -694,10 +699,11 @@ class TestChangeEntries:
         project: Project,
         static_connector: Connector,
         actor: Actor,
+        alert_checks: AlertChecks,
     ) -> None:
         """A consumer woken by an entry reads Postgres: the write must be there by then, or it is missed."""
         witness = Witness(redis_client, lambda ref: stored(sessions, ref))
-        service = ProxyService(sessions, jobs, redis_client, registry, changes=witness)
+        service = ProxyService(sessions, jobs, redis_client, registry, changes=witness, alerts=alert_checks)
 
         added = ProxyCreate(host="10.0.0.1", port=8080, connector_id=static_connector.id)
         proxy = await service.create(project.id, added, actor)

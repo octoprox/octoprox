@@ -7,8 +7,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Server, Trash2, FolderOpen, Settings, Shield, Link2, KeyRound } from 'lucide-react'
 import {
-  fetchProjects, fetchProjectsLoad, createProject, deleteProject, updateProject, logout,
-  ProjectCreate, ProjectUpdate, ProjectSummary, ProjectLoad, HISTORY_RANGES, HistoryRange,
+  fetchProjects, fetchProjectsLoad, createProject, deleteProject, logout,
+  ProjectCreate, ProjectSummary, ProjectLoad, HISTORY_RANGES, HistoryRange,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useTimeRange } from '../contexts/TimeRangeContext'
@@ -22,6 +22,7 @@ import { DeletingBadge } from './DeletingBadge'
 import { InstallAttention } from './attention/InstallAttention'
 import { ProblemCount } from './attention/ProblemCount'
 import { invalidateAttention, useProjectsAttention } from '../hooks/useProjectAttention'
+import { useProjectSettingsSave } from '../hooks/useProjectSettingsSave'
 import { DataTable, type DataTableFeatures } from './DataTable'
 import { Page } from './layout/Page'
 import { NewVersionBanner } from './NewVersion'
@@ -93,6 +94,8 @@ export default function ProjectSelection() {
   const [historyIn, setHistoryIn] = useState<PanelState>(null)
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
+  // Whether the open editor's values can be saved (its Alert settings tab checks them as they are typed).
+  const [editValid, setEditValid] = useState(true)
   const [view, setView] = useProjectsView()
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
 
@@ -113,15 +116,6 @@ export default function ProjectSelection() {
       invalidateAttention(queryClient, p.id)
       setPanel(null)
       toast.show(`Project "${p.name}" created`)
-    },
-  })
-  const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: ProjectUpdate }) => updateProject(id, data),
-    onSuccess: (p) => {
-      queryClient.invalidateQueries({ queryKey: ['projects'] })
-      invalidateAttention(queryClient, p.id)
-      setPanel(null)
-      toast.show('Project saved')
     },
   })
   const deleteMutation = useMutation({
@@ -148,14 +142,6 @@ export default function ProjectSelection() {
     createMutation.reset()
     setPanel({ kind: 'new' })
   }
-  // Stable, so the table's columns are not rebuilt on every refetch.
-  const resetUpdate = updateMutation.reset
-  const editProject = useCallback((project: ProjectSummary) => {
-    resetUpdate()
-    // The editor already open for this project stays as it is, on whichever tab.
-    setPanel((current) => (current?.kind === 'edit' && current.id === project.id ? current : { kind: 'edit', id: project.id }))
-  }, [resetUpdate])
-
   const projects = data?.projects
   const rows: ProjectRow[] = useMemo(() => {
     const loads = new Map(loadData?.projects.map((load) => [load.project_id, load]))
@@ -163,6 +149,15 @@ export default function ProjectSelection() {
     return (projects ?? []).map((project) => ({ ...project, load: loads.get(project.id), problems: problems.get(project.id) }))
   }, [projects, loadData, attention])
   const editing = panel?.kind === 'edit' ? rows.find((p) => p.id === panel.id) : undefined
+  const save = useProjectSettingsSave(editing, { onSaved: () => setPanel(null) })
+
+  // Stable, so the table's columns are not rebuilt on every refetch.
+  const resetUpdate = save.reset
+  const editProject = useCallback((project: ProjectSummary) => {
+    resetUpdate()
+    // The editor already open for this project stays as it is, on whichever tab.
+    setPanel((current) => (current?.kind === 'edit' && current.id === project.id ? current : { kind: 'edit', id: project.id }))
+  }, [resetUpdate])
 
   let panelNode: React.ReactNode = null
   if (panel?.kind === 'new') {
@@ -193,11 +188,19 @@ export default function ProjectSelection() {
             <Button type="button" variant="danger-ghost" size="sm" onClick={() => setPendingDelete(editing)}><Trash2 className="w-3.5 h-3.5" /> Delete</Button>
             <span className="flex-1" />
             <Button type="button" variant="outline" size="sm" onClick={() => setPanel(null)}>Cancel</Button>
-            <Button type="submit" form="project-form" size="sm" disabled={updateMutation.isPending}>{updateMutation.isPending ? 'Saving…' : 'Save changes'}</Button>
+            <Button type="submit" form="project-form" size="sm" disabled={save.isPending || !editValid}>{save.isPending ? 'Saving…' : 'Save changes'}</Button>
           </>
         )}
       >
-        <ProjectForm key={editing.id} project={editing} onSave={(d) => updateMutation.mutate({ id: editing.id, data: d })} error={updateMutation.error?.message} formId="project-form" onHistoryChange={(showing) => setHistoryIn(showing ? panel : null)} />
+        <ProjectForm
+          key={editing.id}
+          project={editing}
+          onSave={(data, alerts) => save.mutate({ data, alerts })}
+          onValidityChange={setEditValid}
+          error={save.error?.message}
+          formId="project-form"
+          onHistoryChange={(showing) => setHistoryIn(showing ? panel : null)}
+        />
       </Inspector>
     )
   }

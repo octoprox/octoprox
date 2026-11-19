@@ -28,8 +28,9 @@ from api.models.tunnel import TunnelAddressError, TunnelValidationError
 from api.services.errors import InvalidConfigError, NotFoundError, WriteRejectedError
 
 if TYPE_CHECKING:
-    from api.attention.install import InstallAttentionReader
-    from api.attention.service import AttentionService
+    from api.attention.history import AlertHistory
+    from api.attention.service import AttentionService, InstallAttentionService
+    from api.attention.settings import AlertSettingsService
     from api.core.audit import Actor, AuditLog
     from api.core.auth import CurrentUser
     from api.core.config import Settings
@@ -311,9 +312,19 @@ def attention_of(request: Request) -> AttentionService:
     return api_runtime_of(request).attention
 
 
-def install_attention_of(request: Request) -> InstallAttentionReader:
-    """The install-wide Needs attention lines of the Projects page, from the heartbeats in Redis."""
+def install_attention_of(request: Request) -> InstallAttentionService:
+    """The install-wide Needs attention lines of the Projects page, from the install's stored alerts."""
     return api_runtime_of(request).install_attention
+
+
+def alert_history_of(request: Request) -> AlertHistory:
+    """A project's alerts, or the install's, open and resolved."""
+    return api_runtime_of(request).alert_history
+
+
+def alert_settings_of(request: Request) -> AlertSettingsService:
+    """A project's alert cut-offs, read and replaced."""
+    return api_runtime_of(request).alert_settings
 
 
 async def require_project(request: Request, project_id: str) -> Project:

@@ -34,6 +34,7 @@ class WorkerName(StrEnum):
     JOB_PRODUCER_TUNNEL_LAST_SEEN = "job_producer_tunnel_last_seen"
     JOB_PRODUCER_INDEX_HYGIENE = "job_producer_index_hygiene"
     JOB_PRODUCER_UPDATE_CHECK = "job_producer_update_check"
+    JOB_PRODUCER_ALERTS = "job_producer_alerts"
     # Gateways.
     FEED_FOLLOWER = "feed_follower"
     REQUEST_METERING = "request_metering"
@@ -66,6 +67,7 @@ class WorkerName(StrEnum):
     JOB_RUNNER_TUNNEL_LAST_SEEN = "job_runner_tunnel_last_seen"
     JOB_RUNNER_INDEX_HYGIENE = "job_runner_index_hygiene"
     JOB_RUNNER_UPDATE_CHECK = "job_runner_update_check"
+    JOB_RUNNER_ALERTS = "job_runner_alerts"
     SIGHTING_INGEST = "sighting_ingest"
     OBSERVATION_INGEST = "observation_ingest"
     EXIT_REPORT_INGEST = "exit_report_ingest"
@@ -191,6 +193,11 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     ),
     WorkerName.JOB_PRODUCER_UPDATE_CHECK: WorkerInfo(
         "Publishes an update check every hour while the update check is on, for the workers to run",
+        roles=_CONTROLLER,
+        lease=LeaseName.CONTROLLER,
+    ),
+    WorkerName.JOB_PRODUCER_ALERTS: WorkerInfo(
+        "Publishes a check of every project's and the install's alerts every minute, for the workers to run",
         roles=_CONTROLLER,
         lease=LeaseName.CONTROLLER,
     ),
@@ -335,7 +342,8 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     WorkerName.JOB_RUNNER_COMPACTION: WorkerInfo(
         "Rolls old metric rows up into coarser granularities and deletes the ones past each "
         "project's retention, the raw IP observations and exit IPs past theirs, the records of "
-        "past metrics flushes, and the audit entries past the audit log's retention",
+        "past metrics flushes, the audit entries past the audit log's retention, and the resolved "
+        "alerts past theirs",
         roles=_WORKER,
     ),
     WorkerName.JOB_RUNNER_SNAPSHOT: WorkerInfo(
@@ -363,6 +371,13 @@ WORKERS: dict[WorkerName, WorkerInfo] = {
     WorkerName.JOB_RUNNER_UPDATE_CHECK: WorkerInfo(
         "Fetches the release notes octoprox.com lists once a day, so the api can tell admins when a "
         "newer release is out",
+        roles=_WORKER,
+    ),
+    WorkerName.JOB_RUNNER_ALERTS: WorkerInfo(
+        "Runs the alert checks its job stream holds: every project and the install once a minute, or "
+        "one project the api or the traffic job asked for after a change; stores the alerts that "
+        "open, stay, resolve and reopen in one statement, and ends the until-clear mutes whose line "
+        "cleared",
         roles=_WORKER,
     ),
     WorkerName.SIGHTING_INGEST: WorkerInfo(

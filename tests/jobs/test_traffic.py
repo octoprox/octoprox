@@ -20,6 +20,7 @@ from redis.exceptions import ResponseError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
+from api.attention.requests import AlertChecks
 from api.core import utc_now
 from api.core.roles import JobKind
 from api.core.stats import MetricDelta
@@ -35,8 +36,10 @@ from api.db.repository import ConnectorRepository, MetricsRepository
 from api.db.streams import RuntimeSignal, StreamEntry
 from api.feed.state import RuntimeStateReader
 from api.jobs.job import JobBatch
+from api.jobs.queue import JobQueue
 from api.jobs.traffic import TrafficJob
 from api.models.connector import Connector
+from tests.conftest import queued_job_keys
 from tests.jobs.conftest import Rows, counted_selects
 
 LIMIT = 1000
@@ -60,6 +63,11 @@ def events(logs: Iterable[Mapping[str, Any]]) -> list[str]:
     return [log["event"] for log in logs]
 
 
+def traffic_job(sessions: async_sessionmaker[AsyncSession], redis_client: RedisClient) -> TrafficJob:
+    """One worker's traffic job, asking for alert checks on the test Redis."""
+    return TrafficJob(sessions, redis_client, alerts=AlertChecks(redis_client, JobQueue(redis_client)))
+
+
 class Harness:
     """Connectors in Postgres, their bytes where the flush and the gateways write them, and one worker's job."""
 
@@ -67,7 +75,7 @@ class Harness:
         self.sessions = sessions
         self.redis = redis_client
         self.rows = rows
-        self.job = TrafficJob(sessions, redis_client)
+        self.job = traffic_job(sessions, redis_client)
 
     async def connector(self, **traffic: Any) -> Connector:
         """A connector of a project of its own, with ``traffic`` as its traffic config."""
@@ -153,6 +161,23 @@ class TestBlocking:
         assert logs[1]["until"] == period_end(connector).isoformat()
         assert logs[1]["action"] == action
 
+    async def test_a_changed_decision_asks_for_its_project_s_alert_check_and_an_unchanged_one_does_not(
+        self, harness: Harness
+    ) -> None:
+        connector = await harness.connector(limit_bytes=LIMIT, action="block")
+        await harness.history(connector, 2 * LIMIT)
+
+        await harness.decide(connector)
+        assert await queued_job_keys(harness.redis, JobKind.ALERTS) == [connector.project_id]
+
+        await harness.decide(connector)
+        assert await queued_job_keys(harness.redis, JobKind.ALERTS) == [connector.project_id]
+
+        # Lifted: asked again, so the line clears within seconds.
+        await harness.edit(connector, traffic_config={"limit_bytes": 4 * LIMIT, "action": "block"})
+        await harness.decide(connector)
+        assert await queued_job_keys(harness.redis, JobKind.ALERTS) == [connector.project_id] * 2
+
     async def test_bytes_in_both_directions_count_against_the_limit(self, harness: Harness) -> None:
         """An upload-heavy connector is held to its cap like any other: sent and received add up, in both halves."""
         connector = await harness.connector(limit_bytes=LIMIT, action="block")
@@ -226,7 +251,7 @@ class TestChanges:
     ) -> None:
         connector = await harness.connector(limit_bytes=LIMIT, action="block")
         await harness.history(connector, 2 * LIMIT)
-        other = TrafficJob(sessions, redis_client)
+        other = traffic_job(sessions, redis_client)
 
         with capture_logs() as logs:
             await asyncio.gather(harness.decide(connector), harness.decide(connector, job=other))
@@ -441,7 +466,7 @@ class TestLogs:
         assert (logs[0]["total_bytes"], logs[0]["period_end"]) == (1050, period_end(connector).isoformat())
 
         # Another worker process logs the limit once of its own; the block is no change to it.
-        other = TrafficJob(sessions, redis_client)
+        other = traffic_job(sessions, redis_client)
         with capture_logs() as logs:
             await harness.decide(connector, job=other)
             await harness.decide(connector, job=other)
