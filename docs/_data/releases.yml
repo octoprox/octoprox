@@ -10,6 +10,37 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.9.0
+  date: 2026-11-19
+  title: Alert history, alert thresholds and background problem checks
+  changes:
+    - text: "Every Needs attention line is now kept as an alert, so a problem that cleared before anyone looked still leaves a trace. A project's new Alerts page, after Failures in the sidebar, lists open and resolved alerts with filters, how long each lasted and how many times it came back."
+      docs: metrics#alerts
+    - text: "Editors and admins can set where each line starts on the new Alert settings tab of Project settings, such as success rate cut-offs, vendor refusal shares and unhealthy proxy counts. Each field shows its default, and every change is recorded in the project's History."
+      docs: metrics#thresholds
+    - text: "A new low success rate line warns when fewer than 80% of the requests that reached a proxy succeed in the last 15 minutes, and becomes a problem below 50%. Projects can change these cut-offs or turn the line off."
+      docs: metrics#thresholds
+    - text: "Background checks now find the Needs attention lines once a minute, and again within seconds of a change to a connector, its countries, the project, its proxies or its alert settings. A fix clears its line within a couple of seconds, and the card shows a spinner while a check is under way."
+      docs: metrics#needs-attention
+    - text: "The Needs attention card says when the last check was if it is more than three minutes old. A line without a time of its own now says since when it has been there."
+      docs: metrics#needs-attention
+    - text: "A line covered by a wider one, such as every connector turned off, no longer shows on the card or in its counts. It stays open on the Alerts page, marked Covered. More than three connectors with no healthy proxy now show as one line."
+      docs: metrics#needs-attention
+    - text: "A mute until the line clears now ends only once the line has stayed gone for 15 minutes, so a line that comes and goes stays muted."
+      docs: metrics#muting-a-line
+    - text: "Resolved alerts are kept as long as the project's metrics by default. You can set a different number of days under Keep resolved alerts, and 0 keeps them forever."
+      docs: metrics#alerts
+    - text: "Admins can see the install's alerts over time under Administration → Alerts. Resolved ones are kept for 90 days, and admins can change that on the same page."
+      docs: metrics#alerts
+    - text: "Install-wide lines on the Projects page now show 1-2 minutes after a problem starts and say since when. The page also says when Octoprox is not checking for problems or when its checks are behind."
+      docs: metrics#the-projects-page
+    - text: "Backups that include history now carry each project's alerts and the install's resolved alerts. A project's alert settings always travel with the project."
+      docs: api#backup--migration
+    - text: "The API has new endpoints for a project's alerts, its alert settings, the install's alerts and their retention. The Needs attention response now says when each line started and when the project was last checked."
+      docs: api#alerts
+    - text: "Upgrade note: if you set `OCTOPROX_WORKER_JOBS`, add `alerts` to at least one worker. Without it the Needs attention lines stop updating."
+      docs: configuration
+
 - version: 6.8.2
   date: 2026-11-16
   title: Needs attention card, line muting and sidebar fade
