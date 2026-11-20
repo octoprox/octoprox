@@ -52,6 +52,12 @@ export function strategyExplanation(strategy: string): string {
   }
 }
 
+/** Plain-language account of all traffic over the split's range: its requests, bytes and spend, and why it can differ. */
+export function allTrafficExplanation(split: TrafficSplitResponse): string {
+  const spend = totalSpend(split.connectors)
+  return `All traffic over ${split.range}: ${split.observed_requests.toLocaleString()} requests, ${formatBytesDecimal(split.observed_bytes)}${spend ? `, ${formatMoney(spend.amount, spend.currency)} at the current rates` : ''}. It counts every request through each connector, whatever its site or location, so it can differ from the expected split.`
+}
+
 /** One sentence per connector describing its slice of untargeted traffic under the current setup. */
 export function describeShare(c: ConnectorTrafficShare, split: TrafficSplitResponse): string {
   if (c.excluded_reason === 'disabled') return `${c.name} is disabled and takes no traffic.`
@@ -69,13 +75,11 @@ export function describeShare(c: ConnectorTrafficShare, split: TrafficSplitRespo
 
 interface TrafficSplitPanelProps {
   projectId: string
-  /** 'card' wraps the panel in a Card with header; 'inline' renders just the body. */
-  variant?: 'card' | 'inline'
   onOpenConnector?: (connectorId: string) => void
   className?: string
 }
 
-export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector, className }: TrafficSplitPanelProps) {
+export function TrafficSplitPanel({ projectId, onOpenConnector, className }: TrafficSplitPanelProps) {
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
   // The site, and the place its requests name (a LocationTarget key), the effective weights are shown for: none
   // shows the configured split alone.
@@ -122,18 +126,6 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
       : <LogoLoader size="sm" className="py-3" />
   const rangePicker = <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
 
-  if (variant === 'inline') {
-    return (
-      <div className={className}>
-        <div className="flex items-center justify-between flex-wrap gap-x-3 gap-y-1.5 mb-2">
-          <span className="text-xs text-fg-muted">Observed over</span>
-          {rangePicker}
-        </div>
-        {picker}
-        {body}
-      </div>
-    )
-  }
   return (
     <Card className={`px-4 py-3 ${className ?? ''}`}>
       <CardHeader
@@ -141,7 +133,7 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
           <span className="inline-flex items-center gap-1.5">
             Traffic split
             <InfoTip label="About traffic split">
-              Each connector has a weight on its Routing tab. Among the connectors that can serve a request, one is picked in proportion to weight, then the strategy picks a proxy inside it. Weights are relative: 1 and 3 split 25/75. A connector with no healthy proxy, or one that filters out the target domain or country, is skipped and the rest share its traffic.
+              Each connector has a weight on its Routing tab. Among the connectors that can serve a request, one is picked in proportion to weight, then the strategy picks a proxy inside it. Weights are relative: 1 and 3 split 25/75. A connector with no healthy proxy, or one that filters out the target domain or country, is skipped and the rest share its traffic. All traffic counts every request through each connector over the picked range, whatever its site or location, so the site and location pickers do not narrow it.
             </InfoTip>
           </span>
         }
@@ -260,11 +252,10 @@ function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSpli
   if (split.site) return <SiteSplitBody split={split} site={split.site} mode={mode} onOpenConnector={onOpenConnector} />
   const active = split.connectors.filter((c) => !c.excluded_reason)
   const priced = split.connectors.some((c) => c.cost != null)
-  const spend = totalSpend(split.connectors)
-  // Wide containers lay each connector out as one row of six columns, the header and every row on one grid's
-  // columns (subgrid), so each column lines up down the card. Below @xs (320px, a phone or a cramped sidebar column)
-  // that row cannot fit, so the numbers stack under the name on a second line instead of overlapping it.
-  const wideCols = priced ? '@xs:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto]' : '@xs:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto]'
+  // Wide containers lay each connector out as one row of six columns, the band, the header and every row on one
+  // grid's columns (subgrid), so each column lines up down the card. Below @md (448px, a phone or a narrow column)
+  // the numbers would leave the name too little room, so they stack under it on a second line instead.
+  const wideCols = priced ? '@md:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto]' : '@md:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto]'
 
   return (
     <div className="space-y-3">
@@ -279,13 +270,23 @@ function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSpli
 
       {/* Per connector rows: weight, expected, observed, spend */}
       <div className="@container -mx-1.5">
-        <div className={`@xs:grid ${wideCols} gap-x-3`}>
-          <div className="hidden @xs:grid @xs:grid-cols-subgrid @xs:col-span-full px-1.5 text-[11px] text-fg-subtle">
+        <div className={`@md:grid ${wideCols} gap-x-3`}>
+          {/* A band over the columns says which requests each group counts: Weight and Expected those naming no
+              country, Observed and Spend all traffic, set apart by a divider down the header and every row. Its words
+              take no width of their own (contain-inline-size), so neither label widens a column: one a little wider
+              than its columns overhangs its rule, centred, rather than being cut short. */}
+          <div className="hidden @md:grid @md:grid-cols-subgrid @md:col-span-full px-1.5 text-[11px] text-fg-subtle">
+            <span className="col-start-3 col-span-2 contain-inline-size flex justify-center whitespace-nowrap border-b border-line-strong pb-0.5">Untargeted requests</span>
+            <span className={cn('contain-inline-size border-l border-line-strong pl-3', priced && 'col-span-2')}>
+              <span className="flex justify-center whitespace-nowrap border-b border-line-strong pb-0.5">All traffic · {split.range}</span>
+            </span>
+          </div>
+          <div className="hidden @md:grid @md:grid-cols-subgrid @md:col-span-full px-1.5 text-[11px] text-fg-subtle">
             <span className="w-2" />
             <span>Connector</span>
             <span className="text-right">Weight</span>
             <span className="text-right">Expected</span>
-            <span className="text-right">Observed</span>
+            <span className="text-right border-l border-line-strong pl-3">Observed</span>
             {priced && <span className="text-right">Spend</span>}
           </div>
           {split.connectors.map((c, i) => {
@@ -295,21 +296,21 @@ function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSpli
               <Row
                 key={c.connector_id}
                 {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
-                className={`w-full grid grid-cols-[auto_minmax(0,1fr)_auto] @xs:grid-cols-subgrid @xs:col-span-full items-center gap-x-3 gap-y-0.5 py-1.5 @xs:py-0 @xs:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
+                className={`w-full grid grid-cols-[auto_minmax(0,1fr)_auto] @md:grid-cols-subgrid @md:col-span-full items-center gap-x-3 gap-y-0.5 py-1.5 @md:py-0 @md:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
                 title={describeShare(c, split)}
               >
                 <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
                 <ConnectorName c={c} off={off} />
                 {/* Stacked: one line under the name. Wide: `contents` hands the three cells to the row grid. */}
-                <span className="col-start-2 col-span-2 row-start-2 flex items-center flex-wrap gap-x-3 gap-y-0.5 min-w-0 @xs:contents">
-                  <span className="tabular-nums text-fg-muted whitespace-nowrap @xs:text-right">
-                    <span className="text-fg-subtle @xs:hidden">Weight </span>{c.weight}
+                <span className="col-start-2 col-span-2 row-start-2 flex items-center flex-wrap gap-x-3 gap-y-0.5 min-w-0 @md:contents">
+                  <span className="tabular-nums text-fg-muted whitespace-nowrap @md:text-right">
+                    <span className="text-fg-subtle @md:hidden">Weight </span>{c.weight}
                   </span>
-                  <span className={`tabular-nums font-medium whitespace-nowrap @xs:text-right ${off ? 'text-fg-subtle' : ''}`}>
-                    <span className="text-fg-subtle font-normal @xs:hidden">Expected </span>{formatShare(c.expected_share)}
+                  <span className={`tabular-nums font-medium whitespace-nowrap @md:text-right ${off ? 'text-fg-subtle' : ''}`}>
+                    <span className="text-fg-subtle font-normal @md:hidden">Expected </span>{formatShare(c.expected_share)}
                   </span>
-                  <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @xs:justify-end @xs:min-w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}`}>
-                    <span className="text-fg-subtle @xs:hidden">Observed</span>
+                  <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @md:self-stretch @md:justify-end @md:min-w-[88px] @md:border-l @md:border-line-strong @md:pl-3" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}, every site and location`}>
+                    <span className="text-fg-subtle @md:hidden">All traffic · {split.range}</span>
                     <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
                       <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
                     </span>
@@ -317,7 +318,7 @@ function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSpli
                   </span>
                 </span>
                 {priced && (
-                  <span className="col-start-3 row-start-1 @xs:col-auto @xs:row-auto tabular-nums text-right text-fg-muted whitespace-nowrap @xs:min-w-[64px]">
+                  <span className="col-start-3 row-start-1 @md:col-auto @md:row-auto tabular-nums text-right text-fg-muted whitespace-nowrap @md:min-w-[64px]">
                     {c.cost != null && c.currency ? formatMoney(c.cost, c.currency) : '-'}
                   </span>
                 )}
@@ -330,7 +331,7 @@ function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSpli
       <p className="text-xs text-fg-muted">
         {strategyExplanation(split.strategy)}
         {split.observed_requests === 0 && ' No requests in this window yet.'}
-        {split.observed_requests > 0 && ` Observed over ${split.range}: ${split.observed_requests.toLocaleString()} requests, ${formatBytesDecimal(split.observed_bytes)}${spend ? `, ${formatMoney(spend.amount, spend.currency)} at the current rates` : ''}. Requests with a country or a filtered domain see a narrower set of connectors, so the observed split can differ from the expected one.`}
+        {split.observed_requests > 0 && ` ${allTrafficExplanation(split)}`}
       </p>
     </div>
   )
@@ -352,6 +353,8 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
   const place = split.place ?? ''
   const places = split.reputation_places ?? []
   const from = place ? ` from ${placeLabel(place, places)}` : ''
+  // The band over the columns the pickers decide, naming the requests they are for.
+  const picked = place ? `${site}${from}` : `${site}, no location`
   const applied = split.reputation_applied
   // Whether a connector serves the site's requests from the place, by the answer for that request: a connector with IPs
   // has rows eligible for it (every one avoided keeps its ×0 row), a dynamic one an effective weight; one its domain
@@ -370,9 +373,8 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
   // Round robin draws a request whose weights reputation lowered at random by them, out of its fixed order; a connector
   // with every row avoided only drops out, which lowers no weight.
   const drawn = split.strategy === 'round_robin' && applied && active.some((c) => c.reputation > 0 && c.reputation < 1)
-  const spend = totalSpend(split.connectors)
   // Six columns need more room than the configured split's: below @lg (512px) the numbers stack under the name. Wide,
-  // the header and every row share one grid's columns (subgrid), as in the configured split.
+  // the band, the header and every row share one grid's columns (subgrid), as in the configured split.
   const wideCols = '@lg:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto_auto]'
 
   return (
@@ -395,6 +397,15 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
 
       <div className="@container -mx-1.5">
         <div className={`@lg:grid ${wideCols} gap-x-3`}>
+          {/* The band: Weight to Expected follow the pickers, Observed counts all traffic. The pickers' words take
+              no width of their own (contain-inline-size), so a long site or place is cut short, not a wider column;
+              nor does the range's, which overhangs its rule a little, centred, when wider than Observed. */}
+          <div className="hidden @lg:grid @lg:grid-cols-subgrid @lg:col-span-full px-1.5 text-[11px] text-fg-subtle">
+            <span className="col-start-3 col-span-4 contain-inline-size truncate text-center border-b border-line-strong pb-0.5" title={picked}>{picked}</span>
+            <span className="contain-inline-size border-l border-line-strong pl-3">
+              <span className="flex justify-center whitespace-nowrap border-b border-line-strong pb-0.5">All traffic · {split.range}</span>
+            </span>
+          </div>
           <div className="hidden @lg:grid @lg:grid-cols-subgrid @lg:col-span-full px-1.5 text-[11px] text-fg-subtle">
             <span className="w-2" />
             <span>Connector</span>
@@ -402,7 +413,7 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
             <span className="text-right">Reputation</span>
             <span className="text-right">Effective</span>
             <span className="text-right">Expected</span>
-            <span className="text-right">Observed</span>
+            <span className="text-right border-l border-line-strong pl-3">Observed</span>
           </div>
           {split.connectors.map((c, i) => {
             const off = !takes(c)
@@ -439,8 +450,8 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
                   <span className={cn('tabular-nums whitespace-nowrap @lg:text-right', off ? 'text-fg-subtle' : applied ? 'font-medium' : 'text-fg-muted')}>
                     <span className="text-fg-subtle font-normal @lg:hidden">Expected </span>{formatShare(effectiveShare)}
                   </span>
-                  <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @lg:justify-end @lg:min-w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}, to every site`}>
-                    <span className="text-fg-subtle @lg:hidden">Observed</span>
+                  <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @lg:self-stretch @lg:justify-end @lg:min-w-[88px] @lg:border-l @lg:border-line-strong @lg:pl-3" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}, every site and location`}>
+                    <span className="text-fg-subtle @lg:hidden">All traffic · {split.range}</span>
                     <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
                       <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
                     </span>
@@ -462,7 +473,7 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
         {strategyExplanation(split.strategy)}
         {drawn && ' Requests to this site are drawn at random by the effective weights, since reputation lowers a weight here; the fixed order holds for the other requests.'}
         {split.observed_requests === 0 && ' No requests in this window yet.'}
-        {split.observed_requests > 0 && ` Observed over ${split.range}: ${split.observed_requests.toLocaleString()} requests to every site, ${formatBytesDecimal(split.observed_bytes)}${spend ? `, ${formatMoney(spend.amount, spend.currency)} at the current rates` : ''}.`}
+        {split.observed_requests > 0 && ` ${allTrafficExplanation(split)}`}
       </p>
     </div>
   )
