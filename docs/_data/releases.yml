@@ -10,6 +10,25 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.9.1
+  date: 2026-11-20
+  title: Exit reputation across every place for a site
+  changes:
+    - text: "Upgrade note: the API endpoint GET /projects/{project_id}/exit-reputation/connectors is removed. Use GET /projects/{project_id}/exit-reputation/places?site=... instead. It shows one site across every place, with each connector's reputation and share per place."
+      docs: api#exit-reputation-records
+    - text: "The Reputation tab on Exit locations shows one site across every place its requests named. Each place shows its reports, its expected split, a cell per connector and the lowest value. A tile per connector says where it is lowered."
+      docs: exit-reputation#every-place-for-a-site
+    - text: "Each cell on the Reputation tab shows what its value is based on. It can be a value measured at the place, a value taken from a coarser place, reported on but not judged yet, no reports, or takes none. Filter to lowered or not judged places, jump to any place by name, and open a place to see how its split moves and why."
+      docs: exit-reputation#every-place-for-a-site
+    - text: "The traffic split's site and place pickers are searchable and list every site and place with reports, not just the top 20. Places read by name, such as \"New York, NY\" or \"London, United Kingdom\", and switching sites keeps the place when the new site has it."
+      docs: exit-reputation#views
+    - text: "In the traffic split, a connector that is reported on but not judged yet, or that has no reports, no longer looks like a measured ×1. Every place for this site → opens the site on the Reputation tab."
+      docs: exit-reputation#views
+    - text: "The Needs attention line for a site blocked on every connector now opens the Reputation tab on that site."
+      docs: exit-reputation#every-place-for-a-site
+    - text: "The traffic split API lists every site and place with reports. For each connector it also says whether its reputation at the place is its own, inherited, not judged, without reports, or takes none."
+      docs: api#effective-shares
+
 - version: 6.9.0
   date: 2026-11-19
   title: Alert history, alert thresholds and background problem checks
