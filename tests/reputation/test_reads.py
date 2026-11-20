@@ -333,6 +333,27 @@ class TestSitesAndPlaces:
         # Three bad reports avoid for "Avoid for", an hour at the default.
         assert await repository.avoided_ips(project.id, ["google.com"], at(2)) == {}
 
+    async def test_every_place_of_a_site_for_the_connectors_named(self, db_session: AsyncSession, project: Project) -> None:
+        pool, dynamic = await self._reported(db_session, project)
+        other = await make_project(db_session, "globex")
+        await self._reported(db_session, other)
+        repository = ExitReputationRepository(db_session)
+
+        records = await repository.connector_records(project.id, ["google.com"], None, connector_ids=[pool, dynamic])
+        assert [(record.connector_id, record.site, record.place) for record in records] == sorted(
+            [
+                (pool, "google.com", ""),
+                (dynamic, "google.com", "US"),
+                (dynamic, "google.com", "US/NY"),
+                (dynamic, "google.com", "US/NY/new_york"),
+            ]
+        )
+        # Only the connectors named, and none of another project's.
+        dynamic_only = await repository.connector_records(project.id, ["google.com"], None, connector_ids=[dynamic])
+        assert [record.connector_id for record in dynamic_only] == [dynamic] * 3
+        assert await repository.connector_records(project.id, ["google.com"], None, connector_ids=[]) == []
+        assert await repository.busiest_sites(project.id) == [("google.com", 7), ("bing.com", 1)]
+
 
 class TestEveryRecordingProjectAtOnce:
     """The reads the alerts job makes for every recording project at once agree with the one-project reads."""

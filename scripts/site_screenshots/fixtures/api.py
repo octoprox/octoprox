@@ -392,8 +392,8 @@ def _project_get(pid: str, sub: str, q: dict[str, str]) -> object:
         return {"snapshots": series.project_history(pid, q.get("range", "24h"))}
     if sub == "/metrics/traffic-split":
         return analytics.traffic_split(pid, q.get("range", "1h"), q.get("site"), q.get("place"))
-    if sub == "/exit-reputation/connectors":
-        return analytics.connectors_by_site(pid, q.get("place"))
+    if sub == "/exit-reputation/places":
+        return analytics.site_places(pid, q.get("site"))
     if sub == "/connectors":
         conns = connectors_of(pid)
         return {"total": len(conns), "connectors": [connector_json(c) for c in conns]}

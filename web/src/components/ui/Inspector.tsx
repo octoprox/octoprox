@@ -32,6 +32,9 @@ export const INSPECTOR_WIDTH = 600
 /** Wider variant for dense editors (provider builder). */
 export const INSPECTOR_WIDTH_WIDE = 760
 
+/** The header's back and close buttons on a touch screen: 44px to tap, reaching into the header's padding so neither the header nor the icon moves. */
+const HEADER_BUTTON_TOUCH = 'pointer-coarse:w-11 pointer-coarse:h-11 pointer-coarse:-my-2.5 pointer-coarse:inline-flex pointer-coarse:items-center pointer-coarse:justify-center'
+
 export function Inspector({ title, subtitle, crumb, actions, onBack, onClose, footer, width = INSPECTOR_WIDTH, children, className }: InspectorProps) {
   return (
     <>
@@ -51,7 +54,7 @@ export function Inspector({ title, subtitle, crumb, actions, onBack, onClose, fo
           <button
             type="button"
             onClick={onBack}
-            className="p-1.5 -ml-1 rounded-md text-fg-muted hover:text-fg hover:bg-surface-raised transition-colors"
+            className={cn('p-1.5 -ml-1 pointer-coarse:-ml-3.5 rounded-md text-fg-muted hover:text-fg hover:bg-surface-raised transition-colors', HEADER_BUTTON_TOUCH)}
             title="Back"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -72,7 +75,7 @@ export function Inspector({ title, subtitle, crumb, actions, onBack, onClose, fo
         <button
           type="button"
           onClick={onClose}
-          className="p-1.5 -mr-1 rounded-md text-fg-muted hover:text-fg hover:bg-surface-raised transition-colors"
+          className={cn('p-1.5 -mr-1 pointer-coarse:-mr-3.5 rounded-md text-fg-muted hover:text-fg hover:bg-surface-raised transition-colors', HEADER_BUTTON_TOUCH)}
           title="Close"
         >
           <X className="w-4 h-4" />

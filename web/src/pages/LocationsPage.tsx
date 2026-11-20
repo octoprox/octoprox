@@ -1,7 +1,8 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { fetchGeoExits, type ExitReputationRecord } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
@@ -16,18 +17,54 @@ import { ExitSharingPanel } from '../components/geo/ExitSharingPanel'
 import { ObservationsPanel } from '../components/geo/ObservationsPanel'
 import { ExitReputationPanel, recordId } from '../components/geo/ExitReputationPanel'
 import { ExitIpReputationInspector } from '../components/geo/ExitIpReputation'
+import { PlaceInspector, type InspectedPlace } from '../components/geo/SitePlaces'
 
 type Tab = 'accuracy' | 'sharing' | 'exits' | 'observations' | 'reputation'
+const TABS: Tab[] = ['accuracy', 'sharing', 'exits', 'observations', 'reputation']
 
 /** Where this project's proxies really exit: provider accuracy, exit sharing, exit IPs, the observation log and exit reputation, project-scoped. */
 export default function LocationsPage() {
   const { selectedProjectId, selectedProject } = useProject()
   const { isAdmin } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [tab, setTab] = useState<Tab>('accuracy')
+  // A link's request for a tab, so a phone's tab strip scrolls to it.
+  const [tabRequest, setTabRequest] = useState<object | null>(null)
   const [range] = useAccuracyRange()
   const [inspecting, setInspecting] = useState<AccuracyRow | null>(null)
   // The reputation row whose IP is open: the IP's every site shows, the row stays marked.
   const [inspectingRecord, setInspectingRecord] = useState<ExitReputationRecord | null>(null)
+  // The Reputation tab's site ('' the default one) and the place of it open in the side panel; one panel at a time.
+  const [site, setSite] = useState('')
+  const [inspectingPlace, setInspectingPlace] = useState<InspectedPlace | null>(null)
+  const inspectRecord = (record: ExitReputationRecord) => {
+    setInspectingRecord(record)
+    setInspectingPlace(null)
+  }
+  const inspectPlace = (place: InspectedPlace) => {
+    setInspectingPlace(place)
+    setInspectingRecord(null)
+  }
+  // A place open for the very site picked stays open (the default site, pinned once named); another site's closes.
+  const pickSite = (value: string) => {
+    setSite(value)
+    setInspectingPlace((open) => (open && open.site === value ? { ...open, key: value } : null))
+  }
+
+  // Deep link (a Needs attention line): ?tab=reputation&site=<site>, read once and dropped.
+  useEffect(() => {
+    const wanted = searchParams.get('tab')
+    const linkedSite = searchParams.get('site')
+    if (!wanted && linkedSite === null) return
+    if (TABS.includes(wanted as Tab)) {
+      setTab(wanted as Tab)
+      setTabRequest({})
+    }
+    if (linkedSite !== null) pickSite(linkedSite.trim())
+    searchParams.delete('tab')
+    searchParams.delete('site')
+    setSearchParams(searchParams, { replace: true })
+  }, [searchParams])
   const days = accuracyDays(range)
   const { data: exits } = useQuery({
     queryKey: ['geo-exits', selectedProjectId ?? 'all', days],
@@ -48,6 +85,8 @@ export default function LocationsPage() {
         />
       ) : inspectingRecord && tab === 'reputation' ? (
         <ExitIpReputationInspector projectId={selectedProjectId} ip={inspectingRecord.ip} onClose={() => setInspectingRecord(null)} />
+      ) : inspectingPlace && tab === 'reputation' ? (
+        <PlaceInspector projectId={selectedProjectId} inspected={inspectingPlace} onClose={() => setInspectingPlace(null)} />
       ) : undefined}
     >
       <Tabs<Tab>
@@ -57,6 +96,7 @@ export default function LocationsPage() {
         ]}
         active={tab}
         onChange={setTab}
+        reveal={tabRequest}
         className="pointer-coarse:*:min-h-11"
       />
       {tab === 'accuracy' && (
@@ -74,7 +114,11 @@ export default function LocationsPage() {
           projectId={selectedProjectId}
           mode={selectedProject?.exit_reputation ?? 'off'}
           inspecting={inspectingRecord ? recordId(inspectingRecord) : null}
-          onInspect={setInspectingRecord}
+          onInspect={inspectRecord}
+          site={site}
+          onSite={pickSite}
+          inspectingPlace={inspectingPlace}
+          onInspectPlace={inspectPlace}
         />
       )}
     </Page>

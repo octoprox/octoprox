@@ -21,6 +21,7 @@ from .world import (
     P3,
     PROJECTS,
     STEPS,
+    ConnSpec,
     build_proxies,
     connectors_of,
     user_id,
@@ -307,9 +308,7 @@ def traffic_split(project_id: str, rng: str, site: str | None = None, place: str
     rows = []
     for c in conns:
         mine = [p for p in proxies if p["connector_id"] == c.id]
-        # Untargeted traffic skips exits in a country the connector excludes, and its exits in a country it reserves.
-        skipped = set(c.routing_extra.get("excluded_countries", [])) | set(c.routing_extra.get("reserved_countries", []))
-        eligible = sum(1 for p in mine if p["status"] == "healthy" and not p["quarantined"] and p["country"] not in skipped)
+        eligible = untargeted_eligible(c, mine)
         o = observed[c.id]
         b = o["bytes_sent"] + o["bytes_received"]
         price = c.traffic_config.get("price_per_gb")
@@ -323,6 +322,7 @@ def traffic_split(project_id: str, rng: str, site: str | None = None, place: str
             "currency": c.traffic_config.get("currency", "USD") if price is not None else None,
             "reputation_place": None, "reputation": 1.0,
             "reputation_kind": None if not site else "block_rate" if c.target and c.target.get("dynamic") else "usable_ips",
+            "reputation_state": "no_reports" if eligible else "takes_none",
             "blocked": None, "requests": None,
             "usable_ips": eligible if site and not (c.target and c.target.get("dynamic")) else None,
             "eligible_ips": eligible if site and not (c.target and c.target.get("dynamic")) else None,
@@ -334,12 +334,34 @@ def traffic_split(project_id: str, rng: str, site: str | None = None, place: str
             "reputation_sites": [], "reputation_places": []}
 
 
-def connectors_by_site(project_id: str, place: str | None = None) -> dict:
-    """Every connector against the sites with exit reputation data: none in the demo projects, whose mode is off."""
-    return {"place": place or None, "places": [], "sites": [], "reputation_applied": False,
-            "connectors": [{"connector_id": c.id, "name": c.name, "credential_type": c.ctype,
-                            "dynamic": bool(c.target and c.target.get("dynamic")), "weight": c.weight, "cells": {}}
-                           for c in connectors_of(project_id)]}
+def untargeted_eligible(c: ConnSpec, proxies: list[dict]) -> int:
+    """The connector's proxies an untargeted request can use: healthy ones outside a country it excludes or reserves."""
+    skipped = set(c.routing_extra.get("excluded_countries", [])) | set(c.routing_extra.get("reserved_countries", []))
+    return sum(1 for p in proxies if p["status"] == "healthy" and not p["quarantined"] and p["country"] not in skipped)
+
+
+def site_places(project_id: str, site: str | None = None) -> dict:
+    """One site across every place its records name. The demo projects keep no exit reputation (their mode is off), so
+    there is no site to open by default, and one asked for lists no place, every connector at its configured weight.
+
+    Fields with no value are left out, as the API leaves them out of this answer.
+    """
+    empty = {"mode": "off", "reputation_applied": False, "sites": [], "connectors": [], "places": [],
+             "summary": {"lowered_connectors": 0, "serving_connectors": 0}}
+    if not site:
+        return empty
+    proxies = build_proxies(project_id)
+    connectors = []
+    for c in sorted(connectors_of(project_id), key=lambda c: c.name.lower()):
+        dynamic = bool(c.target and c.target.get("dynamic"))
+        tile = {"lowered_countries": 0, "countries": 0, "lowered_states": 0, "states": 0, "lowered_cities": 0,
+                "cities": 0, "buckets": {"heavy": 0, "lowered": 0, "inherited": 0, "full": 0, "not_judged": 0}}
+        if not dynamic:
+            eligible = untargeted_eligible(c, [p for p in proxies if p["connector_id"] == c.id])
+            tile |= {"usable_ips": eligible, "eligible_ips": eligible, "reputation": 1.0}
+        connectors.append({"connector_id": c.id, "name": c.name, "credential_type": c.ctype, "enabled": c.enabled,
+                           "weight": c.weight, "dynamic": dynamic, "tile": tile})
+    return {**empty, "site": site, "sites": [{"site": site, "reports": 0}], "connectors": connectors}
 
 
 # --------------------------------------------------------------------------- activity (the Enterprise audit log)

@@ -1,19 +1,21 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router'
 import {
   ConnectorTrafficShare, HISTORY_RANGES, TrafficSplitResponse, fetchProjectTrafficSplit,
   type ExitReputationMode, type ReputationPlace,
 } from '../api/client'
 import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useProject } from '../contexts/ProjectContext'
-import { formatBytesDecimal, formatMoney } from '../utils/format'
+import { compact, formatBytesDecimal, formatMoney, plural } from '../utils/format'
 import { cn } from '../utils/cn'
 import { ProviderLogo } from './ProviderLogo'
-import { ReputationFactor, placeLabel, reputationReason, reputationTitle, weightText, wouldBe } from './ConnectorReputation'
-import { Card, CardHeader, InfoTip, LogoLoader, Reloading, Segmented, Select } from './ui'
+import { ReputationFactor, lowered, placeLabel, reputationReason, reputationTitle, weightText, wouldBe } from './ConnectorReputation'
+import { RichSelect } from './RichSelect'
+import { Card, CardHeader, InfoTip, LogoLoader, Reloading, Segmented } from './ui'
 
 // One hue per connector position, cycling, so the bar and the rows agree: the chart palette the latency chart
 // uses (blue, orange, aqua, yellow, magenta, green, violet, red), stepped for each theme. Neighbours stay apart
@@ -22,7 +24,8 @@ const SWATCHES = [
   'bg-[#2a78d6] dark:bg-[#3987e5]', 'bg-[#eb6834] dark:bg-[#d95926]', 'bg-[#1baf7a] dark:bg-[#199e70]', 'bg-[#eda100] dark:bg-[#c98500]',
   'bg-[#e87ba4] dark:bg-[#d55181]', 'bg-[#008300]', 'bg-[#4a3aa7] dark:bg-[#9085e9]', 'bg-[#e34948] dark:bg-[#e66767]',
 ]
-const swatch = (i: number) => SWATCHES[i % SWATCHES.length]
+/** The colour classes of the connector at position ``i``, for its dot, its bar segment and its row. */
+export const swatch = (i: number) => SWATCHES[i % SWATCHES.length]
 
 export const formatShare = (v: number | null | undefined): string => {
   if (v == null) return '-'
@@ -78,6 +81,9 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
   // shows the configured split alone.
   const [site, setSite] = useState('')
   const [place, setPlace] = useState('')
+  // A picked site's place is settled once its answer lists the site's places: the place asked for stays if listed,
+  // else the busiest. Until then the place asked for is the last site's, so a place both sites list is one fetch.
+  const [settling, setSettling] = useState(false)
   const { selectedProject } = useProject()
   const mode = selectedProject?.id === projectId ? selectedProject.exit_reputation : undefined
   const { data: split, isPlaceholderData, isError, error } = useQuery({
@@ -91,11 +97,24 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === projectId ? previous : undefined),
   })
 
+  useEffect(() => {
+    if (!settling || !split || split.site !== site || (split.place ?? '') !== place) return
+    const places = split.reputation_places ?? []
+    if (!place || !places.some((p) => p.place === place)) setPlace(places[0]?.place ?? '')
+    setSettling(false)
+  }, [settling, split, site, place])
+
   const pickSite = (value: string) => {
     setSite(value)
-    setPlace('')
+    if (!value) setPlace('')
+    setSettling(!!value)
   }
-  const picker = split && <SitePicker split={split} site={site} place={place} onSite={pickSite} onPlace={setPlace} />
+  // "No location" picked here stays: only a site switch settles the place again.
+  const pickPlace = (value: string) => {
+    setPlace(value)
+    setSettling(false)
+  }
+  const picker = split && <SitePicker projectId={projectId} split={split} site={site} place={place} onSite={pickSite} onPlace={pickPlace} />
   const body = split
     ? <Reloading active={isPlaceholderData}><TrafficSplitBody split={split} mode={mode} onOpenConnector={onOpenConnector} /></Reloading>
     : isError
@@ -135,14 +154,19 @@ export function TrafficSplitPanel({ projectId, variant = 'card', onOpenConnector
   )
 }
 
-// A picker in the card: compact under a mouse, 16 px text and 44 px tall on touch so a phone neither zooms nor misses.
-const PICKER = 'w-auto min-w-0 max-w-[14rem] h-7 py-0 pl-2 pr-7 rounded-md text-[12.5px] pointer-coarse:h-11 pointer-coarse:text-base'
+/** A place's level by its key: "US" a country, "US/NY" a state, "US/NY/new_york" and "US//austin" a city. */
+const placeLevel = (place: string) => {
+  const [, state = '', city = ''] = place.split('/')
+  return city ? 'City' : state ? 'State' : 'Country'
+}
 
 /**
  * Which requests the split is for: a site with exit reputation data (busiest first, or none), and once one is picked
- * the place its requests name. Shown only while the project has such sites, so the card is as it always was without.
+ * the place its requests name, every one searchable. Shown only while the project has such sites, so the card is as
+ * it always was without.
  */
-function SitePicker({ split, site, place, onSite, onPlace }: {
+function SitePicker({ projectId, split, site, place, onSite, onPlace }: {
+  projectId: string
   split: TrafficSplitResponse
   site: string
   place: string
@@ -152,28 +176,38 @@ function SitePicker({ split, site, place, onSite, onPlace }: {
   const sites = split.reputation_sites ?? []
   if (sites.length === 0 && !site) return null
   // A picked site or place that dropped out of the lists stays picked, and listed.
-  const siteOptions = !site || sites.some((s) => s.site === site) ? sites.map((s) => s.site) : [site, ...sites.map((s) => s.site)]
+  const siteOptions = [
+    { value: '', label: 'No particular site' },
+    ...(!site || sites.some((s) => s.site === site) ? [] : [{ value: site, label: site }]),
+    ...sites.map((s) => ({ value: s.site, label: s.site, badge: `${compact(s.reports)} ${plural(s.reports, 'report', 'reports')}` })),
+  ]
   // The places are the picked site's once its answer is in; meanwhile the last site's are not offered.
   const places: ReputationPlace[] = split.site === site ? split.reputation_places ?? [] : []
-  const placeOptions = !place || places.some((p) => p.place === place) ? places : [{ place, label: placeLabel(place), reports: 0 }, ...places]
+  const placeOptions = [
+    { value: '', label: 'No location' },
+    ...(!place || places.some((p) => p.place === place) ? [] : [{ value: place, label: placeLabel(place), badge: placeLevel(place) }]),
+    ...places.map((p) => ({ value: p.place, label: p.label, badge: `${placeLevel(p.place)} · ${compact(p.reports)}` })),
+  ]
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mb-3 text-xs text-fg-muted">
-      {/* A picker that does not fit beside its label goes under it rather than cutting its text. */}
-      <label className="flex flex-wrap items-center gap-x-1.5 gap-y-1 min-w-0 max-w-full">
+      {/* A picker that does not fit beside its words goes under them rather than cutting its text. */}
+      <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 min-w-0 max-w-full">
         <span className="flex-none">Requests to</span>
-        <Select value={site} onChange={(e) => onSite(e.target.value)} className={PICKER} aria-label="Requests to site">
-          <option value="">No particular site</option>
-          {siteOptions.map((s) => <option key={s} value={s}>{s}</option>)}
-        </Select>
-      </label>
+        <RichSelect size="sm" searchable options={siteOptions} value={site} onChange={onSite} aria-label="Requests to site" className="min-w-0 max-w-[14rem]" />
+      </span>
       {site && (
-        <label className="flex flex-wrap items-center gap-x-1.5 gap-y-1 min-w-0 max-w-full">
+        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 min-w-0 max-w-full">
           <span className="flex-none">from</span>
-          <Select value={place} onChange={(e) => onPlace(e.target.value)} className={PICKER} aria-label="Requests from location">
-            <option value="">No location</option>
-            {placeOptions.map((p) => <option key={p.place} value={p.place}>{p.label}</option>)}
-          </Select>
-        </label>
+          <RichSelect size="sm" searchable options={placeOptions} value={place} onChange={onPlace} aria-label="Requests from location" className="min-w-0 max-w-[14rem]" />
+        </span>
+      )}
+      {site && (
+        <Link
+          to={`/projects/${projectId}/locations?tab=reputation&site=${encodeURIComponent(site)}`}
+          className="ml-auto inline-flex items-center font-medium text-primary hover:brightness-110 whitespace-nowrap pointer-coarse:min-h-11"
+        >
+          Every place for this site →
+        </Link>
       )}
     </div>
   )
@@ -188,8 +222,12 @@ export function totalSpend(connectors: { cost: number | null; currency: string |
   return { amount: priced.reduce((a, c) => a + (c.cost ?? 0), 0), currency }
 }
 
-/** One stacked bar of the connectors' shares, in their row colours. */
-function ShareBar({ connectors, share, className }: { connectors: ConnectorTrafficShare[]; share: (c: ConnectorTrafficShare) => number; className?: string }) {
+/** One stacked bar of the connectors' shares, each in the colour of its position, so the bar and the rows agree. */
+export function ShareBar<T extends { connector_id: string; name: string }>({ connectors, share, className }: {
+  connectors: T[]
+  share: (c: T) => number
+  className?: string
+}) {
   return (
     <div className={cn('flex h-2 rounded-full overflow-hidden bg-surface-raised', className)}>
       {connectors.map((c, i) => share(c) > 0 && (
@@ -223,9 +261,9 @@ function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSpli
   const active = split.connectors.filter((c) => !c.excluded_reason)
   const priced = split.connectors.some((c) => c.cost != null)
   const spend = totalSpend(split.connectors)
-  // Wide containers lay each connector out as one row of six columns. Below @xs
-  // (320px, a phone or a cramped sidebar column) that row cannot fit, so the
-  // numbers stack under the name on a second line instead of overlapping it.
+  // Wide containers lay each connector out as one row of six columns, the header and every row on one grid's
+  // columns (subgrid), so each column lines up down the card. Below @xs (320px, a phone or a cramped sidebar column)
+  // that row cannot fit, so the numbers stack under the name on a second line instead of overlapping it.
   const wideCols = priced ? '@xs:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto]' : '@xs:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto]'
 
   return (
@@ -241,50 +279,52 @@ function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSpli
 
       {/* Per connector rows: weight, expected, observed, spend */}
       <div className="@container -mx-1.5">
-        <div className={`hidden @xs:grid ${wideCols} gap-x-3 px-1.5 text-[11px] text-fg-subtle`}>
-          <span />
-          <span>Connector</span>
-          <span className="text-right">Weight</span>
-          <span className="text-right">Expected</span>
-          <span className="text-right">Observed</span>
-          {priced && <span className="text-right">Spend</span>}
-        </div>
-        {split.connectors.map((c, i) => {
-          const off = !!c.excluded_reason
-          const Row = onOpenConnector ? 'button' : 'div'
-          return (
-            <Row
-              key={c.connector_id}
-              {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
-              className={`w-full grid grid-cols-[auto_minmax(0,1fr)_auto] ${wideCols} items-center gap-x-3 gap-y-0.5 py-1.5 @xs:py-0 @xs:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
-              title={describeShare(c, split)}
-            >
-              <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
-              <ConnectorName c={c} off={off} />
-              {/* Stacked: one line under the name. Wide: `contents` hands the three cells to the row grid. */}
-              <span className="col-start-2 col-span-2 row-start-2 flex items-center flex-wrap gap-x-3 gap-y-0.5 min-w-0 @xs:contents">
-                <span className="tabular-nums text-fg-muted whitespace-nowrap @xs:text-right">
-                  <span className="text-fg-subtle @xs:hidden">Weight </span>{c.weight}
-                </span>
-                <span className={`tabular-nums font-medium whitespace-nowrap @xs:text-right ${off ? 'text-fg-subtle' : ''}`}>
-                  <span className="text-fg-subtle font-normal @xs:hidden">Expected </span>{formatShare(c.expected_share)}
-                </span>
-                <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @xs:justify-end @xs:min-w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}`}>
-                  <span className="text-fg-subtle @xs:hidden">Observed</span>
-                  <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
-                    <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
+        <div className={`@xs:grid ${wideCols} gap-x-3`}>
+          <div className="hidden @xs:grid @xs:grid-cols-subgrid @xs:col-span-full px-1.5 text-[11px] text-fg-subtle">
+            <span className="w-2" />
+            <span>Connector</span>
+            <span className="text-right">Weight</span>
+            <span className="text-right">Expected</span>
+            <span className="text-right">Observed</span>
+            {priced && <span className="text-right">Spend</span>}
+          </div>
+          {split.connectors.map((c, i) => {
+            const off = !!c.excluded_reason
+            const Row = onOpenConnector ? 'button' : 'div'
+            return (
+              <Row
+                key={c.connector_id}
+                {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
+                className={`w-full grid grid-cols-[auto_minmax(0,1fr)_auto] @xs:grid-cols-subgrid @xs:col-span-full items-center gap-x-3 gap-y-0.5 py-1.5 @xs:py-0 @xs:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
+                title={describeShare(c, split)}
+              >
+                <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
+                <ConnectorName c={c} off={off} />
+                {/* Stacked: one line under the name. Wide: `contents` hands the three cells to the row grid. */}
+                <span className="col-start-2 col-span-2 row-start-2 flex items-center flex-wrap gap-x-3 gap-y-0.5 min-w-0 @xs:contents">
+                  <span className="tabular-nums text-fg-muted whitespace-nowrap @xs:text-right">
+                    <span className="text-fg-subtle @xs:hidden">Weight </span>{c.weight}
                   </span>
-                  {formatShare(c.observed_share)}
+                  <span className={`tabular-nums font-medium whitespace-nowrap @xs:text-right ${off ? 'text-fg-subtle' : ''}`}>
+                    <span className="text-fg-subtle font-normal @xs:hidden">Expected </span>{formatShare(c.expected_share)}
+                  </span>
+                  <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @xs:justify-end @xs:min-w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}`}>
+                    <span className="text-fg-subtle @xs:hidden">Observed</span>
+                    <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
+                      <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
+                    </span>
+                    {formatShare(c.observed_share)}
+                  </span>
                 </span>
-              </span>
-              {priced && (
-                <span className="col-start-3 row-start-1 @xs:col-auto @xs:row-auto tabular-nums text-right text-fg-muted whitespace-nowrap @xs:min-w-[64px]">
-                  {c.cost != null && c.currency ? formatMoney(c.cost, c.currency) : '-'}
-                </span>
-              )}
-            </Row>
-          )
-        })}
+                {priced && (
+                  <span className="col-start-3 row-start-1 @xs:col-auto @xs:row-auto tabular-nums text-right text-fg-muted whitespace-nowrap @xs:min-w-[64px]">
+                    {c.cost != null && c.currency ? formatMoney(c.cost, c.currency) : '-'}
+                  </span>
+                )}
+              </Row>
+            )
+          })}
+        </div>
       </div>
 
       <p className="text-xs text-fg-muted">
@@ -326,12 +366,13 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
   const active = split.connectors.filter(takes)
   const effectiveTotal = active.reduce((sum, c) => sum + (effective.get(c.connector_id)?.weight ?? 0), 0)
   // The reason line names the connector reputation lowers most among those that take requests.
-  const lowest = active.filter((c) => c.reputation < 1).sort((a, b) => a.reputation - b.reputation)[0]
+  const lowest = active.filter((c) => lowered(c.reputation)).sort((a, b) => a.reputation - b.reputation)[0]
   // Round robin draws a request whose weights reputation lowered at random by them, out of its fixed order; a connector
   // with every row avoided only drops out, which lowers no weight.
   const drawn = split.strategy === 'round_robin' && applied && active.some((c) => c.reputation > 0 && c.reputation < 1)
   const spend = totalSpend(split.connectors)
-  // Six columns need more room than the configured split's: below @lg (512px) the numbers stack under the name.
+  // Six columns need more room than the configured split's: below @lg (512px) the numbers stack under the name. Wide,
+  // the header and every row share one grid's columns (subgrid), as in the configured split.
   const wideCols = '@lg:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto_auto]'
 
   return (
@@ -353,62 +394,63 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
       </div>
 
       <div className="@container -mx-1.5">
-        <div className={`hidden @lg:grid ${wideCols} gap-x-3 px-1.5 text-[11px] text-fg-subtle`}>
-          <span />
-          <span>Connector</span>
-          <span className="text-right">Weight</span>
-          <span className="text-right">Reputation</span>
-          <span className="text-right">Effective</span>
-          <span className="text-right">Expected</span>
-          <span className="text-right">Observed</span>
+        <div className={`@lg:grid ${wideCols} gap-x-3`}>
+          <div className="hidden @lg:grid @lg:grid-cols-subgrid @lg:col-span-full px-1.5 text-[11px] text-fg-subtle">
+            <span className="w-2" />
+            <span>Connector</span>
+            <span className="text-right">Weight</span>
+            <span className="text-right">Reputation</span>
+            <span className="text-right">Effective</span>
+            <span className="text-right">Expected</span>
+            <span className="text-right">Observed</span>
+          </div>
+          {split.connectors.map((c, i) => {
+            const off = !takes(c)
+            const { weight: effectiveWeight, share: effectiveShare } = effective.get(c.connector_id) ?? { weight: 0, share: 0 }
+            const Row = onOpenConnector ? 'button' : 'div'
+            // A connector off every request says why; one kept off this site's requests from the place, what can.
+            const offTitle = c.excluded_reason === 'disabled' || c.excluded_reason === 'traffic_limit'
+              ? describeShare(c, split)
+              : `${c.name} takes none of the requests to ${site}${from}: no healthy row of it serves them, or its domain filter or a country another connector reserves keeps it off.`
+            return (
+              <Row
+                key={c.connector_id}
+                {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
+                className={`w-full grid grid-cols-[auto_minmax(0,1fr)] @lg:grid-cols-subgrid @lg:col-span-full items-center gap-x-3 gap-y-0.5 py-1.5 @lg:py-0 @lg:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
+                title={off ? offTitle : reputationTitle(c.name, c, site, place, places)}
+              >
+                <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
+                <ConnectorName c={c} off={off} />
+                {/* Stacked: under the name, the weight as a sum ("Weight 3 ×0.65 = 1.95"), then the shares. Wide:
+                    `contents` hands the five cells to the row grid. A connector that takes none of the requests has
+                    no sum: a dash and 0 on a wide card, its weight alone stacked. */}
+                <span className="col-start-2 row-start-2 flex items-center flex-wrap gap-x-3 gap-y-0.5 min-w-0 @lg:contents">
+                  <span className="inline-flex items-center gap-x-1.5 whitespace-nowrap @lg:contents">
+                    <span className="tabular-nums text-fg-muted whitespace-nowrap @lg:text-right">
+                      <span className="text-fg-subtle @lg:hidden">Weight </span>{c.weight}
+                    </span>
+                    <span className={cn('items-center whitespace-nowrap @lg:inline-flex @lg:justify-end', off ? 'hidden' : 'inline-flex')}>
+                      {off ? <span className="text-fg-subtle">-</span> : <ReputationFactor facts={c} places={places} />}
+                    </span>
+                    <span className={cn('tabular-nums whitespace-nowrap @lg:block @lg:text-right', off && 'hidden', lowered(c.reputation) && !off ? 'font-medium' : 'text-fg-muted')}>
+                      <span className="text-fg-subtle font-normal @lg:hidden">= </span>{weightText(effectiveWeight)}
+                    </span>
+                  </span>
+                  <span className={cn('tabular-nums whitespace-nowrap @lg:text-right', off ? 'text-fg-subtle' : applied ? 'font-medium' : 'text-fg-muted')}>
+                    <span className="text-fg-subtle font-normal @lg:hidden">Expected </span>{formatShare(effectiveShare)}
+                  </span>
+                  <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @lg:justify-end @lg:min-w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}, to every site`}>
+                    <span className="text-fg-subtle @lg:hidden">Observed</span>
+                    <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
+                      <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
+                    </span>
+                    {formatShare(c.observed_share)}
+                  </span>
+                </span>
+              </Row>
+            )
+          })}
         </div>
-        {split.connectors.map((c, i) => {
-          const off = !takes(c)
-          const lowered = c.reputation < 1
-          const { weight: effectiveWeight, share: effectiveShare } = effective.get(c.connector_id) ?? { weight: 0, share: 0 }
-          const Row = onOpenConnector ? 'button' : 'div'
-          // A connector off every request says why; one kept off this site's requests from the place, what can.
-          const offTitle = c.excluded_reason === 'disabled' || c.excluded_reason === 'traffic_limit'
-            ? describeShare(c, split)
-            : `${c.name} takes none of the requests to ${site}${from}: no healthy row of it serves them, or its domain filter or a country another connector reserves keeps it off.`
-          return (
-            <Row
-              key={c.connector_id}
-              {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
-              className={`w-full grid grid-cols-[auto_minmax(0,1fr)] ${wideCols} items-center gap-x-3 gap-y-0.5 py-1.5 @lg:py-0 @lg:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
-              title={off ? offTitle : reputationTitle(c.name, c, site, place, places)}
-            >
-              <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
-              <ConnectorName c={c} off={off} />
-              {/* Stacked: under the name, the weight as a sum ("Weight 3 ×0.65 = 1.95"), then the shares. Wide:
-                  `contents` hands the five cells to the row grid. A connector that takes none of the requests has
-                  no sum: a dash and 0 on a wide card, its weight alone stacked. */}
-              <span className="col-start-2 row-start-2 flex items-center flex-wrap gap-x-3 gap-y-0.5 min-w-0 @lg:contents">
-                <span className="inline-flex items-center gap-x-1.5 whitespace-nowrap @lg:contents">
-                  <span className="tabular-nums text-fg-muted whitespace-nowrap @lg:text-right">
-                    <span className="text-fg-subtle @lg:hidden">Weight </span>{c.weight}
-                  </span>
-                  <span className={cn('items-center whitespace-nowrap @lg:inline-flex @lg:justify-end', off ? 'hidden' : 'inline-flex')}>
-                    {off ? <span className="text-fg-subtle">-</span> : <ReputationFactor facts={c} place={place} />}
-                  </span>
-                  <span className={cn('tabular-nums whitespace-nowrap @lg:block @lg:text-right', off && 'hidden', lowered && !off ? 'font-medium' : 'text-fg-muted')}>
-                    <span className="text-fg-subtle font-normal @lg:hidden">= </span>{weightText(effectiveWeight)}
-                  </span>
-                </span>
-                <span className={cn('tabular-nums whitespace-nowrap @lg:text-right', off ? 'text-fg-subtle' : applied ? 'font-medium' : 'text-fg-muted')}>
-                  <span className="text-fg-subtle font-normal @lg:hidden">Expected </span>{formatShare(effectiveShare)}
-                </span>
-                <span className="tabular-nums text-fg-muted inline-flex items-center gap-2 whitespace-nowrap @lg:justify-end @lg:min-w-[76px]" title={`${formatBytesDecimal(c.observed_bytes)} over ${split.range}, to every site`}>
-                  <span className="text-fg-subtle @lg:hidden">Observed</span>
-                  <span className="w-8 h-1 rounded-full bg-primary-soft overflow-hidden inline-block flex-none">
-                    <span className={`block h-full rounded-full ${swatch(i)}`} style={{ width: `${Math.min(100, c.observed_share ?? 0)}%` }} />
-                  </span>
-                  {formatShare(c.observed_share)}
-                </span>
-              </span>
-            </Row>
-          )
-        })}
       </div>
 
       <p className="text-xs text-fg-muted">

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar
+from urllib.parse import quote
 
 from api.core.stats import FailureKind
 from api.geo.models import META_LOCATION_VERDICT, ContradictedAction, LocationVerdict
@@ -42,7 +43,7 @@ WINDOW = timedelta(minutes=15)
 # A request line whose newest row is older is dropped.
 FRESH = timedelta(minutes=5)
 REPUTATION_RECENT = timedelta(hours=1)
-# As many sites as Exit locations' reputation table (MAX_TABLE_SITES).
+# The most recently reported sites the reputation lines look at.
 REPUTATION_SITES = 8
 # connector_no_healthy_proxy folds into one line past this.
 FOLD_CONNECTORS_ABOVE = 3
@@ -773,10 +774,10 @@ class ReputationCheck(AttentionCheck):
         share = "at least half" if percent == 50 else f"at least {percent}%"
         found: list[Finding] = []
         for site in reputation.sites:
-            serving = list(reputation.split.groups_for(site))
+            serving = list(reputation.split.groups_for(site, ""))
             if not serving:
                 continue
-            shares = reputation.split.shares(site, serving)
+            shares = reputation.split.shares(site, "", serving)
             values = [
                 self._dynamic_value(reputation.coarse, connector_id, site)
                 if reputation.split.dynamic(connector_id)
@@ -799,7 +800,7 @@ class ReputationCheck(AttentionCheck):
                     lead="",
                     subject=site,
                     text=text,
-                    link="locations",
+                    link=f"locations?tab=reputation&site={quote(site, safe='')}",
                     action="Exit locations",
                     sort_name=site,
                 )

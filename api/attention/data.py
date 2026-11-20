@@ -240,7 +240,6 @@ class ProjectDataLoader:
         split = ReputationSplit(
             project,
             preview,
-            place="",
             avoided={site: ips for (owner, site), ips in read.avoided.items() if owner == project.id},
             records=[record for record in read.records if record.project_id == project.id],
             now=now,

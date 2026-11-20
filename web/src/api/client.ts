@@ -904,42 +904,117 @@ export const fetchExitIpReputation = async (projectId: string, ip: string): Prom
 export const fetchExitReputationSummary = async (projectId: string, ips: string[]): Promise<ExitIpReputationSummary[]> =>
   (await api.post(`/projects/${projectId}/exit-reputation/summary`, { ips })).data.ips
 
-/** One connector on one site: its reputation there and its share of the site's requests at its effective weight. */
-export interface ConnectorSiteCell {
+/** Where a connector's reputation stands at a place: see STATE_LOOKS in ConnectorReputation for the looks. */
+export type PlaceState = 'own' | 'inherited' | 'not_judged' | 'no_reports' | 'takes_none'
+/** A place's level on a site's places: none is the requests that name no place. */
+export type SitePlaceLevel = 'none' | 'country' | 'state' | 'city'
+
+/**
+ * One connector at one place of a site. The answer leaves out a field with no value, so every optional field may be
+ * missing; read a missing one as null.
+ */
+export interface PlaceCell {
+  state: PlaceState
+  /** What its weight is multiplied by here: 1 when nothing says otherwise. */
   reputation: number
-  reputation_kind: ReputationKind | null
-  /** The place level whose factor was used (dynamic connectors); null when none has one. */
-  reputation_place: string | null
-  blocked: number | null
-  requests: number | null
-  usable_ips: number | null
-  eligible_ips: number | null
+  reputation_kind?: ReputationKind | null
+  /** The level of the place a dynamic connector's factor came from; missing when no level has one, and for a connector with IPs. */
+  reputation_place?: string | null
+  /** A dynamic connector's factor stored at this place itself. */
+  own_factor?: number | null
+  /**
+   * Blocked reports and requests as routing last counted them, not decayed since: a dynamic connector's at this place
+   * itself, a connector with IPs' for the whole site. Missing without a record.
+   */
+  blocked?: number | null
+  requests?: number | null
+  /** When those counts were last decided. */
+  counted_at?: string | null
+  /** A connector with IPs: its rows eligible for a request to the site from the place, and those not avoided for the site. */
+  usable_ips?: number | null
+  eligible_ips?: number | null
+  /** Share of the place's requests by configured weight, 0-100. */
+  configured_share: number
+  /** Share by weight times reputation whatever the mode: what Avoid does, or would do, 0-100. */
   effective_share: number
 }
 
-export interface ConnectorBySite {
+/** One place a site has records for: "" (no place named), a country, a state or a city, with every connector there. */
+export interface SitePlace {
+  /** A LocationTarget key: "", "US", "US/NY", "US/NY/new_york" or "US//austin". */
+  place: string
+  /** "No place named", "United States", "New York, United States", "New York, NY". */
+  label: string
+  level: SitePlaceLevel
+  /** The next coarser level's place; missing for a country and for no place. */
+  parent?: string | null
+  /** Reports through dynamic connectors at this exact place since its first; a country's include its cities'. */
+  reports: number
+  /** Some connector's own value here is under 1. */
+  lowered: boolean
+  /** Some connector taking the requests is not judged here yet. */
+  not_judged: boolean
+  /** The lowest value in force among the connectors taking the requests; missing when none takes them. */
+  lowest?: { value: number; inherited: boolean } | null
+  /** A country: its listed cities with some own value under 1, and all its listed cities. */
+  cities_lowered?: number | null
+  cities_total?: number | null
+  /** Connector id to the connector here, for every connector. */
+  cells: Record<string, PlaceCell>
+}
+
+/** One connector across the site's listed places: its own values per level and under 1, and its places by where it stands. */
+export interface PlaceTile {
+  lowered_countries: number
+  countries: number
+  lowered_states: number
+  states: number
+  lowered_cities: number
+  cities: number
+  /** heavy: own under 0.5; lowered: own 0.5 to under 1; full: own 1 or nothing reported. Places it takes none of are left out. */
+  buckets: { heavy: number; lowered: number; inherited: number; full: number; not_judged: number }
+  /** A connector with IPs, for a request naming no place: its usable and eligible rows, and its value. */
+  usable_ips?: number | null
+  eligible_ips?: number | null
+  reputation?: number | null
+}
+
+export interface SiteConnector {
   connector_id: string
   name: string
   credential_type: CredentialType
-  dynamic: boolean
+  enabled: boolean
   weight: number
-  /** Keyed by site; a site missing is one the connector has nothing for. */
-  cells: Record<string, ConnectorSiteCell>
+  dynamic: boolean
+  /** Why it takes no request naming no site and no place, as the traffic split says; missing while it does. */
+  excluded_reason?: ConnectorTrafficShare['excluded_reason']
+  tile: PlaceTile
 }
 
-/** Every connector against the project's busiest sites (at most 8), for requests naming `place`, or none. */
-export interface ConnectorsBySite {
-  place: string | null
-  /** The places with connector data, busiest first (at most 20), for the location picker. */
-  places: ReputationPlace[]
-  sites: string[]
-  /** Whether routing uses the effective weights: the project avoids. Where it does not, the shares are by weight. */
-  reputation_applied?: boolean
-  connectors: ConnectorBySite[]
+/** One site across every place its records name. */
+export interface SitePlacesView {
+  /** The site shown; missing when the project has no connector records. */
+  site?: string | null
+  mode: ExitReputationMode
+  /** Routing weighs the connectors by it: the project avoids. */
+  reputation_applied: boolean
+  /** Every site with connector records, most reported first; an asked site without any first. */
+  sites: ReputationSite[]
+  /** By name, as the traffic split lists them. */
+  connectors: SiteConnector[]
+  /** No place named first (when a dynamic connector has a record there), then each country, the most reported first, followed by its states and cities. */
+  places: SitePlace[]
+  summary: {
+    lowered_connectors: number
+    serving_connectors: number
+    /** The lowest own value under 1; missing when nothing is lowered. */
+    hardest?: { connector_id: string; place: string; value: number } | null
+  }
 }
 
-export const fetchExitReputationConnectors = async (projectId: string, place?: string): Promise<ConnectorsBySite> =>
-  (await api.get(`/projects/${projectId}/exit-reputation/connectors`, { params: place ? { place } : {} })).data
+/** One site (the exact host, or a URL) across every place; none asks for the most reported one with a place to list. */
+export const fetchSitePlaces = async (projectId: string, site?: string): Promise<SitePlacesView> =>
+  (await api.get(`/projects/${projectId}/exit-reputation/places`, { params: site ? { site } : {} })).data
 
 export interface ProxyListResponse {
   total: number
@@ -2015,6 +2090,8 @@ export interface ConnectorTrafficShare {
   reputation: number
   /** How the reputation was measured: reported blocks per request (dynamic), or IPs still usable (with IPs); null when there is nothing to measure. */
   reputation_kind: ReputationKind | null
+  /** Where the reputation stands at the place asked about, as on a site's places: own, inherited, not judged, no reports or takes none. */
+  reputation_state: PlaceState | null
   /** A dynamic connector's blocked reports and requests behind its block rate. */
   blocked: number | null
   requests: number | null
@@ -2057,9 +2134,9 @@ export interface TrafficSplitResponse {
   place: string | null
   /** Whether routing uses the effective weights: the project's exit reputation avoids and a site was asked for. */
   reputation_applied: boolean
-  /** The sites with exit reputation data, busiest first (at most 20), for the site picker. */
+  /** Every site with exit reputation data, busiest first, for the site picker. */
   reputation_sites: ReputationSite[]
-  /** The places with connector data for the site, busiest first (at most 20); empty without a site. */
+  /** Every place with connector data for the site, busiest first; empty without a site. */
   reputation_places: ReputationPlace[]
 }
 

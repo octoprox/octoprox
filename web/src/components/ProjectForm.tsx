@@ -541,7 +541,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
           </p>
           <div>
             <Label className="text-xs">Mode</Label>
-            <RichSelect options={reputationModeOptions} value={reputationMode} onChange={(v) => setFormData({ ...formData, exit_reputation: v as ExitReputationMode })} className="pointer-coarse:[&>button]:min-h-11" />
+            <RichSelect options={reputationModeOptions} value={reputationMode} onChange={(v) => setFormData({ ...formData, exit_reputation: v as ExitReputationMode })} />
           </div>
           <div className="grid grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-3">
             <div>

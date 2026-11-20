@@ -12,6 +12,7 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import String
 
 from api.attention.checks import (
     CHECKS,
@@ -24,6 +25,7 @@ from api.attention.checks import (
 )
 from api.attention.data import FailureCount, ProjectData, SiteReputation
 from api.core import utc_now
+from api.db.models import AlertModel
 from api.db.repository import ConnectorStatusCount, ProxyPlacement, RequestTally
 from api.geo.models import META_LOCATION_VERDICT, ContradictedAction
 from api.models.alerts import AlertSettings
@@ -820,7 +822,9 @@ class TestExitLocations:
 
 
 class TestReputation:
-    def _scene(self, *, dyn_factors: dict[str, tuple[float, float]], avoided: set[str], dyn_on: bool = True) -> Scene:
+    def _scene(
+        self, *, dyn_factors: dict[str, tuple[float, float]], avoided: set[str], dyn_on: bool = True, site: str = SITE
+    ) -> Scene:
         """A static pool exiting at two IPs and an Oxylabs dynamic connector, the site's records as given."""
         scene = Scene(exit_reputation=ExitReputationMode.RECORD)
         pool = scene.connector("Pool")
@@ -837,15 +841,13 @@ class TestReputation:
         ))
         records = []
         for place, (factor, requests) in dyn_factors.items():
-            record = ConnectorSiteReputation.new(ConnectorSiteKey(PROJECT, dyn.id, SITE, place), scene.now)
+            record = ConnectorSiteReputation.new(ConnectorSiteKey(PROJECT, dyn.id, site, place), scene.now)
             record.factor = factor
             record.weighted_requests = requests
             records.append(record)
         preview = scene.feed.router()
-        split = ReputationSplit(
-            scene.project, preview, place="", avoided={SITE: frozenset(avoided)}, records=[], now=scene.now
-        )
-        scene.reputation = SiteReputation(sites=(SITE,), split=split, coarse=tuple(records))
+        split = ReputationSplit(scene.project, preview, avoided={site: frozenset(avoided)}, records=[], now=scene.now)
+        scene.reputation = SiteReputation(sites=(site,), split=split, coarse=tuple(records))
         return scene
 
     def test_a_site_blocking_half_on_every_connector(self) -> None:
@@ -857,7 +859,18 @@ class TestReputation:
             f"reputation_site_blocked:{SITE}", SITE, Severity.WARNING
         )
         assert line.text == " is blocking at least half of the requests on every connector."
-        assert (line.link, line.action) == ("locations", "Exit locations")
+        assert (line.link, line.action) == (f"locations?tab=reputation&site={SITE}", "Exit locations")
+
+    def test_the_link_to_the_longest_site_fits_its_column(self) -> None:
+        site = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 57, "com"])
+        scene = self._scene(dyn_factors={"": (0.2, 30.0)}, avoided={"192.0.2.1"}, site=site)
+
+        line = _one(scene.lines())
+
+        assert (len(site), line.link) == (253, f"locations?tab=reputation&site={site}")
+        column = AlertModel.__table__.c.link.type
+        assert isinstance(column, String) and column.length is not None
+        assert len(line.link) <= column.length
 
     def test_one_connector_above_half_is_no_line(self) -> None:
         scene = self._scene(dyn_factors={"": (0.2, 10.0), "US": (0.9, 30.0)}, avoided={"192.0.2.1"})

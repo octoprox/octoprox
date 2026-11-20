@@ -87,7 +87,7 @@ class _Ask(NamedTuple):
 _NO_FACTORS: Mapping[str, float] = MappingProxyType({})
 
 
-class _SiteReputation(NamedTuple):
+class RequestReputation(NamedTuple):
     """What a project's exit reputation says about one request's site now: the rows kept away from it, and the factors
     of its dynamic connectors there, read at the request's place (its ``LocationTarget`` key, "" for none)."""
 
@@ -105,7 +105,7 @@ class _SiteReputation(NamedTuple):
 
 
 # A request whose project's exit reputation does not avoid, or that names no site.
-_UNRATED = _SiteReputation()
+_UNRATED = RequestReputation()
 
 
 class AvoidedSite(NamedTuple):
@@ -680,7 +680,7 @@ class Router:
     @staticmethod
     def _site_reputation(
         snapshot: RoutingSnapshot, project_id: str, target_host: str | None, target: LocationTarget | None
-    ) -> _SiteReputation:
+    ) -> RequestReputation:
         """What the project's exit reputation says now about ``target_host`` as a site (:func:`site_of`), for a request
         naming ``target``: nothing unless the project avoids."""
         project = snapshot.project(project_id)
@@ -689,7 +689,7 @@ class Router:
         site = site_of(target_host)
         if site is None:
             return _UNRATED
-        return _SiteReputation(
+        return RequestReputation(
             site,
             target.key if target is not None else "",
             snapshot.avoided(project_id, site, utc_now()),
@@ -700,7 +700,7 @@ class Router:
     def _groups(
         snapshot: RoutingSnapshot,
         proxies: list[Proxy],
-        reputation: _SiteReputation = _UNRATED,
+        reputation: RequestReputation = _UNRATED,
         avoided: Mapping[str, int] | None = None,
     ) -> list[ProxyGroup]:
         """The proxies by connector, in the order the connectors first appear, each group weighted by its connector's
@@ -820,7 +820,7 @@ class Router:
         )
 
     async def _sticky_avoid_hold(
-        self, snapshot: RoutingSnapshot, project_id: str, session_id: str | None, reputation: _SiteReputation
+        self, snapshot: RoutingSnapshot, project_id: str, session_id: str | None, reputation: RequestReputation
     ) -> Proxy | None:
         """The proxy the session is held to while it is avoided for the request's site, instead of moving to another:
         projects that do not move refused sessions (``location_session_move`` off); None when the session is not held.

@@ -1,12 +1,12 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useContext, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { ShieldAlert } from 'lucide-react'
 import {
-  fetchExitReputation, fetchExitReputationConnectors,
+  fetchExitReputation,
   type ExitReputationFilters, type ExitReputationMode, type ExitReputationRecord, type ReputationSort, type ReputationStatusFilter,
 } from '../../api/client'
 import { DataTable, type DataTableFeatures } from '../DataTable'
@@ -17,8 +17,8 @@ import { cn } from '../../utils/cn'
 import { DOCS_URL } from '../../utils/docs'
 import { formatDateTime, relativeTime } from '../../utils/format'
 import { HeaderWithTip } from './columns'
-import { ConnectorsBySite } from './ConnectorsBySite'
 import { ReputationPill } from './ExitIpReputation'
+import { SitePlacesCard, placesQuery, type InspectedPlace } from './SitePlaces'
 
 const STATUS_OPTIONS: { value: ReputationStatusFilter; label: string }[] = [
   { value: 'any', label: 'Any status' },
@@ -140,17 +140,23 @@ function EmptyActions({ settings, docs, docsLabel }: { settings: string; docs: s
 }
 
 /**
- * What the project's exit reputation holds: every connector against the busiest sites, and one row per exit IP and
+ * What the project's exit reputation holds: one site across every place its records name, and one row per exit IP and
  * site of the connectors with IPs, what clients reported about the IP on the site and the status that makes now. The
- * records' filters, order and paging run on the server, which counts no further than 10,000 rows past the page. A row
- * opens every site of its IP in the inspector.
+ * records' filters, order and paging run on the server, which counts no further than 10,000 rows past the page. A
+ * place opens in the place inspector, a record every site of its IP.
  */
-export function ExitReputationPanel({ projectId, mode, inspecting, onInspect }: {
+export function ExitReputationPanel({ projectId, mode, inspecting, onInspect, site, onSite, inspectingPlace, onInspectPlace }: {
   projectId: string
   mode: ExitReputationMode
   /** The row open in the inspector. */
   inspecting: string | null
   onInspect: (record: ExitReputationRecord) => void
+  /** The site the places card shows, as asked; '' is the default one. */
+  site: string
+  onSite: (site: string) => void
+  /** The place open in the place inspector. */
+  inspectingPlace: InspectedPlace | null
+  onInspectPlace: (place: InspectedPlace) => void
 }) {
   const [applied, setApplied] = useState<ExitReputationFilters>({})
   const [pageIndex, setPageIndex] = useState(0)
@@ -163,14 +169,22 @@ export function ExitReputationPanel({ projectId, mode, inspecting, onInspect }: 
     placeholderData: (previous) => previous,
   })
   const { data, isLoading, isPlaceholderData } = query
-  // The place the connectors' cells are for (a LocationTarget key); none is the requests that name no location.
-  const [place, setPlace] = useState('')
-  const bySite = useQuery({
-    queryKey: ['exit-reputation-connectors', projectId, place],
-    queryFn: () => fetchExitReputationConnectors(projectId, place || undefined),
-    refetchInterval: 60_000,
-    placeholderData: (previous) => previous,
+  const places = useQuery({
+    ...placesQuery(projectId, site),
+    // Another site keeps the last one up, dimmed, until its own arrives; another project's is not shown under this one.
+    placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === projectId ? previous : undefined),
   })
+  // The default site is pinned once an answer names it, so a later poll never moves the card to another site; its
+  // answer goes under the site's own key, so nothing loads again.
+  const queryClient = useQueryClient()
+  const resolved = places.data?.site
+  useEffect(() => {
+    if (site !== '' || !resolved || places.isPlaceholderData) return
+    const answer = queryClient.getQueryData(placesQuery(projectId, '').queryKey)
+    if (answer) queryClient.setQueryData(placesQuery(projectId, resolved).queryKey, answer)
+    onSite(resolved)
+  }, [site, resolved, places.isPlaceholderData])
+  const exitIps = useRef<HTMLDivElement>(null)
 
   const columns: ColumnDef<DataTableFeatures, ExitReputationRecord>[] = useMemo(() => [
     { id: 'ip', accessorKey: 'ip', header: 'Exit IP', size: 140, enableSorting: false, cell: ({ getValue }) => <span className="font-mono text-xs" title={getValue<string>()}>{getValue<string>()}</span> },
@@ -208,15 +222,15 @@ export function ExitReputationPanel({ projectId, mode, inspecting, onInspect }: 
     setPageIndex(0)
   }
   const hasRecords = rows.length > 0 || filtering
-  // A place picked keeps the table up even when nothing is kept for it.
-  const hasConnectors = (bySite.data?.sites.length ?? 0) > 0 || place !== '' || loadFailed(bySite)
+  // A site asked for keeps the card up even when nothing is kept for it.
+  const hasConnectors = (places.data?.sites.length ?? 0) > 0 || site !== '' || loadFailed(places)
   // Both first reads are in (or failed): until then nothing says whether the tab is empty.
-  const settled = (data !== undefined || loadFailed(query)) && (bySite.data !== undefined || loadFailed(bySite))
+  const settled = (data !== undefined || loadFailed(query)) && (places.data !== undefined || loadFailed(places))
   const nothing = settled && !loadFailed(query) && !hasRecords && !hasConnectors
   return (
     <div className="space-y-3">
       <p className="text-xs text-fg-muted">
-        What your clients reported about each site: how each connector fares there and, for connectors with IPs, each exit IP. A site is the exact host, so www.google.com and google.com are two sites. <a href={`${DOCS}#views`} target="_blank" rel="noreferrer" className="text-primary hover:brightness-110">How it works →</a>
+        What your clients reported about each site: how each connector fares there from every place requests name and, for connectors with IPs, each exit IP. A site is the exact host, so www.google.com and google.com are two sites. <a href={`${DOCS}#views`} target="_blank" rel="noreferrer" className="text-primary hover:brightness-110">How it works →</a>
       </p>
       {mode === 'off' && (hasRecords || hasConnectors) && <OffNote />}
       {mode === 'record' && (hasRecords || hasConnectors) && (
@@ -244,8 +258,17 @@ export function ExitReputationPanel({ projectId, mode, inspecting, onInspect }: 
         )
       ) : (
         <>
-          {hasConnectors && <ConnectorsBySite query={bySite} place={place} onPlace={setPlace} avoids={mode === 'avoid'} />}
-          <div className="space-y-1 pt-1">
+          {hasConnectors && (
+            <SitePlacesCard
+              query={places}
+              site={site}
+              onSite={onSite}
+              inspecting={inspectingPlace && inspectingPlace.site === places.data?.site ? inspectingPlace.place : null}
+              onInspect={onInspectPlace}
+              onExitIps={() => exitIps.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })}
+            />
+          )}
+          <div ref={exitIps} className="space-y-1 pt-1 scroll-mt-4">
             <h3 className="text-sm font-semibold text-fg">Exit IPs by site</h3>
             <p className="text-xs text-fg-muted">One row per exit IP and site of the connectors with IPs: what your clients reported, and where that leaves the IP now. Click a row for every site of its IP.</p>
           </div>
@@ -256,7 +279,7 @@ export function ExitReputationPanel({ projectId, mode, inspecting, onInspect }: 
               <LoadError what="the records" query={query} />
             ) : !hasRecords ? (
               <p className="text-xs text-fg-subtle px-4 py-3">
-                No exit IP records yet. They come from reports about requests through connectors with IPs (static lists, ISP and datacenter ports, cloud instances, pooled slots); a dynamic connector is weighed as a whole, above.
+                No exit IP records yet. They come from reports about requests through connectors with IPs (static lists, ISP and datacenter ports, cloud instances, pooled slots); a dynamic connector is weighed per place, above.
               </p>
             ) : (
               <DataTable

@@ -486,29 +486,34 @@ class ExitReputationRepository:
         return {site: frozenset(ips) for site, ips in avoided.items()}
 
     async def connector_records(
-        self, project_id: str, sites: Collection[str], places: Collection[str]
+        self,
+        project_id: str,
+        sites: Collection[str],
+        places: Collection[str] | None,
+        *,
+        connector_ids: Collection[str] | None = None,
     ) -> list[ConnectorSiteReputation]:
         """The project's connector records for each of ``sites`` at each of ``places`` (levels of a requested place, ""
-        for none), in key order. One statement."""
-        if not sites or not places:
+        for none; None for every place), of ``connector_ids`` alone when given, in key order. One statement; with the
+        connectors named it reads a prefix of the key."""
+        if not sites or (places is not None and not places) or (connector_ids is not None and not connector_ids):
             return []
         await self._plan_for_the_values()
         table = _CONNECTORS.table
         c = table.c
+        clauses = [c.project_id == project_id, any_of(c.site, sorted(set(sites)))]
+        if connector_ids is not None:
+            clauses.append(any_of(c.connector_id, sorted(set(connector_ids))))
+        if places is not None:
+            clauses.append(any_of(c.place, sorted(set(places))))
         result = await self._session.execute(
-            select(table)
-            .where(
-                c.project_id == project_id,
-                any_of(c.site, sorted(set(sites))),
-                any_of(c.place, sorted(set(places))),
-            )
-            .order_by(*_CONNECTORS.lock_order())
+            select(table).where(*clauses).order_by(*_CONNECTORS.lock_order())
         )
         return [_CONNECTORS.to_record(row) for row in result]
 
-    async def busiest_sites(self, project_id: str, *, limit: int) -> list[tuple[str, int]]:
+    async def busiest_sites(self, project_id: str, *, limit: int | None = None) -> list[tuple[str, int]]:
         """The sites the project's connector records are kept for, each with the reports made on it, the most reported
-        first; at most ``limit``.
+        first; at most ``limit`` (None: every one).
 
         A report naming a connector is kept at every level of its place, so it is counted at the coarsest alone (its
         country, or "" for none): those levels' counts add up to the reports.
@@ -523,6 +528,24 @@ class ExitReputationRepository:
             .limit(limit)
         )
         return [(site, int(count)) for site, count in result]
+
+    async def recorded_sites(self, project_id: str, connector_ids: Collection[str]) -> set[str]:
+        """The sites any of ``connector_ids`` holds a record for in the project. One statement on a prefix of the key,
+        at the coarsest level alone: a record at a finer one comes with it."""
+        if not connector_ids:
+            return set()
+        await self._plan_for_the_values()
+        c = _CONNECTORS.table.c
+        result = await self._session.execute(
+            select(c.site)
+            .distinct()
+            .where(
+                c.project_id == project_id,
+                any_of(c.connector_id, sorted(set(connector_ids))),
+                c.place.not_like("%/%"),
+            )
+        )
+        return set(result.scalars().all())
 
     async def recent_sites(self, project_id: str, since: datetime, *, limit: int) -> list[str]:
         """The sites with a connector record seen since ``since``, the most reported first; at most ``limit``. One
@@ -649,9 +672,11 @@ class ExitReputationRepository:
         )
         return [_CONNECTORS.to_record(row) for row in result]
 
-    async def busiest_places(self, project_id: str, site: str | None, *, limit: int) -> list[tuple[str, int]]:
+    async def busiest_places(
+        self, project_id: str, site: str | None, *, limit: int | None = None
+    ) -> list[tuple[str, int]]:
         """The requested places the project's connector records are kept at, for ``site`` or for any, each with the
-        reports made there, the most reported first; at most ``limit``, and never "" (no place)."""
+        reports made there, the most reported first; at most ``limit`` (None: every one), and never "" (no place)."""
         c = _CONNECTORS.table.c
         reports = func.sum(c.blocked_reports + c.good_reports)
         clauses = [c.project_id == project_id, c.place != ""]

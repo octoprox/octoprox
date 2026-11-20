@@ -600,7 +600,7 @@ function ServiceAccountPanel({ account, onClose, onDelete, onSaved, onCreated }:
         </div>
         <div>
           <Label>Role</Label>
-          <RichSelect options={roleOptions} value={role} onChange={(val) => setRole(val as UserRole)} required className="pointer-coarse:[&>button]:min-h-11" />
+          <RichSelect options={roleOptions} value={role} onChange={(val) => setRole(val as UserRole)} required />
           <p className="text-xs text-fg-subtle mt-1">Its tokens act with this role. Give it the lowest that does the job: a viewer reads everything and changes nothing, and can send exit reports.</p>
         </div>
         {account && (

@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Exit reputation as the Exit locations page reads it: a project's records, one IP's, per-IP totals for the exit IPs
-view, and its connectors across its busiest sites. Open to every signed-in user; times in answers are UTC with a ``Z``.
+view, and one site across every place. Open to every signed-in user; times in answers are UTC with a ``Z``.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import AfterValidator, BaseModel, Field
@@ -18,12 +20,24 @@ from api.core.auth import DbDep
 from api.db.geo_repository import ObservationRepository
 from api.db.repository import ConnectorRepository
 from api.db.reputation_repository import ExitReputationRepository, ReputationSort, ReputationSummary
+from api.models.project import ExitReputationMode
 from api.reputation.record import ExitIpReputation as IpRecord
 from api.reputation.record import ReputationPolicy, ReputationStatus
-from api.reputation.site import canonical_ip
-from api.reputation.split import MAX_LISTED, ConnectorShare, ReputationSplit, place_key, place_label
-from api.reputation.weight import ReputationKind
+from api.reputation.site import canonical_ip, report_site
+from api.reputation.split import (
+    ConnectorShare,
+    PlaceLevel,
+    ReputationSplit,
+    SitePlaces,
+    place_label,
+)
+from api.reputation.split import ConnectorTile as Tile
+from api.reputation.weight import PlaceState, ReputationKind
 from api.routes.common import api_runtime_of, require_project
+
+if TYPE_CHECKING:
+    from api.models.connector import Connector
+    from api.models.project import Project
 
 router = APIRouter(prefix="/projects/{project_id}/exit-reputation")
 
@@ -33,8 +47,6 @@ MAX_SUMMARY_IPS = 1000
 MAX_IP_SITES = 100
 # The longest text an IP can be: a full IPv6 address with an IPv4 tail.
 _IP_TEXT_LENGTH = 45
-# The most sites the connectors view lays side by side, the most reported first.
-MAX_TABLE_SITES = 8
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -154,74 +166,276 @@ class ExitReputationSummaryResponse(BaseModel):
     )
 
 
-class ConnectorSiteCell(BaseModel):
-    """One connector on one site: its reputation there, what measures it, the counts behind it, and its share of the
-    site's requests."""
+class PlaceCell(BaseModel):
+    """One connector at one place of the site: where its reputation stands there, the value in force, the place's own
+    evidence as routing last counted it, and its share of the requests from the place."""
 
-    reputation: float = Field(description="What the connector's weight is multiplied by for the site; 1 when nothing says otherwise")
-    reputation_kind: ReputationKind | None = Field(description="block_rate for a dynamic connector, usable_ips for one with IPs")
+    state: PlaceState = Field(
+        description="own: measured at the place; inherited: a dynamic connector's factor from a coarser level; "
+        "not_judged: reported, but no level holds enough requests yet; no_reports: nothing reported; takes_none: "
+        "routing keeps the connector off these requests"
+    )
+    reputation: float = Field(description="What the connector's weight is multiplied by here; 1 when nothing says otherwise")
+    reputation_kind: ReputationKind | None = Field(
+        default=None, description="block_rate for a dynamic connector, usable_ips for one with IPs"
+    )
     reputation_place: str | None = Field(
-        description="The level of the place a dynamic connector's factor came from; null when no level has one, and for a "
-        "connector with IPs"
+        default=None,
+        description="The level of the place a dynamic connector's factor came from; absent when no level has one, and "
+        "for a connector with IPs",
     )
+    own_factor: float | None = Field(default=None, description="A dynamic connector's factor stored at this place itself")
     blocked: int | None = Field(
-        description="Recent blocked reports (decayed by Connector memory, and by half every hour); null without a record"
+        default=None,
+        description="A dynamic connector: blocked reports at this place as routing last counted them, not decayed since; "
+        "absent without a record",
     )
-    requests: int | None = Field(description="Recent requests, decayed the same way; null without a record")
-    usable_ips: int | None = Field(description="A connector with IPs: its eligible rows not avoided for the site")
+    requests: int | None = Field(default=None, description="Requests counted the same way; absent without a record")
+    counted_at: UtcTime | None = Field(default=None, description="When those counts were last decided; absent without a record")
+    usable_ips: int | None = Field(
+        default=None, description="A connector with IPs: its eligible rows here not avoided for the site"
+    )
     eligible_ips: int | None = Field(
-        description="A connector with IPs: its rows eligible for a request to the site from the place, as routing finds them"
+        default=None,
+        description="A connector with IPs: its rows eligible for a request to the site from the place, as routing finds them",
     )
+    configured_share: float = Field(description="Share of the requests from the place, 0-100, by configured weight")
     effective_share: float = Field(
-        description="Share of the requests to the site from the place, 0-100, by effective weight where the project avoids, "
-        "else by weight among the connectors serving them"
+        description="Share of the requests from the place, 0-100, by weight times reputation whatever the mode: what "
+        "Avoid does, or would do"
     )
 
     @classmethod
-    def of(cls, share: ConnectorShare) -> ConnectorSiteCell:
-        """``share`` as the view lays it out."""
+    def of(cls, share: ConnectorShare) -> PlaceCell:
+        """``share`` as the view lays it out; a connector with IPs' site-wide counts are left out, being the same at
+        every place."""
         reputation = share.reputation
+        own = share.own if reputation.kind is ReputationKind.BLOCK_RATE else None
         return cls(
+            state=share.state,
             reputation=reputation.value,
             reputation_kind=reputation.kind,
             reputation_place=reputation.place,
-            blocked=share.blocked,
-            requests=share.requests,
+            own_factor=share.own_factor,
+            blocked=round(own.weighted_blocked) if own is not None else None,
+            requests=round(own.weighted_requests) if own is not None else None,
+            counted_at=own.weighted_at if own is not None else None,
             usable_ips=reputation.usable_ips,
             eligible_ips=reputation.eligible_ips,
-            effective_share=round(share.effective_share, 2),
+            configured_share=round(share.configured_share, 2),
+            effective_share=round(share.avoid_share, 2),
         )
 
 
-class ConnectorSites(BaseModel):
-    """One connector of the project across the sites of the view."""
+class PlaceLowest(BaseModel):
+    """The lowest value in force at a place, and where it came from."""
+
+    value: float
+    inherited: bool = Field(description="The value is a dynamic connector's factor from a coarser level")
+
+
+class SitePlace(BaseModel):
+    """One place the site has records for, and every connector there."""
+
+    place: str = Field(description='A LocationTarget key: "" (no place named), US, US/NY, US/NY/new_york or US//austin')
+    label: str = Field(description="No place named, United States, New York, United States or New York, NY")
+    level: PlaceLevel
+    parent: str | None = Field(
+        default=None, description="The next coarser level's place; absent for a country and for no place"
+    )
+    reports: int = Field(
+        description="Reports through dynamic connectors at this exact place since its first; a country's include its "
+        "cities'"
+    )
+    lowered: bool = Field(description="Some connector's own value here is under 1")
+    not_judged: bool = Field(description="Some connector taking the requests is not judged here yet")
+    lowest: PlaceLowest | None = Field(
+        default=None,
+        description="The lowest value in force among the connectors taking the requests; absent when none takes them",
+    )
+    cities_lowered: int | None = Field(
+        default=None, description="A country with listed cities: those with some own value under 1; absent without any"
+    )
+    cities_total: int | None = Field(default=None, description="A country with listed cities: how many; absent without any")
+    cells: dict[str, PlaceCell] = Field(description="Connector id -> the connector here, for every connector")
+
+
+class TileBuckets(BaseModel):
+    """A connector's listed places by where it stands; places it takes none of are left out."""
+
+    heavy: int = Field(description="Own value under 0.5")
+    lowered: int = Field(description="Own value from 0.5 to under 1")
+    inherited: int
+    full: int = Field(description="Own value of 1, or nothing reported")
+    not_judged: int
+
+
+class ConnectorTile(BaseModel):
+    """One connector across the site's listed places: its own values per level, and how many are under 1."""
+
+    lowered_countries: int
+    countries: int
+    lowered_states: int
+    states: int
+    lowered_cities: int
+    cities: int
+    buckets: TileBuckets
+    usable_ips: int | None = Field(
+        default=None, description="A connector with IPs, for a request naming no place: its usable rows"
+    )
+    eligible_ips: int | None = None
+    reputation: float | None = Field(
+        default=None, description="A connector with IPs, for a request naming no place: its value"
+    )
+
+    @classmethod
+    def of(cls, tile: Tile, no_place: ConnectorShare, dynamic: bool) -> ConnectorTile:
+        """``tile`` as the view lays it out, with a connector with IPs' value for a request naming no place."""
+        reputation = no_place.reputation
+        return cls(
+            lowered_countries=tile.lowered_countries,
+            countries=tile.countries,
+            lowered_states=tile.lowered_states,
+            states=tile.states,
+            lowered_cities=tile.lowered_cities,
+            cities=tile.cities,
+            buckets=TileBuckets(
+                heavy=tile.heavy,
+                lowered=tile.lowered,
+                inherited=tile.inherited,
+                full=tile.full,
+                not_judged=tile.not_judged,
+            ),
+            usable_ips=None if dynamic else reputation.usable_ips,
+            eligible_ips=None if dynamic else reputation.eligible_ips,
+            reputation=None if dynamic else reputation.value,
+        )
+
+
+class SiteConnector(BaseModel):
+    """One connector of the project on the site."""
 
     connector_id: str
     name: str
     credential_type: str
-    dynamic: bool = Field(description="Weighed by its block rate per site and place; otherwise by its usable exit IPs")
+    enabled: bool
     weight: int
-    cells: dict[str, ConnectorSiteCell] = Field(description="Site -> the connector there, for every site of the view")
+    dynamic: bool = Field(description="Weighed by its block rate per place; otherwise by its usable exit IPs")
+    excluded_reason: str | None = Field(
+        default=None,
+        description="Why it takes no request naming no site and no place, as the traffic split says; absent while it "
+        "does",
+    )
+    tile: ConnectorTile
 
 
-class ReputationPlace(BaseModel):
-    """A requested place with connector records, how it reads, and the reports made for it."""
+class ReputationSite(BaseModel):
+    """A site with connector records, and the reports made on it."""
 
-    place: str = Field(description="A LocationTarget key: US, US/NY, US/NY/new_york or US//austin")
-    label: str = Field(description="United States, US, NY or US, NY, new_york")
+    site: str
     reports: int
 
 
-class ConnectorReputationView(BaseModel):
-    """The project's connectors across its busiest sites, for a request naming one place."""
+class HardestHit(BaseModel):
+    """The connector at the place with the lowest own value under 1."""
 
-    place: str | None = Field(description="The place asked about, as a LocationTarget key; null for none")
-    places: list[ReputationPlace] = Field(
-        description=f"Places with connector records, most reported first, at most {MAX_LISTED}"
+    connector_id: str
+    place: str
+    value: float
+
+
+class SiteSummary(BaseModel):
+    """The site in one line: how many connectors are lowered somewhere, and the hardest hit."""
+
+    lowered_connectors: int = Field(description="Connectors with an own value under 1 at some listed place")
+    serving_connectors: int = Field(description="Connectors taking the requests from some listed place")
+    hardest: HardestHit | None = Field(
+        default=None,
+        description="The lowest own value under 1; on a tie the finer place first, then the more reported; a connector "
+        "with IPs is skipped at a state or a city where it has at most 2 eligible rows",
     )
-    sites: list[str] = Field(description=f"The sites with the most reports, at most {MAX_TABLE_SITES}")
+
+
+class SitePlacesView(BaseModel):
+    """One site across every place its records name."""
+
+    site: str | None = Field(default=None, description="The site shown; absent when the project has no connector records")
+    mode: ExitReputationMode
     reputation_applied: bool = Field(description="Routing weighs the connectors by it: the project's mode is avoid")
-    connectors: list[ConnectorSites]
+    sites: list[ReputationSite] = Field(
+        description="Every site with connector records, most reported first; an asked site without any first"
+    )
+    connectors: list[SiteConnector] = Field(description="By name, as the traffic split lists them")
+    places: list[SitePlace] = Field(
+        description="No place named first when a dynamic connector has a record there, then each country, the most "
+        "reported first, followed by its states and cities"
+    )
+    summary: SiteSummary
+
+    @classmethod
+    def of(
+        cls,
+        project: Project,
+        connectors: Sequence[Connector],
+        sites: list[ReputationSite],
+        places: SitePlaces | None,
+    ) -> SitePlacesView:
+        """The view of ``places`` (None: no site) for ``connectors``, sorted by name."""
+        mode = project.exit_reputation
+        if places is None:
+            return cls(
+                site=None,
+                mode=mode,
+                reputation_applied=mode.avoids,
+                sites=sites,
+                connectors=[],
+                places=[],
+                summary=SiteSummary(lowered_connectors=0, serving_connectors=0, hardest=None),
+            )
+        split = places.split
+        hardest = places.hardest
+        return cls(
+            site=places.site,
+            mode=mode,
+            reputation_applied=split.applied,
+            sites=sites,
+            connectors=[
+                SiteConnector(
+                    connector_id=connector.id,
+                    name=connector.name,
+                    credential_type=connector.credential_type,
+                    enabled=connector.enabled,
+                    weight=connector.weight,
+                    dynamic=split.dynamic(connector.id),
+                    excluded_reason=split.excluded_reason(connector),
+                    tile=ConnectorTile.of(
+                        places.tile(connector.id), places.no_place[connector.id], split.dynamic(connector.id)
+                    ),
+                )
+                for connector in connectors
+            ],
+            places=[
+                SitePlace(
+                    place=row.place,
+                    label=place_label(row.place),
+                    level=row.level,
+                    parent=row.parent,
+                    reports=row.reports,
+                    lowered=row.lowered,
+                    not_judged=row.not_judged,
+                    lowest=PlaceLowest(value=lowest[0], inherited=lowest[1]) if (lowest := row.lowest) else None,
+                    cities_lowered=places.cities[row.place][0] if row.place in places.cities else None,
+                    cities_total=places.cities[row.place][1] if row.place in places.cities else None,
+                    cells={connector_id: PlaceCell.of(share) for connector_id, share in row.shares.items()},
+                )
+                for row in places.rows
+            ],
+            summary=SiteSummary(
+                lowered_connectors=len(places.lowered),
+                serving_connectors=len(places.serving),
+                hardest=HardestHit(connector_id=hardest[0], place=hardest[1], value=hardest[2]) if hardest else None,
+            ),
+        )
 
 
 @router.get("", response_model=ExitReputationPage)
@@ -334,48 +548,53 @@ async def summary(
     )
 
 
-@router.get("/connectors", response_model=ConnectorReputationView)
-async def connectors_by_site(
+@router.get("/places", response_model=SitePlacesView, response_model_exclude_none=True)
+async def site_places(
     request: Request,
     project_id: str,
     session: DbDep,
-    place: Annotated[
+    site: Annotated[
         str | None,
-        Query(max_length=256, description="The requested place, a LocationTarget key such as US, US/NY or US/NY/new_york"),
+        Query(
+            max_length=2048,
+            description="A site (the exact host, or a URL); left out or blank, the most reported one with a place to "
+            "list, or the most reported one when none has",
+        ),
     ] = None,
-) -> ConnectorReputationView:
-    """Every connector of the project on each of its busiest sites: its reputation there for a request naming
-    ``place`` (none: a request naming no place), and its share of the site's requests, as the traffic split shows one
-    site."""
+) -> SitePlacesView:
+    """One site across every place its records name: each connector's reputation and share of the requests from each
+    place, its tile, and the hardest hit, as gateways would weigh them.
+
+    Every place is listed, however many: a city's row comes with its state's and its country's. A field with no value
+    is left out of the answer rather than sent as null: a city-heavy site is hundreds of cells per poll.
+    """
     try:
-        wanted = place_key(place)
+        wanted = report_site(site) if site is not None and site.strip() else None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     project = await require_project(request, project_id)
     preview = await api_runtime_of(request).preview_router(project.id)
     repository = ExitReputationRepository(session)
-    sites = [site for site, _reports in await repository.busiest_sites(project.id, limit=MAX_TABLE_SITES)]
-    places = await repository.busiest_places(project.id, None, limit=MAX_LISTED)
-    split = await ReputationSplit.read(session, project, preview, sites=sites, place=wanted, now=utc_now())
+    sites = [ReputationSite(site=name, reports=reports) for name, reports in await repository.busiest_sites(project.id)]
     connectors = sorted(
         await ConnectorRepository(session).get_by_project(project.id), key=lambda connector: connector.name.lower()
     )
     ids = [connector.id for connector in connectors]
-    by_site = {site: split.shares(site, ids) for site in sites}
-    return ConnectorReputationView(
-        place=wanted or None,
-        places=[ReputationPlace(place=key, label=place_label(key), reports=reports) for key, reports in places],
-        sites=sites,
-        reputation_applied=split.applied,
-        connectors=[
-            ConnectorSites(
-                connector_id=connector.id,
-                name=connector.name,
-                credential_type=connector.credential_type,
-                dynamic=split.dynamic(connector.id),
-                weight=connector.weight,
-                cells={site: ConnectorSiteCell.of(by_site[site][connector.id]) for site in sites},
-            )
-            for connector in connectors
-        ],
+    now = utc_now()
+    if wanted is None and sites:
+        names = [listed.site for listed in sites]
+        listed_first = await ReputationSplit.busiest_listed(
+            session, project, preview, sites=names, now=now, connector_ids=ids
+        )
+        wanted = listed_first or names[0]
+    elif wanted is not None and all(listed.site != wanted for listed in sites):
+        sites.insert(0, ReputationSite(site=wanted, reports=0))
+    if wanted is None:
+        return SitePlacesView.of(project, connectors, sites, None)
+    split = await ReputationSplit.read(
+        session, project, preview, sites=[wanted], levels=None, now=now, connector_ids=ids
+    )
+    # One eligibility pass per place: worked out beside the event loop, on a router built for this request alone.
+    return await asyncio.to_thread(
+        lambda: SitePlacesView.of(project, connectors, sites, SitePlaces(split, wanted, ids))
     )

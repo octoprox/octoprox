@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """The exit reputation reads: a project's exit IP records, one IP's, per-IP totals, the traffic split for a site and
-the connectors across sites, for any signed-in role.
+one site across every place, for any signed-in role.
 
 Records are written as the workers write them, through the repository on the app's own database; times are relative to
 now, since the status is what holds when the API answers.
@@ -542,7 +542,7 @@ class TestTrafficSplit:
         assert body["reputation_sites"] == [{"site": "www.google.com", "reports": 9}, {"site": "bing.com", "reports": 1}]
         assert body["reputation_places"] == [
             {"place": "US", "label": "United States", "reports": 5},
-            {"place": "US/NY", "label": "US, NY", "reports": 5},
+            {"place": "US/NY", "label": "New York, United States", "reports": 5},
         ]
 
     def test_a_dynamic_connector_takes_the_finest_level_of_the_place_that_has_a_factor(
@@ -637,73 +637,336 @@ class TestTrafficSplit:
         response = authenticated_client.get(f"/api/v1/projects/{project_id}/metrics/traffic-split", params=params)
         assert (response.status_code, response.json()["detail"]) == (400, error)
 
-
-class TestConnectors:
-    """``GET /exit-reputation/connectors``: every connector on each of the project's busiest sites."""
-
-    def test_every_connector_on_each_busy_site_for_the_place(
+    def test_every_site_and_place_is_listed(
         self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
     ) -> None:
         split = Split(authenticated_client, sample_project_data)
-
-        response = authenticated_client.get(
-            f"/api/v1/projects/{split.project_id}/exit-reputation/connectors", params={"place": "US/NY"}
+        _apply_connectors(
+            authenticated_client,
+            utc_now(),
+            {
+                **{split.key(split.dynamic, f"US//city_{n:02}"): RequestCount(good=1) for n in range(25)},
+                **{
+                    ConnectorSiteKey(split.project_id, split.pool, f"site{n:02}.example.com", ""): RequestCount(good=1)
+                    for n in range(25)
+                },
+            },
         )
 
+        body = split.split(site=Split.SITE)
+
+        assert len(body["reputation_sites"]) == 27
+        # The country, the state and every city, the most reported first.
+        assert len(body["reputation_places"]) == 27
+        assert body["reputation_places"][-1] == {"place": "US//city_24", "label": "City 24, United States", "reports": 1}
+
+
+class TestPlaces:
+    """``GET /exit-reputation/places?site=``: one site across every place its records name, each connector at each."""
+
+    @staticmethod
+    def places(split: Split, **params: str) -> dict[str, Any]:
+        response = split.client.get(f"/api/v1/projects/{split.project_id}/exit-reputation/places", params=params)
         assert response.status_code == 200, response.text
-        body = response.json()
-        assert (body["place"], body["sites"], body["reputation_applied"]) == (
-            "US/NY", ["www.google.com", "bing.com"], True
-        )
-        assert body["places"] == [
-            {"place": "US", "label": "United States", "reports": 5},
-            {"place": "US/NY", "label": "US, NY", "reports": 5},
-        ]
-        assert [(c["name"], c["dynamic"], c["weight"]) for c in body["connectors"]] == [
-            ("Dynamic", True, 2),
-            ("Pool", False, 1),
-        ]
-        dynamic, pool = body["connectors"]
-        assert dynamic["cells"]["www.google.com"] == {
-            "reputation": 0.75, "reputation_kind": "block_rate", "reputation_place": "US/NY", "blocked": 5,
-            "requests": 20, "usable_ips": None, "eligible_ips": None, "effective_share": 75.0,
-        }
-        assert pool["cells"]["www.google.com"]["effective_share"] == 25.0
-        # Nothing avoided or blocked on bing.com: the configured split.
-        assert pool["cells"]["bing.com"] == {
-            "reputation": 1.0, "reputation_kind": "usable_ips", "reputation_place": None, "blocked": 0,
-            "requests": 0, "usable_ips": 4, "eligible_ips": 4, "effective_share": 33.33,
-        }
-        assert dynamic["cells"]["bing.com"]["reputation_kind"] == "block_rate"
+        # A field without a value is left out, never sent as null.
+        assert "null" not in response.text, response.text
+        body: dict[str, Any] = response.json()
+        return body
 
-    def test_without_a_place_requests_naming_none_are_weighed(
+    @staticmethod
+    def cells(body: dict[str, Any], split: Split) -> dict[str, dict[str, dict[str, Any]]]:
+        """Place -> connector name -> its cell there, the times left out."""
+        names = {split.pool: "Pool", split.dynamic: "Dynamic"}
+        return {
+            row["place"]: {
+                names[connector_id]: {key: value for key, value in cell.items() if key != "counted_at"}
+                for connector_id, cell in row["cells"].items()
+            }
+            for row in body["places"]
+        }
+
+    def test_every_place_of_the_busiest_site_with_each_connector(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        # A thin record from New York City: too few requests for a factor of its own.
+        _apply_connectors(authenticated_client, utc_now(), {split.key(split.dynamic, "US/NY/new_york"): RequestCount(requests=5, blocked=1)})
+
+        body = self.places(split)
+
+        assert (body["site"], body["mode"], body["reputation_applied"]) == ("www.google.com", "avoid", True)
+        assert body["sites"] == [{"site": "www.google.com", "reports": 10}, {"site": "bing.com", "reports": 1}]
+        assert [
+            (row["place"], row["label"], row["level"], row.get("parent"), row["reports"], row.get("cities_lowered"), row.get("cities_total"))
+            for row in body["places"]
+        ] == [
+            # The dynamic connector's own record for requests naming no place: its 2 reports, never the pool's.
+            ("", "No place named", "none", None, 2, None, None),
+            ("US", "United States", "country", None, 6, 0, 1),
+            ("US/NY", "New York, United States", "state", "US", 6, None, None),
+            ("US/NY/new_york", "New York, NY", "city", "US/NY", 1, None, None),
+        ]
+        cells = self.cells(body, split)
+        # Two of the pool's four rows avoided: x0.5 wherever it takes the requests; its counts, for the site as a whole,
+        # are left out.
+        pool = {"state": "own", "reputation": 0.5, "reputation_kind": "usable_ips", "usable_ips": 2, "eligible_ips": 4}
+        # The state's 5 of 20 halved per 100 requests by the city's 5 more, and the city's 1 of 5 added: 5.8 of 24.3.
+        assert cells["US/NY"] == {
+            "Dynamic": {
+                "state": "own", "reputation": 0.75, "reputation_kind": "block_rate", "reputation_place": "US/NY",
+                "own_factor": 0.75, "blocked": 6, "requests": 24, "configured_share": 66.67, "effective_share": 75.0,
+            },
+            "Pool": pool | {"configured_share": 33.33, "effective_share": 25.0},
+        }
+        # The city's own thin record, while its factor comes from the state; the pool knows no row in the city.
+        assert cells["US/NY/new_york"] == {
+            "Dynamic": {
+                "state": "inherited", "reputation": 0.75, "reputation_kind": "block_rate", "reputation_place": "US/NY",
+                "blocked": 1, "requests": 5, "configured_share": 100.0, "effective_share": 100.0,
+            },
+            "Pool": pool | {"state": "takes_none", "reputation": 1.0, "usable_ips": 0, "eligible_ips": 0}
+            | {"configured_share": 0.0, "effective_share": 0.0},
+        }
+        assert cells[""]["Dynamic"]["reputation"] == 0.95
+        rows = {row["place"]: row for row in body["places"]}
+        assert (rows["US/NY/new_york"]["lowest"], rows["US/NY/new_york"]["lowered"]) == (
+            {"value": 0.75, "inherited": True}, False
+        )
+        assert (rows["US"]["lowest"], rows["US"]["lowered"], rows["US"]["not_judged"]) == (
+            {"value": 0.5, "inherited": False}, True, False
+        )
+        dynamic, pool_connector = body["connectors"]
+        assert (dynamic["name"], dynamic["dynamic"], "excluded_reason" in dynamic) == ("Dynamic", True, False)
+        assert dynamic["tile"] == {
+            "lowered_countries": 1, "countries": 1, "lowered_states": 1, "states": 1, "lowered_cities": 0, "cities": 0,
+            "buckets": {"heavy": 0, "lowered": 3, "inherited": 1, "full": 0, "not_judged": 0},
+        }
+        assert (pool_connector["tile"]["usable_ips"], pool_connector["tile"]["eligible_ips"], pool_connector["tile"]["reputation"]) == (
+            2, 4, 0.5
+        )
+        # x0.5 for the pool at no place, in the United States and in New York state: the finest place.
+        assert body["summary"] == {
+            "lowered_connectors": 2, "serving_connectors": 2,
+            "hardest": {"connector_id": split.pool, "place": "US/NY", "value": 0.5},
+        }
+
+    def test_the_states_a_connector_has_at_a_place(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data, mode="record")
+        site = "shop.example.com"
+        # Too few requests from Germany for a factor; one of the pool's rows avoided for the site.
+        _apply_connectors(
+            authenticated_client,
+            utc_now(),
+            {ConnectorSiteKey(split.project_id, split.dynamic, site, "DE"): RequestCount(requests=5, blocked=1)},
+        )
+        _apply(authenticated_client, utc_now(), {ExitIpKey(split.project_id, "203.0.113.3", site): ReportCounts(bad=1)})
+
+        body = self.places(split, site=f"https://{site}/cart")
+
+        assert (body["site"], body["mode"], body["reputation_applied"]) == (site, "record", False)
+        assert {"site": site, "reports": 1} in body["sites"]
+        # Germany for its record; the United States for the pool's avoided row there; no place named for neither.
+        assert [(row["place"], row["reports"], row["not_judged"]) for row in body["places"]] == [
+            ("DE", 1, True), ("US", 0, False)
+        ]
+        states = {place: {name: cell["state"] for name, cell in at.items()} for place, at in self.cells(body, split).items()}
+        assert states == {
+            "DE": {"Dynamic": "not_judged", "Pool": "takes_none"},
+            "US": {"Dynamic": "no_reports", "Pool": "own"},
+        }
+        us = self.cells(body, split)["US"]
+        # Record mode: the share is what Avoid would make of it.
+        assert (us["Pool"]["reputation"], us["Pool"]["configured_share"], us["Pool"]["effective_share"]) == (0.75, 33.33, 27.27)
+        assert body["summary"]["hardest"] == {"connector_id": split.pool, "place": "US", "value": 0.75}
+
+    def test_a_quiet_place_shows_its_counts_as_last_decided(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        then = utc_now() - timedelta(hours=3)
+        _apply_connectors(
+            authenticated_client,
+            then,
+            {ConnectorSiteKey(split.project_id, split.dynamic, "quiet.example.com", "GB"): RequestCount(requests=20, blocked=8)},
+        )
+
+        body = self.places(split, site="quiet.example.com")
+
+        cell = body["places"][0]["cells"][split.dynamic]
+        # Three hours of decay would leave an eighth of each count; the factor stays as decided.
+        assert (cell["state"], cell["reputation"], cell["blocked"], cell["requests"]) == ("own", 0.6, 8, 20)
+        assert cell["counted_at"] == then.replace(tzinfo=None).isoformat() + "Z"
+
+    def test_countries_only_as_a_project_naming_countries_sends_them(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        site = "countries.example.com"
+        _apply_connectors(
+            authenticated_client,
+            utc_now(),
+            {
+                ConnectorSiteKey(split.project_id, split.dynamic, site, country): RequestCount(
+                    requests=20, blocked=blocked, good=good
+                )
+                for country, blocked, good in (("GB", 2, 0), ("DE", 10, 0), ("FR", 0, 1))
+            },
+        )
+
+        body = self.places(split, site=site)
+
+        # No city listed: no city counts either.
+        assert [(row["place"], row["level"], row.get("parent"), row.get("cities_total")) for row in body["places"]] == [
+            ("DE", "country", None, None), ("GB", "country", None, None), ("FR", "country", None, None)
+        ]
+        tile = body["connectors"][0]["tile"]
+        assert (tile["lowered_countries"], tile["countries"], tile["cities"]) == (2, 3, 0)
+        assert body["summary"]["hardest"] == {"connector_id": split.dynamic, "place": "DE", "value": 0.5}
+
+    def test_cities_under_their_states_and_countries(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        site = "cities.example.com"
+        # One flush each, as their levels overlap: x0.5, x1, x0.8, x1 and x0.9.
+        for place, blocked, good in (
+            ("US/NY/new_york", 10, 0), ("US/NY/buffalo", 0, 1), ("US//austin", 4, 0), ("GB//london", 0, 1),
+            ("GB//leeds", 2, 0),
+        ):
+            key = ConnectorSiteKey(split.project_id, split.dynamic, site, place)
+            _apply_connectors(authenticated_client, utc_now(), {key: RequestCount(requests=20, blocked=blocked, good=good)})
+
+        body = self.places(split, site=site)
+
+        assert [(row["place"], row["label"], row["reports"]) for row in body["places"]] == [
+            ("US", "United States", 15),
+            ("US/NY", "New York, United States", 11),
+            ("US/NY/new_york", "New York, NY", 10),
+            ("US/NY/buffalo", "Buffalo, NY", 1),
+            ("US//austin", "Austin, United States", 4),
+            ("GB", "United Kingdom", 3),
+            ("GB//leeds", "Leeds, United Kingdom", 2),
+            ("GB//london", "London, United Kingdom", 1),
+        ]
+        rows = {row["place"]: row for row in body["places"]}
+        assert (rows["US"]["cities_lowered"], rows["US"]["cities_total"]) == (2, 3)
+        assert (rows["GB"]["cities_lowered"], rows["GB"]["cities_total"]) == (1, 2)
+
+    def test_the_traffic_split_agrees_at_every_place(
         self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
     ) -> None:
         split = Split(authenticated_client, sample_project_data)
 
-        body = authenticated_client.get(f"/api/v1/projects/{split.project_id}/exit-reputation/connectors").json()
+        body = self.places(split, site=Split.SITE)
 
-        assert body["place"] is None
-        dynamic = body["connectors"][0]["cells"]["www.google.com"]
-        assert (dynamic["reputation"], dynamic["reputation_place"], dynamic["blocked"], dynamic["requests"]) == (
-            0.95, "", 2, 40
+        for row in body["places"]:
+            shown = split.by_name(site=Split.SITE, place=row["place"]) if row["place"] else split.by_name(site=Split.SITE)
+            for connector in body["connectors"]:
+                cell, there = row["cells"][connector["connector_id"]], shown[connector["name"]]
+                assert (
+                    cell["state"], cell["reputation"], cell.get("reputation_place"), cell.get("usable_ips"), cell["effective_share"]
+                ) == (
+                    there["reputation_state"], there["reputation"], there["reputation_place"], there["usable_ips"],
+                    there["effective_share"],
+                ), row["place"]
+
+    def test_an_asked_site_without_records_is_kept_first(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+
+        body = self.places(split, site="new.example.com")
+
+        assert body["sites"] == [
+            {"site": "new.example.com", "reports": 0}, {"site": "www.google.com", "reports": 9},
+            {"site": "bing.com", "reports": 1},
+        ]
+        assert (body["site"], body["places"], body["summary"].get("hardest")) == ("new.example.com", [], None)
+        assert [connector["name"] for connector in body["connectors"]] == ["Dynamic", "Pool"]
+        # A blank site is the busiest one.
+        assert self.places(split, site=" ")["site"] == "www.google.com"
+
+    def test_the_default_site_is_the_busiest_with_a_place_to_list(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        now = utc_now()
+        # The busiest site, reported through the pool alone: it avoids an IP none of the pool's rows exits from.
+        _apply_connectors(
+            authenticated_client,
+            now,
+            {ConnectorSiteKey(split.project_id, split.pool, "plain.example.com", ""): RequestCount(blocked=30)},
+        )
+        _apply(authenticated_client, now, {ExitIpKey(split.project_id, "198.51.100.9", "plain.example.com"): ReportCounts(bad=1)})
+
+        # Nothing to list there: the next busiest site with a dynamic connector's records.
+        assert self.places(split)["site"] == Split.SITE
+
+        # A busier site than that, through the pool alone, avoiding one of its rows: its country is listed.
+        _apply_connectors(
+            authenticated_client,
+            now,
+            {ConnectorSiteKey(split.project_id, split.pool, "avoids.example.com", ""): RequestCount(blocked=20)},
+        )
+        _apply(authenticated_client, now, {ExitIpKey(split.project_id, "203.0.113.3", "avoids.example.com"): ReportCounts(bad=1)})
+
+        body = self.places(split)
+
+        assert [listed["site"] for listed in body["sites"]] == [
+            "plain.example.com", "avoids.example.com", Split.SITE, "bing.com"
+        ]
+        assert (body["site"], [row["place"] for row in body["places"]]) == ("avoids.example.com", ["US"])
+        # Asked for, the busiest site still shows, with nothing to list.
+        assert self.places(split, site="plain.example.com")["places"] == []
+
+    def test_with_no_place_to_list_anywhere_the_busiest_site(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        project_id = _project(authenticated_client, sample_project_data)["id"]
+        credential = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/credentials",
+            json={"name": "Pool", "type": "static_proxy_provider", "config": {}},
+        ).json()["id"]
+        pool = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/connectors",
+            json={"name": "Pool", "credential_id": credential, "config": {}, "routing_config": {"weight": 1}},
+        ).json()["id"]
+        _apply_connectors(
+            authenticated_client,
+            utc_now(),
+            {
+                ConnectorSiteKey(project_id, pool, site, ""): RequestCount(blocked=blocked)
+                for site, blocked in (("quiet.example.com", 1), ("busy.example.com", 3))
+            },
+        )
+
+        body = authenticated_client.get(f"/api/v1/projects/{project_id}/exit-reputation/places").json()
+
+        assert (body["site"], [listed["site"] for listed in body["sites"]], body["places"]) == (
+            "busy.example.com", ["busy.example.com", "quiet.example.com"], []
         )
 
     def test_a_project_with_no_records(
         self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
     ) -> None:
         project_id = _project(authenticated_client, sample_project_data)["id"]
-        body = authenticated_client.get(f"/api/v1/projects/{project_id}/exit-reputation/connectors").json()
-        assert body == {"place": None, "places": [], "sites": [], "reputation_applied": False, "connectors": []}
+        body = authenticated_client.get(f"/api/v1/projects/{project_id}/exit-reputation/places").json()
+        # No site and no hardest hit: left out, as every field without a value is.
+        assert body == {
+            "mode": "record", "reputation_applied": False, "sites": [], "connectors": [], "places": [],
+            "summary": {"lowered_connectors": 0, "serving_connectors": 0},
+        }
 
-    def test_a_place_that_names_none_is_a_400(
+    def test_a_site_that_names_none_is_a_400(
         self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
     ) -> None:
         project_id = _project(authenticated_client, sample_project_data)["id"]
         response = authenticated_client.get(
-            f"/api/v1/projects/{project_id}/exit-reputation/connectors", params={"place": "U/S/A/B"}
+            f"/api/v1/projects/{project_id}/exit-reputation/places", params={"site": "co.uk"}
         )
-        assert response.status_code == 400
+        assert (response.status_code, response.json()["detail"]) == (400, "not a site: co.uk is a public suffix")
 
     def test_every_signed_in_role_reads_it(
         self,
@@ -713,10 +976,10 @@ class TestConnectors:
         viewer_auth_headers: dict[str, str],
     ) -> None:
         split = Split(authenticated_client, sample_project_data)
-        url = f"/api/v1/projects/{split.project_id}/exit-reputation/connectors"
+        url = f"/api/v1/projects/{split.project_id}/exit-reputation/places"
         for headers in (editor_auth_headers, viewer_auth_headers):
             response = authenticated_client.get(url, headers=headers)
             assert response.status_code == 200, response.text
-            assert response.json()["sites"] == ["www.google.com", "bing.com"]
+            assert response.json()["site"] == "www.google.com"
         assert authenticated_client.get(url, headers={"Authorization": "Bearer nope"}).status_code == 401
-        assert authenticated_client.get("/api/v1/projects/nope/exit-reputation/connectors").status_code == 404
+        assert authenticated_client.get("/api/v1/projects/nope/exit-reputation/places").status_code == 404

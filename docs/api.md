@@ -356,14 +356,14 @@ A refused report does not hold back the others, and its `error` says why. The ap
 
 ### Exit Reputation Records
 
-What a project's [exit reputation]({{ site.baseurl }}/exit-reputation#views) holds, whatever the mode: one record per exit IP and site, as the Exit locations page shows them, and its connectors on its busiest sites. Any signed-in role may read them. Times are UTC, written with a `Z`; `404` for an unknown project.
+What a project's [exit reputation]({{ site.baseurl }}/exit-reputation#views) holds, whatever the mode: one record per exit IP and site, as the Exit locations page shows them, and one site across every place its records name. Any signed-in role may read them. Times are UTC, written with a `Z`; `404` for an unknown project.
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/projects/{project_id}/exit-reputation` | One page of records. Filters: `ip` (a whole IP matches exactly, anything shorter as its start, such as `203.0.113.`), `site` (any part of the site, such as `google`), `status` (`avoided`, `none`, or `any`, the default). `sort`: `last_seen` (the default, newest first) or `reports` (most good and bad reports first). Paging with `limit` (1 to 1000, default 100) and `offset`. `total` is counted no further than 10,000 records past the page: `total_exact` false makes it a lower bound |
 | GET | `/projects/{project_id}/exit-reputation/ips/{ip}` | One IP: how many sites it has a record for (`sites`) and how many avoid it now (`avoided_sites`); up to 100 of those records as `records`, those avoiding it now first, each the one seen last first; and the project's connectors that handed it out, from their exit IPs, as `connectors` (`connector_id`, `connector_name`, `first_seen`, `last_seen`, `sightings`). Both lists are empty for an IP the project has nothing on; `400` for text that is not an IP |
 | POST | `/projects/{project_id}/exit-reputation/summary` | Per IP, its records over every site: `{"ips": [...]}`, up to 1000, answers `{"ips": [{ip, good_reports, bad_reports, sites, avoided_sites, avoided_until}]}` for the IPs with a record, in the order asked, each under the text it was asked by. A read, sent as a `POST` so a page of IPs fits |
-| GET | `/projects/{project_id}/exit-reputation/connectors` | Every connector of the project on each of its busiest sites, for a request naming `place` (a place as `-cc-`, `-st-` and `-city-` name it: `US`, `US/NY`, `US/NY/new_york`, `US//austin`; left out, a request naming none). See below |
+| GET | `/projects/{project_id}/exit-reputation/places` | One `site` across every place requests to it named: each connector's reputation and share of the requests from each place, with a tile per connector and a summary. See below |
 
 A record, read half an hour after the report that began its second avoid:
 
@@ -388,38 +388,78 @@ A record, read half an hour after the report that began its second avoid:
 
 `status` is `avoided` while the avoid is ahead, with `avoided_until` its end, else `none`. The counts are for the record's life; the `weighted_` ones are the recent counts that decide, faded by the project's "Remember for" to the time of the answer, `weighted_avoids` the recent avoids the next one doubles by. `avoid_until` is the last avoid's end, so it may be past.
 
-**Connectors by site.** `GET /projects/{project_id}/exit-reputation/connectors?place=US/NY` answers, for the up to 8 sites with the most reports:
+**Every place for a site.** `GET /projects/{project_id}/exit-reputation/places?site=www.google.com` answers one site across every place requests to it named, as the [Reputation tab]({{ site.baseurl }}/exit-reputation#every-place-for-a-site) shows it:
 
 ```json
 {
-  "place": "US/NY",
-  "places": [{"place": "US", "label": "United States", "reports": 41}, {"place": "US/NY", "label": "US, NY", "reports": 17}],
-  "sites": ["www.google.com", "www.bing.com"],
+  "site": "www.google.com",
+  "mode": "avoid",
   "reputation_applied": true,
+  "sites": [{"site": "www.google.com", "reports": 58}, {"site": "www.bing.com", "reports": 12}],
   "connectors": [
     {
-      "connector_id": "…", "name": "Oxylabs residential", "credential_type": "oxylabs", "dynamic": true, "weight": 3,
+      "connector_id": "b27e…", "name": "DC pool", "credential_type": "static_proxy_provider", "enabled": true, "weight": 1,
+      "dynamic": false,
+      "tile": {"lowered_countries": 1, "countries": 1, "lowered_states": 0, "states": 0, "lowered_cities": 0, "cities": 1,
+               "buckets": {"heavy": 0, "lowered": 1, "inherited": 0, "full": 1, "not_judged": 0},
+               "usable_ips": 46, "eligible_ips": 50, "reputation": 0.92}
+    },
+    {
+      "connector_id": "6f1c…", "name": "Oxylabs residential", "credential_type": "oxylabs", "enabled": true, "weight": 3,
+      "dynamic": true,
+      "tile": {"lowered_countries": 1, "countries": 1, "lowered_states": 0, "states": 0, "lowered_cities": 0, "cities": 0,
+               "buckets": {"heavy": 0, "lowered": 1, "inherited": 1, "full": 0, "not_judged": 0}}
+    }
+  ],
+  "places": [
+    {
+      "place": "US", "label": "United States", "level": "country", "reports": 41, "lowered": true, "not_judged": false,
+      "lowest": {"value": 0.8, "inherited": false}, "cities_lowered": 0, "cities_total": 1,
       "cells": {
-        "www.google.com": {"reputation": 0.65, "reputation_kind": "block_rate", "reputation_place": "US/NY", "blocked": 70,
-                           "requests": 200, "usable_ips": null, "eligible_ips": null, "effective_share": 79.59},
-        "www.bing.com": {"reputation": 1.0, "reputation_kind": "block_rate", "reputation_place": null, "blocked": null,
-                         "requests": null, "usable_ips": null, "eligible_ips": null, "effective_share": 75.0}
+        "b27e…": {"state": "own", "reputation": 0.9, "reputation_kind": "usable_ips", "usable_ips": 18, "eligible_ips": 20,
+                  "configured_share": 25.0, "effective_share": 27.27},
+        "6f1c…": {"state": "own", "reputation": 0.8, "reputation_kind": "block_rate", "reputation_place": "US",
+                  "own_factor": 0.8, "blocked": 52, "requests": 260, "counted_at": "2026-11-20T10:41:00Z",
+                  "configured_share": 75.0, "effective_share": 72.73}
       }
     },
     {
-      "connector_id": "…", "name": "DC pool", "credential_type": "static_proxy_provider", "dynamic": false, "weight": 1,
+      "place": "US//austin", "label": "Austin, United States", "level": "city", "parent": "US", "reports": 6, "lowered": false,
+      "not_judged": false, "lowest": {"value": 0.8, "inherited": true},
       "cells": {
-        "www.google.com": {"reputation": 0.5, "reputation_kind": "usable_ips", "reputation_place": null, "blocked": 10,
-                           "requests": 380, "usable_ips": 10, "eligible_ips": 20, "effective_share": 20.41},
-        "www.bing.com": {"reputation": 1.0, "reputation_kind": "usable_ips", "reputation_place": null, "blocked": 0,
-                         "requests": 95, "usable_ips": 20, "eligible_ips": 20, "effective_share": 25.0}
+        "b27e…": {"state": "own", "reputation": 1.0, "reputation_kind": "usable_ips", "usable_ips": 2, "eligible_ips": 2,
+                  "configured_share": 25.0, "effective_share": 29.41},
+        "6f1c…": {"state": "inherited", "reputation": 0.8, "reputation_kind": "block_rate", "reputation_place": "US",
+                  "blocked": 2, "requests": 6, "counted_at": "2026-11-20T07:12:00Z",
+                  "configured_share": 75.0, "effective_share": 70.59}
       }
     }
-  ]
+  ],
+  "summary": {"lowered_connectors": 2, "serving_connectors": 2,
+              "hardest": {"connector_id": "6f1c…", "place": "US", "value": 0.8}}
 }
 ```
 
-Each cell is the connector on that site as the [traffic split](#traffic-split) shows one site: its `reputation` and what measures it, the counts behind it, and its `effective_share` of the site's requests. `places` lists the requested places with connector records on any site (the most reported first, at most 20; requests naming no place are the `place` left out), and `reputation_applied` says whether routing weighs the connectors by it: the project's `exit_reputation` is `avoid`. `400` for a `place` that names none.
+`site` is the exact host, or a URL whose host is taken. Left out or blank, it is the most reported site with a place to list (a dynamic connector's record, or a country where a connector with IPs has an eligible row the site avoids), or the most reported site when none has one. `400` for a `site` that names none.
+
+A field with no value is left out rather than sent as `null`, since a site with many cities is hundreds of cells; read a missing field as `null`. `site` is left out only when the project has no connector records and none was asked for; `connectors` and `places` are then empty.
+
+- `sites` is every site with connector records, the most reported first, each report counted once; a site asked for that has none comes first, with 0 `reports`. `mode` is the project's `exit_reputation`, and `reputation_applied` is true when routing weighs the connectors by it: the mode is `avoid`.
+- `connectors` are the project's connectors by name, as the [traffic split](#traffic-split) lists them, each with the traffic split's `excluded_reason` when it takes no request naming no site and no place (left out while it takes them). A `tile` counts the connector's own values by level, those under 1 of them all (`lowered_countries` of `countries`, and the same for states and cities), so a city's value is not counted again at its state and its country. Its `buckets` sort its listed places by where it stands: `heavy` (an own value under 0.5), `lowered` (0.5 to under 1), `inherited`, `full` (an own value of 1, or no reports) and `not_judged`, leaving out the places it takes none of. A connector with IPs' tile also has `usable_ips` of `eligible_ips`, and the `reputation` they make, for a request naming no place.
+- `places` is every place, however many, in tree order: `""` (no place named) first when a dynamic connector has a record there, then each country, the most reported first, followed by its states and the cities named without a state (`US//austin`), the most reported first, each state followed by its cities. A place is listed when a dynamic connector has a record at it, with every level above it, and a country also when a connector with IPs has an eligible row there whose IP the site avoids. Each has its `label` (`No place named`, `United States`, `New York, United States`, `New York, NY`, `Austin, United States`; every country reads as its English name), `level` (`none`, `country`, `state` or `city`), `parent` (the next coarser place; left out for a country and for `""`), `reports` (reports through dynamic connectors at this exact place since its first; a country's include its cities'), `lowered` (some connector's own value there is under 1), `not_judged` (some connector that takes the requests is reported on there but not judged yet), `lowest` (the lowest value in force among the connectors taking the requests, and whether it is `inherited`; left out when none takes them), for a country with listed cities `cities_lowered` of `cities_total` (those with some own value under 1; left out without any), and `cells`, every connector there by its id.
+- `summary` has `lowered_connectors` (an own value under 1 at some listed place) of `serving_connectors` (taking the requests from some listed place), and `hardest`, the lowest own value under 1 (`connector_id`, `place`, `value`); on a tie the finer place first (a city before its state, a state before its country), then the more reported, left out when nothing is lowered. A connector with IPs is skipped at a state or a city where it has 2 eligible rows or fewer, since one avoided row there reads ×0.5 or ×0.
+
+A cell's `state` says where the connector stands at the place:
+
+| `state` | Meaning |
+|---|---|
+| `own` | Measured at the place: a dynamic connector's factor stored there, or a connector with IPs' rows there, once the site has a report through it or avoids one of its rows |
+| `inherited` | A dynamic connector's factor from the coarser level `reputation_place` names: the place has no factor of its own yet, with fewer than 20 recent requests or no report naming it |
+| `not_judged` | A dynamic connector reported at some level of the place, none of which has 20 recent requests yet: its weight is unchanged |
+| `no_reports` | Nothing reported: its weight is unchanged |
+| `takes_none` | Routing keeps the connector off these requests: it is disabled or over its traffic limit, its domain filter, a reservation or its country list keeps it off, or no healthy row of it serves the place |
+
+`reputation` is the value in force, 1 when nothing says otherwise; `reputation_kind` and `reputation_place` are as on the [traffic split](#effective-shares), and `own_factor` is a dynamic connector's factor stored at this place itself (left out without one). `blocked` and `requests` are the weighted counts as routing last decided the factor, at `counted_at`, not faded since: a dynamic connector's from the place's own record, so an inherited cell shows the place's own few requests. They are left out without a record, and for a connector with IPs, whose reports are kept for the whole site and weigh nothing on their own. A quiet place keeps its counts and its factor until new requests or reports there decide them again, or its record expires ([how]({{ site.baseurl }}/exit-reputation#a-connectors-reputation-for-a-site)). `usable_ips` of `eligible_ips` are a connector with IPs' rows eligible for a request to the site from the place, as on the traffic split. `configured_share` is the connector's share of the place's requests by weight, among the connectors that take them, and `effective_share` by weight times `reputation` whatever the mode: what `avoid` does, or would do.
 
 ---
 
@@ -994,7 +1034,7 @@ GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h&site=www.google
 
 #### Effective shares
 
-`reputation_sites` lists the sites with exit reputation records for the project, the most reported first, at most 20, each report counted once; with a `site`, `reputation_places` lists the places requests to it named in reports through a connector, the same way (`place`, a `label` such as `United States`, `US, NY` or `US, NY, new_york`, and `reports`; requests naming no place are the `place` left out). With a `site`, the response names the `site` and `place` it was weighed for, and every connector gains what [exit reputation]({{ site.baseurl }}/exit-reputation#routing) says of it there, read from the project's records:
+`reputation_sites` lists every site with exit reputation records for the project, the most reported first, each report counted once; with a `site`, `reputation_places` lists every place requests to it named in reports through a connector, the same way (`place`, a `label` such as `United States`, `New York, United States`, `New York, NY` or `London, United Kingdom`, and `reports`; requests naming no place are the `place` left out). With a `site`, the response names the `site` and `place` it was weighed for, and every connector gains what [exit reputation]({{ site.baseurl }}/exit-reputation#routing) says of it there, read from the project's records:
 
 ```json
 {
@@ -1004,6 +1044,7 @@ GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h&site=www.google
   "reputation": 0.65,
   "reputation_kind": "block_rate",
   "reputation_place": "US",
+  "reputation_state": "own",
   "blocked": 70,
   "requests": 200,
   "usable_ips": null,
@@ -1013,7 +1054,7 @@ GET /api/v1/projects/{project_id}/metrics/traffic-split?range=1h&site=www.google
 }
 ```
 
-- `reputation` is what the connector's weight is multiplied by for the site, 1 when nothing says otherwise. A dynamic connector's (`reputation_kind` `block_rate`) is one less its recent blocked reports per recent request there, at least 0.1, in steps of 0.05, taken from the finest level of the place with 20 recent requests or more (`reputation_place`: the city, else its state, else its country; `""` for requests naming no place, whose figure is its own); `blocked` and `requests` are the recent counts behind it, faded by the project's "Connector memory" (those of the finest level with a record while no level has enough requests, `null` with none). The factor is decided once a minute and moves only once the block rate has moved a full step from it, so it can sit less than a step from what `blocked` and `requests` give. A connector with IPs (`usable_ips`) is weighed by the share of its rows eligible for requests to the site from the place (domain filters, reservations and the place applied as routing applies them) whose exit IP is not avoided for the site: `usable_ips` of `eligible_ips`, 0 when none is usable; its `blocked` and `requests` are its record for the site, for reading only.
+- `reputation` is what the connector's weight is multiplied by for the site, 1 when nothing says otherwise. A dynamic connector's (`reputation_kind` `block_rate`) is one less its recent blocked reports per recent request there, at least 0.1, in steps of 0.05, taken from the finest level of the place with 20 recent requests or more (`reputation_place`: the city, else its state, else its country; `""` for requests naming no place, whose figure is its own); `blocked` and `requests` are the recent counts behind it, faded by the project's "Connector memory" (those of the finest level with a record while no level has enough requests, `null` with none). The factor is decided once a minute and moves only once the block rate has moved a full step from it, so it can sit less than a step from what `blocked` and `requests` give. A connector with IPs (`usable_ips`) is weighed by the share of its rows eligible for requests to the site from the place (domain filters, reservations and the place applied as routing applies them) whose exit IP is not avoided for the site: `usable_ips` of `eligible_ips`, 0 when none is usable; its `blocked` and `requests` are its record for the site, for reading only. `reputation_state` says where the connector stands at the place, as a cell's `state` does in `GET /exit-reputation/places`: `own`, `inherited`, `not_judged`, `no_reports` or `takes_none`.
 - `effective_weight` is the weight times the reputation of a connector serving requests to the site from the place (0 for one that serves none of them), and `effective_share` the connector's part of those requests by these weights. `reputation_applied` is true when they move routing: a site was given and the project's `exit_reputation` is `avoid`. Otherwise `effective_weight` is the weight of a connector serving the site from the place, 0 for one that does not, and `effective_share` its share by weight among them, and the reputation is shown for what it would do. `excluded_reason` stays the reason for requests naming no site and no place, so a connector reserving the place's country can have one and still take every request. Without a site, `reputation` is 1, the other reputation fields `null`, and the effective figures the configured ones.
 
 ### Hosts

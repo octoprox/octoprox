@@ -21,11 +21,11 @@ from api.core.telemetry import CONTENT_TYPE
 from api.db.redis import PROJECT_WINDOWS
 from api.db.repository import ConnectorRepository, MetricsRepository, ProxyRepository
 from api.db.reputation_repository import ExitReputationRepository
-from api.models.location import LocationTarget
 from api.providers.sdk.strategies import is_dynamic_gateway
+from api.reputation.record import place_levels
 from api.reputation.site import report_site
-from api.reputation.split import MAX_LISTED, ConnectorShare, ReputationSplit, place_key, place_label
-from api.reputation.weight import ReputationKind
+from api.reputation.split import ConnectorShare, ReputationSplit, place_key, place_label
+from api.reputation.weight import PlaceState, ReputationKind
 from api.routes.common import (
     api_runtime_of,
     require_project,
@@ -33,7 +33,6 @@ from api.routes.common import (
     session_factory_of,
     settings_of,
 )
-from api.routing.router import Router
 from api.services.read_model import ConnectorRow, PoolCounts
 from api.strategies import STRATEGY_NAMES, served_strategy
 
@@ -196,6 +195,11 @@ class ConnectorTrafficShare(BaseModel):
     )
     reputation: float = Field(default=1.0, description="What the weight is multiplied by for the site; 1 when nothing says otherwise")
     reputation_kind: ReputationKind | None = None
+    reputation_state: PlaceState | None = Field(
+        default=None,
+        description="Where the reputation stands at the place asked about, as the places view tells: own, inherited, "
+        "not_judged, no_reports or takes_none",
+    )
     blocked: int | None = Field(
         default=None,
         description="Recent blocked reports behind the reputation (decayed by Connector memory, and by half every "
@@ -221,6 +225,7 @@ class ConnectorTrafficShare(BaseModel):
         self.reputation_place = reputation.place
         self.reputation = reputation.value
         self.reputation_kind = reputation.kind
+        self.reputation_state = share.state
         self.blocked = share.blocked
         self.requests = share.requests
         self.usable_ips = reputation.usable_ips
@@ -238,7 +243,7 @@ class ReputationSiteOption(BaseModel):
 class ReputationPlaceOption(BaseModel):
     """A requested place with connector reputation data, how it reads, and the reports made for it."""
     place: str = Field(description="A LocationTarget key: US, US/NY, US/NY/new_york or US//austin")
-    label: str = Field(description="United States, US, NY or US, NY, new_york")
+    label: str = Field(description="United States, New York, United States or New York, NY")
     reports: int
 
 
@@ -257,12 +262,11 @@ class TrafficSplitResponse(BaseModel):
         default=False, description="Routing weighs the connectors for the site: the project avoids and a site was given"
     )
     reputation_sites: list[ReputationSiteOption] = Field(
-        default_factory=list, description=f"Sites with exit reputation data for the project, most reported first, at most {MAX_LISTED}"
+        default_factory=list, description="Every site with exit reputation data for the project, most reported first"
     )
     reputation_places: list[ReputationPlaceOption] = Field(
         default_factory=list,
-        description=f"Places with connector reputation data for the site, most reported first, at most {MAX_LISTED}; "
-        "empty without a site",
+        description="Every place with connector reputation data for the site, most reported first; empty without a site",
     )
 
 
@@ -420,19 +424,6 @@ def _label_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def _serving_reserved(preview: Router, project_id: str) -> set[str]:
-    """The connectors with a proxy taking requests for a country they reserve, which untargeted ones keep off.
-
-    A reserved country's requests reach only the connectors reserving it, so each of its routable proxies is theirs.
-    """
-    reserved = sorted({country for view in preview.snapshot.connector_views(project_id) for country in view.reserved})
-    return {
-        proxy.connector_id
-        for country in reserved
-        for proxy in preview.get_routable_proxies_for_project(project_id, location=LocationTarget(country=country))
-    }
-
-
 @router.get("/traffic-split", response_model=TrafficSplitResponse)
 async def get_traffic_split(
     request: Request,
@@ -466,7 +457,6 @@ async def get_traffic_split(
     project = preview.get_project(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    serving_reserved = _serving_reserved(preview, project_id)
 
     now = utc_now()
     delta, _limit, _bucket = RANGE_CONFIG[range]
@@ -478,15 +468,20 @@ async def get_traffic_split(
             {c.id: since for c in connectors}
         )
         reputation = ExitReputationRepository(session)
-        sites = await reputation.busiest_sites(project_id, limit=MAX_LISTED)
-        places = await reputation.busiest_places(project_id, wanted_site, limit=MAX_LISTED) if wanted_site else []
+        sites = await reputation.busiest_sites(project_id)
+        places = await reputation.busiest_places(project_id, wanted_site) if wanted_site else []
         split = await ReputationSplit.read(
-            session, project, preview, sites=[wanted_site] if wanted_site else [], place=wanted_place, now=now
+            session,
+            project,
+            preview,
+            sites=[wanted_site] if wanted_site else [],
+            levels={*place_levels(wanted_place), ""},
+            now=now,
         )
     eligible_groups = split.groups
     # The preview's groups carry the configured weights: it reads no exit reputation.
     total_weight = int(sum(g.weight for g in eligible_groups.values()))
-    shares = split.shares(wanted_site, [connector.id for connector in connectors])
+    shares = split.shares(wanted_site, wanted_place, [connector.id for connector in connectors])
     observed_total = sum(t["request_count"] for t in totals.values())
     observed_bytes_total = sum(t["bytes_sent"] + t["bytes_received"] for t in totals.values())
     # The rows each connector holds that still take requests, whatever their health.
@@ -501,16 +496,6 @@ async def get_traffic_split(
         rows = [p for p in compiled.proxies if not p.status.retiring] if compiled is not None else []
         group = eligible_groups.get(connector.id)
         eligible = len(group.proxies) if group else 0
-        if not connector.enabled:
-            reason: str | None = "disabled"
-        elif preview.is_traffic_blocked(connector.id):
-            reason = "traffic_limit"
-        elif group is None and connector.id in serving_reserved:
-            reason = "reserved_only"
-        elif group is None:
-            reason = "no_eligible_proxies"
-        else:
-            reason = None
         expected = (group.weight / total_weight * 100) if group and total_weight else 0.0
         observed = totals.get(connector.id, {})
         requests = int(observed.get("request_count", 0))
@@ -526,7 +511,7 @@ async def get_traffic_split(
             total_proxies=active[connector.id],
             eligible_proxies=eligible,
             expected_share=round(expected, 2),
-            excluded_reason=reason,
+            excluded_reason=split.excluded_reason(connector),
             observed_requests=requests,
             observed_share=round(requests / observed_total * 100, 2) if observed_total else None,
             observed_bytes=observed_bytes,
