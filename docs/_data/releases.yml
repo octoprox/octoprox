@@ -10,6 +10,13 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.9.2
+  date: 2026-11-20
+  title: Clearer observed share in traffic split
+  changes:
+    - text: "The Traffic split panel now shows the Observed share under All traffic. It counts every request through the connector in the window, and the site and place pickers do not change it."
+      docs: routing-strategies#seeing-the-split
+
 - version: 6.9.1
   date: 2026-11-20
   title: Exit reputation across every place for a site
