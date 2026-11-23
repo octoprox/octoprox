@@ -10,6 +10,21 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.9.3
+  date: 2026-11-23
+  title: Exit reputation strength and lowest factor
+  changes:
+    - text: "Exit reputation has a new Strength setting, from 1 to 20, that compares each dynamic connector with the best one at a place. At the default of 1, routing works as before. Higher values send more of a site's requests to the connector it blocks least."
+      docs: exit-reputation#strength-and-lowest-factor
+    - text: "A new Lowest factor setting sets the smallest share of its weight a dynamic connector keeps for a site. It was always 10% before, and 10% stays the default. A lowered connector still gets some requests, so it can show when it recovers."
+      docs: exit-reputation#settings
+    - text: "When you change Strength or Lowest factor on a project, the settings form shows how the split would move in a site's busiest places. If Strength is above 5, it suggests setting Connector memory to 1,000 or more."
+      docs: exit-reputation#strength-and-lowest-factor
+    - text: "Tooltips on the traffic split and the Reputation tab now explain each connector's factor. They show its block rate against the best connector's and say when it is held at the Lowest factor."
+      docs: exit-reputation#views
+    - text: "The projects API accepts `exit_reputation_strength` and `exit_reputation_floor`, and a new strength preview endpoint returns the same preview as the form. Traffic split and places reads also return each connector's success rate and the best connector it is compared with."
+      docs: api#exit-reputation-records
+
 - version: 6.9.2
   date: 2026-11-20
   title: Clearer observed share in traffic split
