@@ -13,7 +13,7 @@ import { useProject } from '../contexts/ProjectContext'
 import { compact, formatBytesDecimal, formatMoney, plural } from '../utils/format'
 import { cn } from '../utils/cn'
 import { ProviderLogo } from './ProviderLogo'
-import { ReputationFactor, lowered, placeLabel, reputationReason, reputationTitle, weightText, wouldBe } from './ConnectorReputation'
+import { ReputationFactor, lowered, placeLabel, reputationReason, reputationTitle, strengthNote, weightText, wouldBe, type StrengthRule } from './ConnectorReputation'
 import { RichSelect } from './RichSelect'
 import { Card, CardHeader, InfoTip, LogoLoader, Reloading, Segmented } from './ui'
 
@@ -373,6 +373,15 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
   // Round robin draws a request whose weights reputation lowered at random by them, out of its fixed order; a connector
   // with every row avoided only drops out, which lowers no weight.
   const drawn = split.strategy === 'round_robin' && applied && active.some((c) => c.reputation > 0 && c.reputation < 1)
+  // How a dynamic connector compares with the best one here, at the project's Strength and Lowest factor.
+  const rule: StrengthRule = {
+    strength: split.reputation_strength,
+    floor: split.reputation_floor,
+    nameOf: (id) => split.connectors.find((c) => c.connector_id === id)?.name,
+  }
+  // A connector's counts are those of the level its factor came from, so the block rates read as the reason's do.
+  const countsOf = (id: string) => split.connectors.find((c) => c.connector_id === id)
+  const compared = (c: ConnectorTrafficShare) => strengthNote(c, c.connector_id, rule, countsOf)
   // Six columns need more room than the configured split's: below @lg (512px) the numbers stack under the name. Wide,
   // the band, the header and every row share one grid's columns (subgrid), as in the configured split.
   const wideCols = '@lg:grid-cols-[auto_minmax(0,1fr)_auto_auto_auto_auto_auto]'
@@ -428,7 +437,7 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
                 key={c.connector_id}
                 {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
                 className={`w-full grid grid-cols-[auto_minmax(0,1fr)] @lg:grid-cols-subgrid @lg:col-span-full items-center gap-x-3 gap-y-0.5 py-1.5 @lg:py-0 @lg:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
-                title={off ? offTitle : reputationTitle(c.name, c, site, place, places)}
+                title={off ? offTitle : reputationTitle(c.name, c, site, place, places, compared(c))}
               >
                 <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
                 <ConnectorName c={c} off={off} />
@@ -466,7 +475,7 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
 
       <p className="text-xs text-fg-muted">
         {lowest
-          ? `${lowest.name}: ${reputationReason(lowest, site, place, places)}. Effective weights total ${weightText(effectiveTotal)} of ${split.total_weight}.`
+          ? `${lowest.name}: ${reputationReason(lowest, site, place, places)}.${compared(lowest) ? ` ${compared(lowest)}` : ''} Effective weights total ${weightText(effectiveTotal)} of ${split.total_weight}.`
           : `Nothing lowers a connector's weight for ${site}${from}: every connector keeps its weight.`}
       </p>
       <p className="text-xs text-fg-muted">

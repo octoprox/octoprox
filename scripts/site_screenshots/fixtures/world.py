@@ -229,6 +229,13 @@ CONNECTORS: list[ConnSpec] = [
              {"total": 1, "per_country": None, "countries": ["US", "CA"], "on_demand": [], "dynamic": True,
               "exit_sample_percent": 5},
              traffic_config={"limit_bytes": 80 * GB, "price_per_gb": 4.2}),
+    # A second dynamic connector, so exit reputation has a best one to weigh Decodo against.
+    ConnSpec(P4, "iproyal", "IPRoyal residential", "iproyal", "IPRoyal listings", 3, "residential_dynamic", 40.0, 2.5,
+             0.029,
+             {"session_mode": "dynamic", "country_code": ["US", "CA"]},
+             {"total": 1, "per_country": None, "countries": ["US", "CA"], "on_demand": [], "dynamic": True,
+              "exit_sample_percent": 5},
+             traffic_config={"price_per_gb": 4.9}, created_days_ago=34),
     ConnSpec(P4, "webshare", "Webshare listings", "webshare", "Webshare listings", 2, "datacenter", 37.0, 2.2, 0.018,
              {"mode": "direct"}, None),
     ConnSpec(P4, "gcp", "GCP us-central1 fleet", "gcp", "GCP listings", 2, "cloud", 39.0, 2.1, 0.012,

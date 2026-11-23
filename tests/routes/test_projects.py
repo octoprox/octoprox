@@ -196,8 +196,10 @@ class TestProjectEndpoints:
             "exit_reputation_connector_half_life_requests",
             "exit_reputation_bad_reports",
             "exit_reputation_bad_share",
+            "exit_reputation_strength",
+            "exit_reputation_floor",
         )
-        assert tuple(created_project[field] for field in fields) == ("off", 60, 24, 100, 1, 50)
+        assert tuple(created_project[field] for field in fields) == ("off", 60, 24, 100, 1, 50, 1, 10)
 
         edited = authenticated_client.patch(
             url,
@@ -208,16 +210,20 @@ class TestProjectEndpoints:
                 "exit_reputation_connector_half_life_requests": 500,
                 "exit_reputation_bad_reports": 3,
                 "exit_reputation_bad_share": 25,
+                "exit_reputation_strength": 10,
+                "exit_reputation_floor": 5,
             },
         )
         assert edited.status_code == 200
-        assert tuple(edited.json()[field] for field in fields) == ("record", 30, 12, 500, 3, 25)
+        assert tuple(edited.json()[field] for field in fields) == ("record", 30, 12, 500, 3, 25, 10, 5)
         # An edit that leaves them out keeps them, and the list carries them: the project page edits from it.
         kept = authenticated_client.patch(url, json={"description": "kept", "exit_reputation": "avoid"})
-        assert tuple(kept.json()[field] for field in fields) == ("avoid", 30, 12, 500, 3, 25)
+        assert tuple(kept.json()[field] for field in fields) == ("avoid", 30, 12, 500, 3, 25, 10, 5)
         listed = {p["id"]: p for p in authenticated_client.get("/api/v1/projects").json()["projects"]}
-        assert tuple(listed[created_project["id"]][field] for field in fields) == ("avoid", 30, 12, 500, 3, 25)
-        assert tuple(authenticated_client.get(url).json()[field] for field in fields) == ("avoid", 30, 12, 500, 3, 25)
+        assert tuple(listed[created_project["id"]][field] for field in fields) == ("avoid", 30, 12, 500, 3, 25, 10, 5)
+        assert tuple(authenticated_client.get(url).json()[field] for field in fields) == (
+            "avoid", 30, 12, 500, 3, 25, 10, 5
+        )
 
     @pytest.mark.parametrize(
         ("field", "refused", "taken"),
@@ -228,6 +234,9 @@ class TestProjectEndpoints:
             ("exit_reputation_connector_half_life_requests", (19, 10_001), (20, 10_000)),
             ("exit_reputation_bad_reports", (0, 11), (1, 10)),
             ("exit_reputation_bad_share", (0, 100), (1, 99)),
+            ("exit_reputation_strength", (0, 21), (1, 20)),
+            # In percent: 100 never lowers a dynamic connector's weight.
+            ("exit_reputation_floor", (0, 101), (1, 100)),
             # Prefer was dropped: the modes are off, record and avoid.
             ("exit_reputation", ("prefer", ""), ("off", "avoid")),
         ],
@@ -260,6 +269,8 @@ class TestProjectEndpoints:
                 "exit_reputation": "record",
                 "exit_reputation_half_life_hours": 48,
                 "exit_reputation_connector_half_life_requests": 250,
+                "exit_reputation_strength": 5,
+                "exit_reputation_floor": 20,
             },
         )
         assert created.status_code == 201
@@ -268,9 +279,16 @@ class TestProjectEndpoints:
             body["exit_reputation"],
             body["exit_reputation_half_life_hours"],
             body["exit_reputation_connector_half_life_requests"],
-        ) == ("record", 48, 250)
+            body["exit_reputation_strength"],
+            body["exit_reputation_floor"],
+        ) == ("record", 48, 250, 5, 20)
 
-        for refused_field in ({"exit_reputation_bad_share": 0}, {"exit_reputation_connector_half_life_requests": 10}):
+        for refused_field in (
+            {"exit_reputation_bad_share": 0},
+            {"exit_reputation_connector_half_life_requests": 10},
+            {"exit_reputation_strength": 21},
+            {"exit_reputation_floor": 0},
+        ):
             refused = authenticated_client.post(
                 "/api/v1/projects",
                 json={**sample_project_data, "name": "other", "username": "other-user", **refused_field},

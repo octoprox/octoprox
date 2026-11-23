@@ -92,8 +92,11 @@ def _reputation() -> FeedReputation:
     return FeedReputation(_session)  # type: ignore[arg-type]
 
 
-def _project(project_id: str, mode: ExitReputationMode = ExitReputationMode.AVOID) -> Project:
-    return Project(id=project_id, name=project_id, username=project_id, password="pw", exit_reputation=mode)
+def _project(project_id: str, mode: ExitReputationMode = ExitReputationMode.AVOID, strength: int = 1) -> Project:
+    return Project(
+        id=project_id, name=project_id, username=project_id, password="pw", exit_reputation=mode,
+        exit_reputation_strength=strength,
+    )
 
 
 def _section(connector_id: str, project_id: str, *rows: dict[str, str]) -> ConnectorSection:
@@ -120,10 +123,10 @@ class TestScope:
             _section("theirs", "q", {"discovered_ip": "203.0.113.9"}),
         ]
 
-        scopes = ReputationScope.of([_project("p"), _project("q", ExitReputationMode.RECORD)], sections)
+        scopes = ReputationScope.of([_project("p", strength=8), _project("q", ExitReputationMode.RECORD)], sections)
 
         assert scopes == {
-            "p": ReputationScope(frozenset({"203.0.113.1", "203.0.113.2", "203.0.113.3"}), frozenset({"dyn"}))
+            "p": ReputationScope(frozenset({"203.0.113.1", "203.0.113.2", "203.0.113.3"}), frozenset({"dyn"}), 8)
         }
 
     def test_a_project_that_avoids_with_nothing_to_read_for_is_in_scope(self) -> None:
@@ -231,9 +234,19 @@ class TestReads:
 
 
 class TestFactors:
-    async def test_only_the_factors_that_change_what_routing_takes_are_carried(self, records: Records) -> None:
+    @pytest.mark.parametrize(
+        ("strength", "judging"),
+        [
+            # At strength 1 a 1 with none coarser changes no weight: it is left out.
+            (1, {}),
+            # Compared, it judges the connector, which may be the best one at a place: it stays.
+            (8, {"": 1.0, "GB": 1.0}),
+        ],
+    )
+    async def test_only_the_factors_that_change_what_routing_takes_are_carried(
+        self, records: Records, strength: int, judging: dict[str, float]
+    ) -> None:
         stored = {
-            # 1 at no place is what a request naming none gets anyway.
             "": 1.0,
             "US": 0.5,
             # A 1.0 for a state must win over its country's 0.5.
@@ -248,20 +261,24 @@ class TestFactors:
         for place, factor in stored.items():
             records.factor("p", "dyn", "www.google.com", place, factor)
         reputation = _reputation()
-        reputation.adopt({"p": ReputationScope(connectors=frozenset({"dyn"}))})
+        reputation.adopt({"p": ReputationScope(connectors=frozenset({"dyn"}), strength=strength)})
 
         await reputation.read()
 
         carried = reputation.section().projects["p"].connector_factors["dyn"]["www.google.com"]
-        assert carried == {"US": 0.5, "US/NY": 1.0, "US/CA/los_angeles": 0.25}
-        # Every place a request may name gets the same weight from what is carried as from every stored factor.
+        assert carried == {"US": 0.5, "US/NY": 1.0, "US/CA/los_angeles": 0.25} | judging
+        # Every place a request may name gets the same weight from what is carried as from every stored factor, and
+        # compared the same success too.
         places = [""] + [
             LocationTarget(country=country, state=state or None, city=city or None).key
             for country, state, city in product(("US", "GB", "DE"), ("", "NY", "CA", "TX"), ("", "new_york", "austin"))
         ]
         for place in places:
-            weighed = ConnectorReputation.by_block_rate(carried, place).value
-            assert weighed == ConnectorReputation.by_block_rate(stored, place).value, place
+            weighed = ConnectorReputation.by_block_rate(carried, place)
+            from_stored = ConnectorReputation.by_block_rate(stored, place)
+            assert weighed.value == from_stored.value, place
+            if strength > 1:
+                assert weighed.success == from_stored.success, place
 
 
 class TestCaps:
@@ -292,3 +309,20 @@ class TestCaps:
         }
         assert carried.connector_factors == {"dyn": {"www.google.com": {"GB": 0.5, "US": 0.75}}}
         assert [entry["event"] for entry in logs] == ["Exit reputation cut to fit the routing feed"]
+
+    async def test_a_1_carried_only_to_judge_a_connector_is_cut_first(
+        self, records: Records, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """It lowers nothing, where a finer level's factor does."""
+        monkeypatch.setattr(feed_reputation, "MAX_FEED_FACTORS", 2)
+        records.factor("p", "best", "www.google.com", "US", 1.0)
+        records.factor("p", "dyn", "www.google.com", "US/NY", 0.25)
+        records.factor("p", "dyn", "www.google.com", "US/NY/new_york", 0.5)
+        reputation = _reputation()
+        reputation.adopt({"p": ReputationScope(connectors=frozenset({"best", "dyn"}), strength=8)})
+
+        await reputation.read()
+
+        assert reputation.section().projects["p"].connector_factors == {
+            "dyn": {"www.google.com": {"US/NY": 0.25, "US/NY/new_york": 0.5}}
+        }

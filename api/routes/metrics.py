@@ -206,6 +206,17 @@ class ConnectorTrafficShare(BaseModel):
         "hour); null without a record",
     )
     requests: int | None = Field(default=None, description="Recent requests behind the reputation, decayed the same way")
+    success: float | None = Field(
+        default=None,
+        description="A judged dynamic connector's own factor (one less its block rate) at the level its reputation came "
+        "from, before it is compared with the best; null when not judged",
+    )
+    best_success: float | None = Field(
+        default=None,
+        description="The own factor of the best judged dynamic connector taking the requests, which this one is "
+        "compared with; null when this one is not judged",
+    )
+    best_connector_id: str | None = Field(default=None, description="That best connector; null with best_success")
     usable_ips: int | None = Field(default=None, description="A connector with IPs: its eligible rows not avoided for the site")
     eligible_ips: int | None = Field(
         default=None, description="A connector with IPs: its rows eligible for a request to the site from the place, as routing finds them"
@@ -228,6 +239,9 @@ class ConnectorTrafficShare(BaseModel):
         self.reputation_state = share.state
         self.blocked = share.blocked
         self.requests = share.requests
+        self.success = reputation.success
+        self.best_success = reputation.best
+        self.best_connector_id = reputation.best_connector_id
         self.usable_ips = reputation.usable_ips
         self.eligible_ips = reputation.eligible_ips
         self.effective_weight = round(share.effective_weight, 4)
@@ -260,6 +274,12 @@ class TrafficSplitResponse(BaseModel):
     place: str | None = Field(default=None, description="The requested place dynamic connectors are weighed at")
     reputation_applied: bool = Field(
         default=False, description="Routing weighs the connectors for the site: the project avoids and a site was given"
+    )
+    reputation_strength: int = Field(
+        default=1, description="How hard a dynamic connector is weighed against the best one at a place; 1 is the plain trim"
+    )
+    reputation_floor: float = Field(
+        default=0.1, description="The least factor a dynamic connector's weight is multiplied by, 0.01-1"
     )
     reputation_sites: list[ReputationSiteOption] = Field(
         default_factory=list, description="Every site with exit reputation data for the project, most reported first"
@@ -531,6 +551,8 @@ async def get_traffic_split(
         site=wanted_site,
         place=wanted_place if wanted_site else None,
         reputation_applied=wanted_site is not None and split.applied,
+        reputation_strength=split.rule.strength,
+        reputation_floor=split.rule.floor,
         reputation_sites=[ReputationSiteOption(site=name, reports=reports) for name, reports in sites],
         reputation_places=[
             ReputationPlaceOption(place=key, label=place_label(key), reports=reports) for key, reports in places

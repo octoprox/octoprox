@@ -163,7 +163,8 @@ class ProjectModel(Base):
     observation_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Exit reputation: what exit reports do (api.models.project.ExitReputationMode), how many minutes a first avoid
     # lasts, an exit IP record's half-life in hours, a connector record's in requests, the fresh bad reports that avoid
-    # an exit for a site, and the least bad share in percent.
+    # an exit for a site, the least bad share in percent, the strength dynamic connectors are compared at, and the lowest
+    # factor in percent.
     exit_reputation: Mapped[str] = mapped_column(String(16), nullable=False, default="off", server_default="off")
     exit_reputation_avoid_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60, server_default="60")
     exit_reputation_half_life_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24, server_default="24")
@@ -172,6 +173,8 @@ class ProjectModel(Base):
     )
     exit_reputation_bad_reports: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     exit_reputation_bad_share: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50")
+    exit_reputation_strength: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    exit_reputation_floor: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default="10")
     # Set by a delete; the project goes once no connector holds it (its cloud instances terminated).
     pending_deletion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # Needs attention lines muted by the project's editors, by line key (api.attention.mutes); never read into the

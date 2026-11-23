@@ -9,6 +9,7 @@ Also the Activity log, and the city names of the Connect page.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import timedelta
 
 from .common import GB, NOW, ago, iso, short_id, unit, uuid_for
@@ -19,6 +20,7 @@ from .world import (
     P1,
     P2,
     P3,
+    P4,
     PROJECTS,
     STEPS,
     ConnSpec,
@@ -294,7 +296,8 @@ def exits_rows(project_id: str | None, connector_id: str | None, days: int) -> l
 def traffic_split(project_id: str, rng: str, site: str | None = None, place: str | None = None) -> dict:
     """Each connector's expected and observed share of the requests, its eligible proxies and its cost.
 
-    The demo projects keep no exit reputation (their mode is off), so a site asked for changes no weight: every
+    Real estate listings avoids, with records for REPUTATION_SITE: that site's requests are weighed by reputation_cells.
+    The other projects keep no exit reputation (their mode is off), so a site asked for changes no weight: every
     connector's reputation is 1 and its effective share its expected one, as the API answers without records (a
     dynamic connector measured by a block rate it has no reports for, one with IPs by its eligible IPs, all usable).
     """
@@ -328,10 +331,29 @@ def traffic_split(project_id: str, rng: str, site: str | None = None, place: str
             "eligible_ips": eligible if site and not (c.target and c.target.get("dynamic")) else None,
             "effective_weight": float(c.weight), "effective_share": round(c.weight / total_weight * 100, 2),
         })
-    return {"strategy": PROJECTS[project_id].strategy, "range": rng, "total_weight": total_weight,
-            "observed_requests": obs_req, "observed_bytes": obs_bytes, "connectors": rows,
-            "site": site or None, "place": (place or "") if site else None, "reputation_applied": False,
-            "reputation_sites": [], "reputation_places": []}
+    split = {"strategy": PROJECTS[project_id].strategy, "range": rng, "total_weight": total_weight,
+             "observed_requests": obs_req, "observed_bytes": obs_bytes, "connectors": rows,
+             "site": site or None, "place": (place or "") if site else None, "reputation_applied": False,
+             "reputation_sites": [], "reputation_places": [],
+             "reputation_strength": REPUTATION_STRENGTH.get(project_id, 1), "reputation_floor": 0.1}
+    if project_id != P4:
+        return split
+    split["reputation_sites"] = [{"site": REPUTATION_SITE, "reports": reputation_reports()}]
+    if site != REPUTATION_SITE:
+        return split
+    cells = reputation_cells(place or "", REPUTATION_STRENGTH[P4], 0.1)
+    for row in rows:
+        cell = cells[row["connector_id"]]
+        serving = cell["state"] != "takes_none"
+        row |= {key: cell.get(key) for key in ("reputation_place", "reputation_kind", "blocked", "requests", "usable_ips",
+                                                "eligible_ips", "success", "best_success", "best_connector_id")}
+        row |= {"reputation": cell["reputation"], "reputation_state": cell["state"],
+                "effective_weight": round(row["weight"] * cell["reputation"], 4) if serving else 0.0,
+                "effective_share": cell["effective_share"]}
+    split |= {"reputation_applied": True,
+              "reputation_places": [{"place": p.place, "label": p.label, "reports": p.reports}
+                                    for p in sorted(REPUTATION_PLACES, key=lambda p: -p.reports) if p.place]}
+    return split
 
 
 def untargeted_eligible(c: ConnSpec, proxies: list[dict]) -> int:
@@ -341,13 +363,17 @@ def untargeted_eligible(c: ConnSpec, proxies: list[dict]) -> int:
 
 
 def site_places(project_id: str, site: str | None = None) -> dict:
-    """One site across every place its records name. The demo projects keep no exit reputation (their mode is off), so
-    there is no site to open by default, and one asked for lists no place, every connector at its configured weight.
+    """One site across every place its records name. Real estate listings opens on REPUTATION_SITE; the other
+    projects keep no exit reputation (their mode is off), so there is no site to open by default, and one asked for
+    lists no place, every connector at its configured weight.
 
     Fields with no value are left out, as the API leaves them out of this answer.
     """
     empty = {"mode": "off", "reputation_applied": False, "sites": [], "connectors": [], "places": [],
-             "summary": {"lowered_connectors": 0, "serving_connectors": 0}}
+             "summary": {"lowered_connectors": 0, "serving_connectors": 0},
+             "reputation_strength": REPUTATION_STRENGTH.get(project_id, 1), "reputation_floor": 0.1}
+    if project_id == P4 and site in (None, "", REPUTATION_SITE):
+        return reputation_view()
     if not site:
         return empty
     proxies = build_proxies(project_id)
@@ -362,6 +388,196 @@ def site_places(project_id: str, site: str | None = None) -> dict:
         connectors.append({"connector_id": c.id, "name": c.name, "credential_type": c.ctype, "enabled": c.enabled,
                            "weight": c.weight, "dynamic": dynamic, "tile": tile})
     return {**empty, "site": site, "sites": [{"site": site, "reports": 0}], "connectors": connectors}
+
+
+# --------------------------------------------------------------------------- exit reputation (Real estate listings)
+
+# The one site Real estate listings has records for, and the project's Strength (its Lowest factor is the default,
+# 10%): Decodo is blocked about 12% of the time in the US, IPRoyal about 1.3%, as in the docs' example.
+REPUTATION_SITE = "listings.example.com"
+REPUTATION_STRENGTH = {P4: 8}
+# A dynamic connector's own factor is decided in steps of 0.05 / Strength, once a level has this many requests.
+FACTOR_STEPS = 20
+MIN_FACTOR_REQUESTS = 20
+# Connectors with IPs: per country, their rows serving it and those still usable for the site.
+REPUTATION_IPS = {"webshare": {"US": (40, 34)}, "gcp": {"US": (6, 6)}, "acme": {"US": (10, 9), "CA": (10, 10)}}
+
+
+@dataclass(frozen=True)
+class ReputationPlace:
+    """A place the site's records name, and the dynamic connectors' blocked reports and requests at it."""
+
+    place: str
+    label: str
+    level: str
+    parent: str | None
+    reports: int
+    records: dict[str, tuple[int, int]]
+
+
+# No place first, then each country, most reported first, followed by its states and cities. Decodo has too few
+# requests of its own in New York City, so it uses New York state's factor there; IPRoyal is not judged in Canada yet.
+REPUTATION_PLACES = [
+    ReputationPlace("", "No place named", "none", None, 412, {"decodo": (31, 980), "iproyal": (9, 1140)}),
+    ReputationPlace("US", "United States", "country", None, 2861, {"decodo": (168, 1400), "iproyal": (19, 1460)}),
+    ReputationPlace("US/NY", "New York, United States", "state", "US", 734, {"decodo": (41, 590), "iproyal": (8, 610)}),
+    ReputationPlace("US/NY/new_york", "New York, NY", "city", "US/NY", 518, {"decodo": (6, 14), "iproyal": (4, 420)}),
+    ReputationPlace("US/CA", "California, United States", "state", "US", 402, {"decodo": (12, 520), "iproyal": (7, 480)}),
+    ReputationPlace("CA", "Canada", "country", None, 236, {"decodo": (12, 300), "iproyal": (2, 11)}),
+]
+REPUTATION_BY_PLACE = {p.place: p for p in REPUTATION_PLACES}
+
+
+def reputation_reports() -> int:
+    """The site's reports: no place and the countries, whose reports include their states' and cities'."""
+    return sum(p.reports for p in REPUTATION_PLACES if p.level in ("none", "country"))
+
+
+def _levels(place: str) -> list[str]:
+    """A place's levels, finest first, as the views' placeLevels."""
+    if not place:
+        return [""]
+    country, state, city = (place.split("/") + ["", ""])[:3]
+    levels = [place]
+    if state and city:
+        levels.append(f"{country}/{state}")
+    if state or city:
+        levels.append(country)
+    return levels
+
+
+def _success(record: tuple[int, int], strength: int) -> float:
+    """One less the block rate, in steps of 0.05 / Strength and at least one step."""
+    steps = FACTOR_STEPS * strength
+    return max(1, round((1 - record[0] / record[1]) * steps)) / steps
+
+
+def reputation_cells(place: str, strength: int, floor: float) -> dict[str, dict]:
+    """Each Real estate listings connector at a place of REPUTATION_SITE, as the places view's cells: a dynamic one by
+    its own factor compared with the best judged one's, never under ``floor``; one with IPs by its usable share."""
+    conns = connectors_of(P4)
+    levels = _levels(place)
+    country = place.split("/")[0]
+    cells: dict[str, dict] = {}
+    judged: dict[str, float] = {}
+    for c in conns:
+        if c.target and c.target.get("dynamic"):
+            records = {level: REPUTATION_BY_PLACE[level].records.get(c.key) for level in levels if level in REPUTATION_BY_PLACE}
+            cell: dict = {"reputation_kind": "block_rate", "reputation": 1.0}
+            own = records.get(place)
+            if own:
+                cell |= {"blocked": own[0], "requests": own[1], "counted_at": ago(minutes=3)}
+                if own[1] >= MIN_FACTOR_REQUESTS:
+                    cell["own_factor"] = _success(own, strength)
+            used = next((level for level in levels if records.get(level) and records[level][1] >= MIN_FACTOR_REQUESTS), None)
+            if used is None:
+                cell["state"] = "not_judged" if any(records.values()) else "no_reports"
+            else:
+                judged[c.id] = _success(records[used], strength)
+                cell |= {"state": "own" if used == place else "inherited", "reputation_place": used, "success": judged[c.id]}
+        else:
+            spots = REPUTATION_IPS.get(c.key, {})
+            eligible = sum(e for cc, (e, _) in spots.items() if not place or cc == country)
+            usable = sum(u for cc, (_, u) in spots.items() if not place or cc == country)
+            cell = ({"state": "takes_none", "reputation": 1.0} if eligible == 0 else
+                    {"state": "own" if usable < eligible else "no_reports", "reputation": round(usable / eligible, 4),
+                     "reputation_kind": "usable_ips", "usable_ips": usable, "eligible_ips": eligible})
+        cells[c.id] = cell
+    if judged:
+        best_id = min(judged, key=lambda cid: (-judged[cid], cid))
+        best = judged[best_id]
+        for cid, success in judged.items():
+            cells[cid]["reputation"] = round(max(floor, success * (success / best) ** (strength - 1)), 4)
+        for cell in cells.values():
+            if cell.get("reputation_kind") == "block_rate":
+                cell |= {"best_success": best, "best_connector_id": best_id}
+    weights = {c.id: c.weight for c in conns}
+    serving = [cid for cid, cell in cells.items() if cell["state"] != "takes_none"]
+    configured = sum(weights[cid] for cid in serving)
+    effective = sum(weights[cid] * cells[cid]["reputation"] for cid in serving)
+    for cid, cell in cells.items():
+        on = cid in serving
+        cell["configured_share"] = round(weights[cid] / configured * 100, 2) if on else 0.0
+        cell["effective_share"] = round(weights[cid] * cell["reputation"] / effective * 100, 2) if on else 0.0
+    return cells
+
+
+def reputation_view() -> dict:
+    """REPUTATION_SITE across its places for Real estate listings, which avoids at its Strength."""
+    strength = REPUTATION_STRENGTH[P4]
+    conns = sorted(connectors_of(P4), key=lambda c: c.name.lower())
+    by_place = {p.place: reputation_cells(p.place, strength, 0.1) for p in REPUTATION_PLACES}
+    places = []
+    for p in REPUTATION_PLACES:
+        cells = by_place[p.place]
+        serving = [cell for cell in cells.values() if cell["state"] != "takes_none"]
+        lowest = min(serving, key=lambda cell: cell["reputation"])
+        row = {"place": p.place, "label": p.label, "level": p.level, "reports": p.reports,
+               "lowered": any(cell["state"] == "own" and cell["reputation"] < 1 for cell in serving),
+               "not_judged": any(cell["state"] == "not_judged" for cell in serving),
+               "lowest": {"value": lowest["reputation"], "inherited": lowest["state"] == "inherited"}, "cells": cells}
+        if p.parent is not None:
+            row["parent"] = p.parent
+        cities = [q for q in REPUTATION_PLACES if q.level == "city" and q.place.split("/")[0] == p.place]
+        if p.level == "country" and cities:
+            lowered = sum(1 for q in cities if any(cell["state"] == "own" and cell["reputation"] < 1
+                                                    for cell in by_place[q.place].values()))
+            row |= {"cities_lowered": lowered, "cities_total": len(cities)}
+        places.append(row)
+    connectors = []
+    hardest = None
+    for c in conns:
+        dynamic = bool(c.target and c.target.get("dynamic"))
+        tile = {"lowered_countries": 0, "countries": 0, "lowered_states": 0, "states": 0, "lowered_cities": 0,
+                "cities": 0, "buckets": {"heavy": 0, "lowered": 0, "inherited": 0, "full": 0, "not_judged": 0}}
+        for p in REPUTATION_PLACES:
+            cell = by_place[p.place][c.id]
+            if cell["state"] == "takes_none":
+                continue
+            own_low = cell["state"] == "own" and cell["reputation"] < 1
+            if p.level != "none":
+                plural_level = {"country": "countries", "state": "states", "city": "cities"}[p.level]
+                tile[plural_level] += 1
+                tile[f"lowered_{plural_level}"] += own_low
+            bucket = ("heavy" if own_low and cell["reputation"] < 0.5 else "lowered" if own_low
+                      else "inherited" if cell["state"] == "inherited" else "not_judged" if cell["state"] == "not_judged"
+                      else "full")
+            tile["buckets"][bucket] += 1
+            if own_low and (hardest is None or cell["reputation"] < hardest["value"]):
+                hardest = {"connector_id": c.id, "place": p.place, "value": cell["reputation"]}
+        if not dynamic:
+            none = by_place[""][c.id]
+            tile |= {"usable_ips": none.get("usable_ips", 0), "eligible_ips": none.get("eligible_ips", 0),
+                     "reputation": none["reputation"]}
+        connectors.append({"connector_id": c.id, "name": c.name, "credential_type": c.ctype, "enabled": c.enabled,
+                           "weight": c.weight, "dynamic": dynamic, "tile": tile})
+    takers = [c for c in conns if any(by_place[p.place][c.id]["state"] != "takes_none" for p in REPUTATION_PLACES)]
+    lowered = [c for c in takers if any(by_place[p.place][c.id]["state"] == "own" and by_place[p.place][c.id]["reputation"] < 1
+                                        for p in REPUTATION_PLACES)]
+    summary = {"lowered_connectors": len(lowered), "serving_connectors": len(takers)}
+    if hardest:
+        summary["hardest"] = hardest
+    return {"site": REPUTATION_SITE, "mode": "avoid", "reputation_applied": True,
+            "reputation_strength": strength, "reputation_floor": 0.1,
+            "sites": [{"site": REPUTATION_SITE, "reports": reputation_reports()}], "connectors": connectors,
+            "places": places, "summary": summary}
+
+
+def strength_preview(project_id: str, strength: int, floor: int, site: str | None = None) -> dict:
+    """The shares Avoid would give at a draft Strength and Lowest factor (percent) next to the saved ones, at the
+    site's five most reported places; only Real estate listings has records."""
+    if project_id != P4 or site not in (None, "", REPUTATION_SITE):
+        return {"site": site or None, "places": []}
+    names = {c.id: c.name for c in connectors_of(P4)}
+    places = []
+    for p in sorted(REPUTATION_PLACES, key=lambda p: -p.reports)[:5]:
+        current = reputation_cells(p.place, REPUTATION_STRENGTH[P4], 0.1)
+        draft = reputation_cells(p.place, strength, floor / 100)
+        places.append({"place": p.place, "label": p.label, "reports": p.reports, "connectors": [
+            {"connector_id": cid, "name": names[cid], "current_share": cell["effective_share"],
+             "draft_share": draft[cid]["effective_share"]}
+            for cid, cell in current.items() if cell["state"] != "takes_none"]})
+    return {"site": REPUTATION_SITE, "places": places}
 
 
 # --------------------------------------------------------------------------- activity (the Enterprise audit log)

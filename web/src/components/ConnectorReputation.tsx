@@ -22,6 +22,17 @@ export interface ReputationFacts {
   requests: number | null
   usable_ips: number | null
   eligible_ips: number | null
+  /** A judged dynamic connector's own factor before the comparison, and the best one's here; missing when not judged. */
+  success?: number | null
+  best_success?: number | null
+  best_connector_id?: string | null
+}
+
+/** The project's Strength and Lowest factor (0.01 to 1) a reading was worked out with, and how to name the best connector. */
+export interface StrengthRule {
+  strength: number
+  floor: number
+  nameOf: (connectorId: string) => string | undefined
 }
 
 /**
@@ -134,10 +145,57 @@ export function reputationReason(facts: ReputationFacts, site: string, place: st
   return `no reports about it for ${site}${from}, so its weight is unchanged`
 }
 
-/** A reading's sentence for a tooltip: the reason, then where its factor came from when not the place asked for. */
-export function reputationTitle(name: string, facts: ReputationFacts, site: string, place: string, places: ReputationPlace[] = []): string {
+/** Blocked reports and requests at the level a connector's factor came from, when the view has them. */
+export interface BlockCounts {
+  blocked?: number | null
+  requests?: number | null
+}
+
+/**
+ * A share blocked, one decimal under 10% ("1.3%", "2%"), whole above ("12%"): from ``counts`` when given, so it reads as
+ * the counts beside it do, else from an own factor, which is stored to the nearest step.
+ */
+const blockedText = (success: number, counts?: BlockCounts) => {
+  const share = counts?.blocked != null && counts.requests ? counts.blocked / counts.requests : 1 - success
+  // To 9 places first: 1 - 0.9875 is a hair under 0.0125, which would read as 1.2%.
+  const rate = Math.max(0, Number((share * 100).toFixed(9)))
+  return `${rate < 10 ? trimmed(rate, 1) : Math.round(rate)}%`
+}
+
+/**
+ * How a judged dynamic connector compares with the best one at the place, as sentences: "Blocked 12% here vs 1.3% at
+ * B, the best here. At strength 10 that gives ×0.31.", "The best here, blocked 1.3%.", and "Held at the lowest factor,
+ * ×0.1." when the comparison would go under it. Empty when not judged, or at strength 1 above the lowest factor.
+ * ``countsOf`` gives a connector's counts at the level its factor came from, when the view has them.
+ */
+export function strengthNote(
+  facts: Pick<ReputationFacts, 'reputation' | 'success' | 'best_success' | 'best_connector_id'>,
+  connectorId: string,
+  rule: StrengthRule,
+  countsOf: (connectorId: string) => BlockCounts | undefined = () => undefined,
+): string {
+  const success = facts.success
+  if (success == null) return ''
+  const best = facts.best_success ?? success
+  const raw = best > 0 ? success * (success / best) ** (rule.strength - 1) : success
+  const held = raw < rule.floor
+  const heldLine = `Held at the lowest factor, ${factorText(rule.floor)}.`
+  if (rule.strength <= 1) return held ? heldLine : ''
+  const own = blockedText(success, countsOf(connectorId))
+  const isBest = facts.best_connector_id == null || facts.best_connector_id === connectorId
+  if (isBest) return `The best here, blocked ${own}.${held ? ` ${heldLine}` : ''}`
+  const bestName = rule.nameOf(facts.best_connector_id!) ?? 'another connector'
+  const compared = `Blocked ${own} here vs ${blockedText(best, countsOf(facts.best_connector_id!))} at ${bestName}, the best here.`
+  return `${compared} ${held ? heldLine : `At strength ${rule.strength} that gives ${factorText(facts.reputation)}.`}`
+}
+
+/**
+ * A reading's sentence for a tooltip: the reason, then where its factor came from when not the place asked for, then
+ * ``compared`` (strengthNote's sentences) when given.
+ */
+export function reputationTitle(name: string, facts: ReputationFacts, site: string, place: string, places: ReputationPlace[] = [], compared = ''): string {
   const note = levelNote(facts, place, places)
-  return `${name}: ${reputationReason(facts, site, place, places)}.${note ? ` Reputation ${note}.` : ''}`
+  return `${name}: ${reputationReason(facts, site, place, places)}.${note ? ` Reputation ${note}.` : ''}${compared ? ` ${compared}` : ''}`
 }
 
 /**

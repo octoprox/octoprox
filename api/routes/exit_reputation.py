@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Exit reputation as the Exit locations page reads it: a project's records, one IP's, per-IP totals for the exit IPs
-view, and one site across every place. Open to every signed-in user; times in answers are UTC with a ``Z``.
+view, and one site across every place; and for the project form, what a draft Strength and Lowest factor would do.
+Open to every signed-in user; times in answers are UTC with a ``Z``.
 """
 
 from __future__ import annotations
@@ -20,9 +21,9 @@ from api.core.auth import DbDep
 from api.db.geo_repository import ObservationRepository
 from api.db.repository import ConnectorRepository
 from api.db.reputation_repository import ExitReputationRepository, ReputationSort, ReputationSummary
-from api.models.project import ExitReputationMode
+from api.models.project import MAX_REPUTATION_FLOOR, MAX_REPUTATION_STRENGTH, ExitReputationMode
 from api.reputation.record import ExitIpReputation as IpRecord
-from api.reputation.record import ReputationPolicy, ReputationStatus
+from api.reputation.record import ReputationPolicy, ReputationStatus, place_levels
 from api.reputation.site import canonical_ip, report_site
 from api.reputation.split import (
     ConnectorShare,
@@ -32,12 +33,15 @@ from api.reputation.split import (
     place_label,
 )
 from api.reputation.split import ConnectorTile as Tile
-from api.reputation.weight import PlaceState, ReputationKind
+from api.reputation.weight import PlaceState, ReputationKind, ReputationRule
 from api.routes.common import api_runtime_of, require_project
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from api.models.connector import Connector
     from api.models.project import Project
+    from api.routing.router import Router
 
 router = APIRouter(prefix="/projects/{project_id}/exit-reputation")
 
@@ -47,6 +51,8 @@ MAX_SUMMARY_IPS = 1000
 MAX_IP_SITES = 100
 # The longest text an IP can be: a full IPv6 address with an IPv4 tail.
 _IP_TEXT_LENGTH = 45
+# The most places a Strength preview lists: the site's most reported.
+PREVIEW_PLACES = 5
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -185,6 +191,17 @@ class PlaceCell(BaseModel):
         "for a connector with IPs",
     )
     own_factor: float | None = Field(default=None, description="A dynamic connector's factor stored at this place itself")
+    success: float | None = Field(
+        default=None,
+        description="A judged dynamic connector's own factor (one less its block rate) at the level its reputation came "
+        "from, before it is compared with the best; absent when not judged",
+    )
+    best_success: float | None = Field(
+        default=None,
+        description="The own factor of the best judged dynamic connector taking these requests, which this one is "
+        "compared with; absent when this one is not judged",
+    )
+    best_connector_id: str | None = Field(default=None, description="That best connector; absent with best_success")
     blocked: int | None = Field(
         default=None,
         description="A dynamic connector: blocked reports at this place as routing last counted them, not decayed since; "
@@ -217,6 +234,9 @@ class PlaceCell(BaseModel):
             reputation_kind=reputation.kind,
             reputation_place=reputation.place,
             own_factor=share.own_factor,
+            success=reputation.success,
+            best_success=reputation.best,
+            best_connector_id=reputation.best_connector_id,
             blocked=round(own.weighted_blocked) if own is not None else None,
             requests=round(own.weighted_requests) if own is not None else None,
             counted_at=own.weighted_at if own is not None else None,
@@ -362,6 +382,10 @@ class SitePlacesView(BaseModel):
     site: str | None = Field(default=None, description="The site shown; absent when the project has no connector records")
     mode: ExitReputationMode
     reputation_applied: bool = Field(description="Routing weighs the connectors by it: the project's mode is avoid")
+    reputation_strength: int = Field(
+        description="How hard a dynamic connector is weighed against the best one at a place; 1 is the plain trim"
+    )
+    reputation_floor: float = Field(description="The least factor a dynamic connector's weight is multiplied by, 0.01-1")
     sites: list[ReputationSite] = Field(
         description="Every site with connector records, most reported first; an asked site without any first"
     )
@@ -382,11 +406,14 @@ class SitePlacesView(BaseModel):
     ) -> SitePlacesView:
         """The view of ``places`` (None: no site) for ``connectors``, sorted by name."""
         mode = project.exit_reputation
+        rule = ReputationRule.of(project)
         if places is None:
             return cls(
                 site=None,
                 mode=mode,
                 reputation_applied=mode.avoids,
+                reputation_strength=rule.strength,
+                reputation_floor=rule.floor,
                 sites=sites,
                 connectors=[],
                 places=[],
@@ -398,6 +425,8 @@ class SitePlacesView(BaseModel):
             site=places.site,
             mode=mode,
             reputation_applied=split.applied,
+            reputation_strength=rule.strength,
+            reputation_floor=rule.floor,
             sites=sites,
             connectors=[
                 SiteConnector(
@@ -582,11 +611,7 @@ async def site_places(
     ids = [connector.id for connector in connectors]
     now = utc_now()
     if wanted is None and sites:
-        names = [listed.site for listed in sites]
-        listed_first = await ReputationSplit.busiest_listed(
-            session, project, preview, sites=names, now=now, connector_ids=ids
-        )
-        wanted = listed_first or names[0]
+        wanted = await _opening_site(session, project, preview, sites, ids, now)
     elif wanted is not None and all(listed.site != wanted for listed in sites):
         sites.insert(0, ReputationSite(site=wanted, reports=0))
     if wanted is None:
@@ -598,3 +623,128 @@ async def site_places(
     return await asyncio.to_thread(
         lambda: SitePlacesView.of(project, connectors, sites, SitePlaces(split, wanted, ids))
     )
+
+
+async def _opening_site(
+    session: AsyncSession,
+    project: Project,
+    preview: Router,
+    sites: Sequence[ReputationSite],
+    connector_ids: Sequence[str],
+    now: datetime,
+) -> str:
+    """The site the Reputation tab opens on: the most reported one with a place to list, else the most reported."""
+    names = [listed.site for listed in sites]
+    listed_first = await ReputationSplit.busiest_listed(
+        session, project, preview, sites=names, now=now, connector_ids=connector_ids
+    )
+    return listed_first or names[0]
+
+
+class StrengthPreviewConnector(BaseModel):
+    """One connector taking the requests from a place, and its share of them at the saved settings and the draft."""
+
+    connector_id: str
+    name: str
+    current_share: float = Field(description="Share of the requests from the place, 0-100, as Avoid routes them now")
+    draft_share: float = Field(description="The same under the draft Strength and Lowest factor")
+
+
+class StrengthPreviewPlace(BaseModel):
+    """One of the site's most reported places."""
+
+    place: str = Field(description='A LocationTarget key: US, US/NY, US/NY/new_york or US//austin')
+    label: str = Field(description="United States, New York, United States or New York, NY")
+    reports: int = Field(description="Reports through the project's connectors at this exact place since its first")
+    connectors: list[StrengthPreviewConnector] = Field(description="The connectors taking the requests, by name")
+
+
+class StrengthPreviewResponse(BaseModel):
+    """What a draft Strength and Lowest factor would do to the shares of a site's requests, as Avoid routes them."""
+
+    site: str | None = Field(description="The site previewed; null when the project has no connector records")
+    places: list[StrengthPreviewPlace] = Field(
+        description=f"The site's {PREVIEW_PLACES} most reported places, the most reported first; empty before any"
+    )
+
+
+@router.get("/strength-preview", response_model=StrengthPreviewResponse)
+async def strength_preview(
+    request: Request,
+    project_id: str,
+    session: DbDep,
+    strength: Annotated[int, Query(ge=1, le=MAX_REPUTATION_STRENGTH, description="The draft Strength")],
+    floor: Annotated[int, Query(ge=1, le=MAX_REPUTATION_FLOOR, description="The draft Lowest factor, in percent")],
+    site: Annotated[
+        str | None,
+        Query(
+            max_length=2048,
+            description="A site (the exact host, or a URL); left out or blank, the one the Reputation tab opens on",
+        ),
+    ] = None,
+) -> StrengthPreviewResponse:
+    """Each connector's share of the requests to a site from its most reported places, as Avoid routes them under the
+    project's saved Strength and Lowest factor and under the draft ones, whatever the project's mode.
+
+    One read of the connector records at those places: the draft changes the weighing alone, never the evidence.
+    """
+    try:
+        wanted = report_site(site) if site is not None and site.strip() else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    project = await require_project(request, project_id)
+    preview = await api_runtime_of(request).preview_router(project.id)
+    repository = ExitReputationRepository(session)
+    connectors = sorted(
+        await ConnectorRepository(session).get_by_project(project.id), key=lambda connector: connector.name.lower()
+    )
+    ids = [connector.id for connector in connectors]
+    now = utc_now()
+    if wanted is None:
+        sites = [ReputationSite(site=name, reports=reports) for name, reports in await repository.busiest_sites(project.id)]
+        if not sites:
+            return StrengthPreviewResponse(site=None, places=[])
+        wanted = await _opening_site(session, project, preview, sites, ids, now)
+    places = await repository.busiest_places(project.id, wanted, limit=PREVIEW_PLACES)
+    if not places:
+        return StrengthPreviewResponse(site=wanted, places=[])
+    current = await ReputationSplit.read(
+        session,
+        project,
+        preview,
+        sites=[wanted],
+        levels={level for place, _reports in places for level in place_levels(place)},
+        now=now,
+        connector_ids=ids,
+    )
+    draft = current.under(
+        project.model_copy(update={"exit_reputation_strength": strength, "exit_reputation_floor": floor})
+    )
+    site_name = wanted
+
+    def previewed() -> list[StrengthPreviewPlace]:
+        listed: list[StrengthPreviewPlace] = []
+        for place, reports in places:
+            now_shares = current.shares(site_name, place, ids)
+            draft_shares = draft.shares(site_name, place, ids)
+            listed.append(
+                StrengthPreviewPlace(
+                    place=place,
+                    label=place_label(place),
+                    reports=reports,
+                    connectors=[
+                        StrengthPreviewConnector(
+                            connector_id=connector.id,
+                            name=connector.name,
+                            current_share=round(now_shares[connector.id].avoid_share, 2),
+                            draft_share=round(draft_shares[connector.id].avoid_share, 2),
+                        )
+                        for connector in connectors
+                        if now_shares[connector.id].takes
+                    ],
+                )
+            )
+        return listed
+
+    # One eligibility pass per place, shared by both splits: worked out beside the event loop.
+    return StrengthPreviewResponse(site=wanted, places=await asyncio.to_thread(previewed))

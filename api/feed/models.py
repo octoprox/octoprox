@@ -270,7 +270,8 @@ class ProjectReputation(BaseModel):
     # exiting from, with the avoids still ahead when Postgres was read. A gateway joins its rows to it by their exit IP.
     ip_avoids: dict[str, dict[str, datetime]] = Field(default_factory=dict)
     # Dynamic connector id -> site -> level of the requested place ("" for none) -> its factor there: only where it
-    # differs from what the coarser levels give (1 when none has one), since routing takes the finest level with a
+    # differs from what the coarser levels give (at Strength 1, 1 when none has one; above it every factor with no
+    # coarser level is kept, since gateways compare connectors by it), since routing takes the finest level with a
     # factor, so a 1.0 for a city still wins over a 0.5 for its country.
     connector_factors: dict[str, dict[str, dict[str, float]]] = Field(default_factory=dict)
 

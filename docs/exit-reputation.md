@@ -12,7 +12,7 @@ description: "Tell Octoprox which requests a site blocked: an exit IP it blocked
 A site that has just blocked an exit IP usually blocks its next request too, while other sites still take it, and a vendor that does well on one site can do badly on another. Your client sees the captcha or the block page; Octoprox only sees a tunnel that worked. With exit reputation your clients send **exit reports** through the API ("this request was blocked by www.google.com"), and Octoprox keeps a record per **site**, the exact host a request went to:
 
 * **Connectors with IPs** (static lists, ISP and datacenter ports, cloud instances, pooled slots): a record per exit IP. An IP reported blocked is avoided for that site for a while, and every other site keeps using it. The connector's weight for the site follows how many of its IPs are still usable there.
-* **Dynamic connectors**, whose every session exits somewhere new: a record per connector. Its weight for the site follows its block rate there, the share of its recent requests to the site that were reported blocked.
+* **Dynamic connectors**, whose every session exits somewhere new: a record per connector. Its weight for the site follows its block rate there, the share of its recent requests to the site that were reported blocked, and, as hard as you choose with **Strength**, how that compares with the best dynamic connector there.
 
 Evidence fades, so an exit or a vendor that recovered comes back on its own, without anyone clearing a list. An exit IP's fades with **Remember for**: a report counts in full when it arrives, half once that many hours have passed, a quarter after twice as long, and so on. A dynamic connector's fades with **Connector memory**: it counts half after that many more of the connector's requests to the site, and at least half every hour.
 
@@ -35,6 +35,8 @@ Each project picks a mode in **Project settings**, **Exit reputation** tab (`exi
 | **Connector memory (requests)** (`exit_reputation_connector_half_life_requests`) | 100 | 20 to 10000 | How many more requests a dynamic connector's evidence for a site and place takes to count half, an hour at most: its blocked reports and the requests they are measured against |
 | **Bad reports to avoid** (`exit_reputation_bad_reports`) | 1 | 1 to 10 | How many fresh bad reports avoid an exit IP for a site |
 | **Minimum bad share (%)** (`exit_reputation_bad_share`) | 50 | 1 to 99 | The least share of an IP's recent reports for the site that must be bad before it is avoided |
+| **Strength** (`exit_reputation_strength`) | 1 | 1 to 20 | How hard a dynamic connector is weighed against the best one at a place. 1 is the gentle trim exit reputation always made (see [Strength](#strength-and-lowest-factor)) |
+| **Lowest factor (%)** (`exit_reputation_floor`) | 10 | 1 to 100 | The least share of its weight a dynamic connector keeps for a site, so some requests still reach it and show when it recovers: 10 keeps at least ×0.1 |
 
 The tab also shows **Move refused sessions** (`location_session_move`, the same setting as on the Location tab), which decides what a `sticky` session does when its row's IP is avoided (see [Sessions](#sessions)).
 
@@ -56,16 +58,16 @@ With the defaults (60 minutes, 24 hours, 1 report, 50%):
 
 ### A connector's reputation for a site
 
-* **A dynamic connector**: one less its block rate for the site, never under 0.1, in steps of 0.05. The block rate is its bad reports for the site per request it carried there, over its recent requests: 30 bad reports among 100 requests give 0.7. A request here is what Octoprox counts everywhere, a connection: an HTTPS tunnel is one request however many requests the client sends through it ([Metrics]({{ site.baseurl }}/metrics#how-counting-works)), so report at most one block per connection. A record starts with the connector's first report for the site, good or bad, and requests are counted from then on. Good reports change no block rate, since every request not reported bad already counts as a good one.
+* **A dynamic connector**: its own factor is one less its block rate for the site, its success rate there, in steps of 0.05 / **Strength** (0.05 at the default 1, 0.005 at 10), and never 0: at least one step. The [Lowest factor](#strength-and-lowest-factor) is applied by routing, not here, so the record keeps how low the connector really fell. What its weight is multiplied by also depends on the best connector at the place once Strength is above 1. The block rate is its bad reports for the site per request it carried there, over its recent requests: 30 bad reports among 100 requests give 0.7. A request here is what Octoprox counts everywhere, a connection: an HTTPS tunnel is one request however many requests the client sends through it ([Metrics]({{ site.baseurl }}/metrics#how-counting-works)), so report at most one block per connection. A record starts with the connector's first report for the site, good or bad, and requests are counted from then on. Good reports change no block rate, since every request not reported bad already counts as a good one.
 * **Per requested place.** A dynamic connector can do well on a site for requests from Germany and badly for requests from the US, so its record is also kept per place the request asked for, at every level of it: a request with `-cc-us-st-ny-city-new_york` counts for New York, for NY and for the US. Each level's record starts with the first report naming it, so a city no report has named yet counts its requests at its state and its country alone. A level with fewer than 20 recent requests gives no factor, and routing uses the next coarser one: a quiet city takes its state's factor, or its country's. With none even at the country, the weight is unchanged, never a figure from every country. A request that names no place has its own record.
 * **A quiet place** keeps its factor as it was last decided, until new requests or reports there decide it again, or its record expires (`exit_reputation.retention_days` after the day it was last seen, 30 by default; see [Configuration]({{ site.baseurl }}/configuration#exit-reputation)). Once it is decided again, the hours it was quiet count too: its evidence has faded, so with fewer than 20 recent requests left it takes the coarser level's factor until it has 20 again.
 * **A connector with IPs**: the share of its eligible IPs, those that could serve the request, not avoided for the site: 8 of 20 avoided gives 0.6. With none left it takes none of the site's requests. Its eligible rows already depend on the place asked for, so it needs no per-place record. Its record for the site still counts its reports and the requests it carried there, for the views alone. Those requests come from the per-host counts of [Hosts]({{ site.baseurl }}/metrics#hosts-where-the-traffic-goes): none are counted while `metrics.hosts.enabled` is off, and none for a host past the `metrics.hosts.max_hosts` ceiling.
 
 ### How fast a dynamic connector reacts
 
-A dynamic connector's evidence for a site and place counts half after **Connector memory** more requests through it there (100 by default), and at least half every hour. Its factor is decided once a minute, when request counts are flushed, so a report takes effect within about a minute. The factor moves only when one less the block rate is a full step of 0.05 away from it, so a rate that wavers near a step does not move it back and forth.
+A dynamic connector's evidence for a site and place counts half after **Connector memory** more requests through it there (100 by default), and at least half every hour. Its factor is decided once a minute, when request counts are flushed, so a report takes effect within about a minute. The factor moves only when one less the block rate is a full step (0.05 / Strength) away from it, so a rate that wavers near a step does not move it back and forth.
 
-With the default Connector memory, a connector that a site starts blocking on every request falls to ×0.5 there:
+With the default Connector memory, a connector that a site starts blocking on every request falls to an own factor of 0.5 there (×0.5 at Strength 1):
 
 | Its requests to the site from the place | In about |
 |-----------------------------------------|----------|
@@ -74,6 +76,39 @@ With the default Connector memory, a connector that a site starts blocking on ev
 | 1 a minute | 40 minutes |
 
 Once the blocks stop, every 100 clean requests halve what is left of them, and so does every hour. A lower Connector memory reacts sooner but moves more on a few unlucky requests; a higher one is steadier but slower.
+
+### Strength and Lowest factor
+
+At the default **Strength** of 1, a dynamic connector's weight for a site is multiplied by its own factor, never under the **Lowest factor**: a connector blocked 12% of the time keeps 88% of its weight, wherever the others stand. That is the trim exit reputation always made, so nothing changes until you raise Strength.
+
+Above 1, each dynamic connector is compared with the best one at the place: its success rate is divided by the best's, and that ratio is raised to Strength minus one. In numbers:
+
+```
+factor = success × (success / best) ^ (Strength - 1), never under Lowest factor
+```
+
+* **success** is the connector's own factor at the place, one less its block rate, from the finest level with enough requests, as above.
+* **best** is the highest own factor among the dynamic connectors that could take the request and have one. On a tie, the connector with the lowest id is the best.
+* **The best** keeps its own factor, since its ratio is 1. A connector with no factor yet keeps its whole weight, and a connector with IPs keeps its share of usable IPs: Strength and Lowest factor change neither.
+
+Two dynamic connectors at equal weight, Vendor A blocked 12% of the time on a site (success 0.88) and Vendor B 1.3% (success 0.987):
+
+| Strength | Vendor A | Vendor B | Vendor A's share |
+|----------|----------|----------|------------------|
+| 1 | ×0.88 | ×0.987 | 47% |
+| 5 | ×0.56 | ×0.987 | 36% |
+| 10 | ×0.31 | ×0.987 | 24% |
+| 20 | ×0.1, held at the Lowest factor | ×0.987 | 9% |
+
+A small gap stays small: with Vendor A blocked 2% and Vendor B 1.3%, Vendor A's share is 50%, 49%, 48% and 46% at Strength 1, 5, 10 and 20. These figures leave out the rounding to steps, which moves a share by a point at most.
+
+Points to weigh:
+
+* **Noise grows with Strength.** A few unlucky requests move a connector's success rate a little, and Strength multiplies that. Above about 5, raise **Connector memory** to 1,000 or more, so the rate rests on enough requests to be steady. The settings form says so when Strength is above 5 and Connector memory is under 1,000.
+* **The Lowest factor keeps a lowered connector measured.** A connector that takes no requests at a site gets no new evidence there and could never show that it recovered. At the Lowest factor it still takes some, and its record follows them.
+* **Strength works per place.** The best is found again for every request, among the connectors that could take it, so a vendor that is best in Germany and weak in the US is weighed by each.
+
+While you change Strength or Lowest factor on an existing project, the form previews what it changes for one site, as `avoid` would route: up to 5 of its most reported places, each with the connectors whose share moves by a point or more, such as "United States: Vendor A 47% → 24%, Vendor B 53% → 76%".
 
 ## Sites
 
@@ -176,7 +211,7 @@ if response.status_code in (403, 429) or "captcha" in response.text.lower():
 With the mode `avoid`, a request's site changes where it goes. Octoprox reads the site from the host the request goes to: the `CONNECT` target, or a plain request's URL.
 
 1. **Rows whose IP is avoided for the site are dropped** before anything else, by the IP their last [check]({{ site.baseurl }}/ip-attribution#health-checks) saw, so rows that share an IP share its avoids. Requests to every other site keep using them. A request that names an avoided row with [`-prxy-`]({{ site.baseurl }}/routing-strategies#pinning-a-proxy) fails with `502 Bad Gateway (Proxy <id> is avoided for <site>)`.
-2. **Each connector's weight is multiplied by its reputation for the site**: a dynamic connector's factor at the finest level of the request's place with enough evidence, a connector with IPs' share of usable IPs. The [routing strategy]({{ site.baseurl }}/routing-strategies) then picks by these effective weights as it always does by weight; `sticky` places only new sessions by them, and a session already bound keeps its row while the row is eligible. `round_robin` draws a request whose weights reputation lowered at random by them, rather than in its fixed order, which the project's other requests keep ([why]({{ site.baseurl }}/routing-strategies#exit-reputation-and-effective-weights)).
+2. **Each connector's weight is multiplied by its reputation for the site**: a dynamic connector's factor at the finest level of the request's place with enough evidence, compared with the best dynamic connector's there at the project's [Strength](#strength-and-lowest-factor) and never under its Lowest factor, and a connector with IPs' share of usable IPs. The [routing strategy]({{ site.baseurl }}/routing-strategies) then picks by these effective weights as it always does by weight; `sticky` places only new sessions by them, and a session already bound keeps its row while the row is eligible. `round_robin` draws a request whose weights reputation lowered at random by them, rather than in its fixed order, which the project's other requests keep ([why]({{ site.baseurl }}/routing-strategies#exit-reputation-and-effective-weights)).
 
 Weights stay relative, so a connector lowered less than the others gains share. For requests to www.google.com from the US:
 
@@ -222,7 +257,7 @@ Points that are easy to miss:
 
 Every role sees what the project's exit reputation holds, as it stands when the page is read:
 
-* **Traffic split** (Overview and Connectors): pick a site under **Requests to**, and a place under **from**, to see each connector's **Weight**, its **Reputation** for the site (the factor, coloured by how far it lowers the weight), its **Effective** weight and the **Expected** share of the site's requests it gets, with the configured split faint above the one for the site and the reason for the connector lowered most under the rows. **Observed**, under **All traffic**, is the connector's share of every request in the window, whatever its site or place: the pickers do not narrow it. Both pickers are searchable and list everything: every site with reports, the most reported first, and every place requests to the site named, by name ("United States", "New York, NY", "London, United Kingdom"). A site opens on its busiest place, and switching sites keeps the place while the new site lists it. A tooltip on a dynamic connector says when its factor came from a coarser place than the one picked ("from United States: NY has too little evidence yet"), and a tag beside its factor names that place. A ×1 beside a hatched **few** is reported on but not judged yet, and a faint ×1 with a dot has no reports, so neither reads as a measured ×1. While the mode is not `avoid`, the numbers are marked as not applied: they are what `avoid` would do. **Every place for this site →** opens the site on the Reputation tab.
+* **Traffic split** (Overview and Connectors): pick a site under **Requests to**, and a place under **from**, to see each connector's **Weight**, its **Reputation** for the site (the factor, coloured by how far it lowers the weight), its **Effective** weight and the **Expected** share of the site's requests it gets, with the configured split faint above the one for the site and the reason for the connector lowered most under the rows. **Observed**, under **All traffic**, is the connector's share of every request in the window, whatever its site or place: the pickers do not narrow it. Both pickers are searchable and list everything: every site with reports, the most reported first, and every place requests to the site named, by name ("United States", "New York, NY", "London, United Kingdom"). A site opens on its busiest place, and switching sites keeps the place while the new site lists it. A tooltip on a dynamic connector says when its factor came from a coarser place than the one picked ("from United States: NY has too little evidence yet"), and a tag beside its factor names that place. With Strength above 1, the tooltip also says how the factor was reached: "Blocked 12% here vs 1.3% at Vendor B, the best here. At strength 10 that gives ×0.31." or "The best here, blocked 1.3%." At any Strength, a connector held at the floor says so: "Held at the lowest factor, ×0.1." A ×1 beside a hatched **few** is reported on but not judged yet, and a faint ×1 with a dot has no reports, so neither reads as a measured ×1. While the mode is not `avoid`, the numbers are marked as not applied: they are what `avoid` would do. **Every place for this site →** opens the site on the Reputation tab.
 * **Exit locations, Reputation tab**: [every place for a site](#every-place-for-a-site), and **Exit IPs by site**, one row per exit IP and site of the connectors with IPs, with its status (**Avoided until** a time, or `-`), its good and bad reports, and the latest one with its reason. Filter by IP (a whole address or its start), by site (any part of it) and by status, and order by last seen or by reports. A row opens its IP: the sites it has a record for (100 at most, those avoiding it now first; filter the tab by the IP for every one), with the counts that decide, the recent avoids a next one doubles by, and the connectors that handed it out.
 * **Exit locations, Exit IPs tab** gains two columns while the mode is not `off`: **Reports**, good / bad over every site, and **Avoided**, how many sites avoid the IP now.
 * **Proxies**: while the mode is not `off`, the inspector of a row with an exit IP has an **Exit reputation** section, each site of its IP with its status and ends.
@@ -239,7 +274,7 @@ A cell is what the connector's weight is multiplied by for the place's requests,
 
 | Cell | What it means |
 |------|---------------|
-| ×0.6, tinted | Its own value at the place: a dynamic connector's factor there, or a connector with IPs' share of its rows there not avoided for the site. The tint deepens at ×0.85, ×0.5 and ×0.25; an own ×1 has none |
+| ×0.6, tinted | Its own value at the place: a dynamic connector's factor there (after Strength and Lowest factor), or a connector with IPs' share of its rows there not avoided for the site. The tint deepens at ×0.85, ×0.5 and ×0.25; an own ×1 has none |
 | ×0.7, dashed, with a level tag such as `NY` | A dynamic connector's factor from the coarser level the tag names: the place has no factor of its own yet, with fewer than 20 recent requests or no report naming it |
 | ×1, hatched | Reported on, but no level of the place has 20 recent requests yet: the weight is unchanged |
 | ×1, faint, with a dot | No reports: the weight is unchanged |
@@ -251,6 +286,8 @@ A dynamic connector gets a factor of its own at a place once the place has 20 re
 
 * A sentence says how many of the connectors serving the site are lowered somewhere, and the hardest hit: "On www.google.com, 2 of 3 connectors are lowered somewhere. Hardest hit: Vendor A in New York, NY (×0.3)." On a tie it names the finer place, a city before its state or country, and it skips a connector with IPs at a state or a city where it has only one or two rows, since one avoided row there reads ×0.5 or ×0.
 * A tile per connector: a dynamic connector's says where it is lowered, by level ("Lowered in 2 of 9 countries, 6 of 48 cities"), counting only the places where its value is its own, so one bad city is not counted again at its state and its country. A connector with IPs' tile gives its value for requests naming no place: its usable rows of its eligible ones. A bar sorts the connector's places by where it stands, with the count of each.
+
+A cell's and a place's tooltips carry the same Strength line as the traffic split's.
 
 **Counts as decided.** The counts behind a dynamic connector's cell are the place's own, as routing last decided its factor, with how long ago: "5 of 20 requests reported blocked, counted 3 h ago". They are not faded since, as [a quiet place](#a-connectors-reputation-for-a-site) keeps its factor until new requests or reports there decide it again.
 

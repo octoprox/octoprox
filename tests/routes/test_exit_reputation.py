@@ -711,11 +711,13 @@ class TestPlaces:
         # are left out.
         pool = {"state": "own", "reputation": 0.5, "reputation_kind": "usable_ips", "usable_ips": 2, "eligible_ips": 4}
         # The state's 5 of 20 halved per 100 requests by the city's 5 more, and the city's 1 of 5 added: 5.8 of 24.3.
+        # The only judged dynamic connector is the best one there.
+        best = {"success": 0.75, "best_success": 0.75, "best_connector_id": split.dynamic}
         assert cells["US/NY"] == {
             "Dynamic": {
                 "state": "own", "reputation": 0.75, "reputation_kind": "block_rate", "reputation_place": "US/NY",
                 "own_factor": 0.75, "blocked": 6, "requests": 24, "configured_share": 66.67, "effective_share": 75.0,
-            },
+            } | best,
             "Pool": pool | {"configured_share": 33.33, "effective_share": 25.0},
         }
         # The city's own thin record, while its factor comes from the state; the pool knows no row in the city.
@@ -723,7 +725,7 @@ class TestPlaces:
             "Dynamic": {
                 "state": "inherited", "reputation": 0.75, "reputation_kind": "block_rate", "reputation_place": "US/NY",
                 "blocked": 1, "requests": 5, "configured_share": 100.0, "effective_share": 100.0,
-            },
+            } | best,
             "Pool": pool | {"state": "takes_none", "reputation": 1.0, "usable_ips": 0, "eligible_ips": 0}
             | {"configured_share": 0.0, "effective_share": 0.0},
         }
@@ -955,8 +957,8 @@ class TestPlaces:
         body = authenticated_client.get(f"/api/v1/projects/{project_id}/exit-reputation/places").json()
         # No site and no hardest hit: left out, as every field without a value is.
         assert body == {
-            "mode": "record", "reputation_applied": False, "sites": [], "connectors": [], "places": [],
-            "summary": {"lowered_connectors": 0, "serving_connectors": 0},
+            "mode": "record", "reputation_applied": False, "reputation_strength": 1, "reputation_floor": 0.1, "sites": [],
+            "connectors": [], "places": [], "summary": {"lowered_connectors": 0, "serving_connectors": 0},
         }
 
     def test_a_site_that_names_none_is_a_400(
@@ -983,3 +985,196 @@ class TestPlaces:
             assert response.json()["site"] == "www.google.com"
         assert authenticated_client.get(url, headers={"Authorization": "Bearer nope"}).status_code == 401
         assert authenticated_client.get("/api/v1/projects/nope/exit-reputation/places").status_code == 404
+
+
+def _stronger(split: Split, *, strength: int, floor: int) -> str:
+    """A second Oxylabs dynamic connector on ``split`` (weight 2), blocked on 1 of 20 requests to the site from US/NY,
+    with the project at ``strength`` and lowest factor ``floor``; its id."""
+    response = split.client.patch(
+        f"/api/v1/projects/{split.project_id}",
+        json={"exit_reputation_strength": strength, "exit_reputation_floor": floor},
+    )
+    assert response.status_code == 200, response.text
+    oxylabs = split._credential("Oxylabs 2", "oxylabs", {"proxy_type": "residential", "username": "bob", "password": "s3cret"})
+    stronger = split._connector(oxylabs, "Dynamic 2", {"session_mode": "dynamic", "session_duration_minutes": 10}, {"weight": 2})
+    split._row(stronger, provider="oxylabs", proxy_type="residential", dynamic_sessions="true")
+    _apply_connectors(split.client, utc_now(), {split.key(stronger, "US/NY"): RequestCount(requests=20, blocked=1)})
+    return stronger
+
+
+# The first dynamic connector's 0.75 beside the second's 0.95, at strength 10.
+COMPARED = 0.75 * (0.75 / 0.95) ** 9
+
+
+class TestStrength:
+    """Above strength 1 a dynamic connector is weighed against the best one at the place, never under the lowest factor;
+    the views show its success, the best one's, and the value it routes by."""
+
+    def test_the_traffic_split_weighs_each_against_the_best(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        stronger = _stronger(split, strength=10, floor=5)
+
+        body = split.split(site=Split.SITE, place="US/NY")
+
+        assert (body["reputation_strength"], body["reputation_floor"]) == (10, 0.05)
+        connectors = {connector["name"]: connector for connector in body["connectors"]}
+        weaker, best, pool = connectors["Dynamic"], connectors["Dynamic 2"], connectors["Pool"]
+        assert (weaker["success"], weaker["best_success"], weaker["best_connector_id"]) == (0.75, 0.95, stronger)
+        assert weaker["reputation"] == pytest.approx(COMPARED)
+        assert weaker["effective_weight"] == pytest.approx(round(2 * COMPARED, 4))
+        assert (best["reputation"], best["success"], best["best_success"], best["best_connector_id"]) == (
+            0.95, 0.95, 0.95, stronger
+        )
+        # A connector with IPs is not compared.
+        assert (pool["reputation"], pool["success"], pool["best_success"], pool["best_connector_id"]) == (
+            0.5, None, None, None
+        )
+        total = 2 * COMPARED + 1.9 + 0.5
+        assert weaker["effective_share"] == round(2 * COMPARED / total * 100, 2)
+
+    def test_the_lowest_factor_holds_and_the_places_agree(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        stronger = _stronger(split, strength=10, floor=20)
+
+        body = TestPlaces.places(split, site=Split.SITE)
+
+        assert (body["reputation_strength"], body["reputation_floor"]) == (10, 0.2)
+        rows = {row["place"]: row for row in body["places"]}
+        cell = rows["US/NY"]["cells"][split.dynamic]
+        assert (cell["reputation"], cell["success"], cell["best_success"], cell["best_connector_id"]) == (
+            0.2, 0.75, 0.95, stronger
+        )
+        shown = split.by_name(site=Split.SITE, place="US/NY")["Dynamic"]
+        assert (shown["reputation"], shown["effective_share"]) == (cell["reputation"], cell["effective_share"])
+
+
+class TestStrengthPreview:
+    """``GET /exit-reputation/strength-preview?strength=&floor=&site=``: each connector's share of a site's requests
+    from its most reported places as Avoid routes them, at the saved settings and at the draft."""
+
+    @staticmethod
+    def preview(client: TestClient, project_id: str, **params: Any) -> dict[str, Any]:
+        response = client.get(f"/api/v1/projects/{project_id}/exit-reputation/strength-preview", params=params)
+        assert response.status_code == 200, response.text
+        body: dict[str, Any] = response.json()
+        return body
+
+    def test_the_shares_at_the_saved_settings_and_the_draft(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data, mode="record")
+        stronger = _stronger(split, strength=1, floor=10)
+
+        body = self.preview(authenticated_client, split.project_id, strength=10, floor=5)
+
+        # The site the Reputation tab opens on, and its places the most reported first.
+        assert body["site"] == Split.SITE
+        assert [(place["place"], place["label"], place["reports"]) for place in body["places"]] == [
+            ("US", "United States", 6), ("US/NY", "New York, United States", 6)
+        ]
+        new_york = {connector["name"]: connector for connector in body["places"][1]["connectors"]}
+        assert [connector["connector_id"] for connector in body["places"][1]["connectors"]] == [
+            split.dynamic, stronger, split.pool
+        ]
+        # Now: 0.75 x2, 0.95 x2 and 0.5 x1; the draft takes the first to 0.75 x (0.75 / 0.95)^9.
+        now_total, draft_total = 1.5 + 1.9 + 0.5, 2 * COMPARED + 1.9 + 0.5
+        assert {name: (connector["current_share"], connector["draft_share"]) for name, connector in new_york.items()} == {
+            "Dynamic": (round(150 / now_total, 2), round(200 * COMPARED / draft_total, 2)),
+            "Dynamic 2": (round(190 / now_total, 2), round(190 / draft_total, 2)),
+            "Pool": (round(50 / now_total, 2), round(50 / draft_total, 2)),
+        }
+        # The saved settings are left as they are.
+        project = authenticated_client.get(f"/api/v1/projects/{split.project_id}").json()
+        assert (project["exit_reputation_strength"], project["exit_reputation_floor"]) == (1, 10)
+
+    def test_only_the_connectors_taking_the_requests_and_the_site_asked_for(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data, pool_routing={"domain_blacklist": ["example.com"]})
+        site = "shop.example.com"
+        _apply_connectors(
+            authenticated_client,
+            utc_now(),
+            {ConnectorSiteKey(split.project_id, split.dynamic, site, "DE"): RequestCount(requests=20, blocked=2)},
+        )
+
+        body = self.preview(authenticated_client, split.project_id, strength=5, floor=10, site=f"https://{site}/cart")
+
+        assert body["site"] == site
+        (germany,) = body["places"]
+        # The pool's domain filter keeps it off the site; the dynamic connector alone takes every request.
+        assert germany["connectors"] == [
+            {"connector_id": split.dynamic, "name": "Dynamic", "current_share": 100.0, "draft_share": 100.0}
+        ]
+
+    def test_at_most_five_places(self, authenticated_client: TestClient, sample_project_data: dict[str, Any]) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        site = "wide.example.com"
+        _apply_connectors(
+            authenticated_client,
+            utc_now(),
+            {
+                ConnectorSiteKey(split.project_id, split.dynamic, site, country): RequestCount(requests=20, blocked=n)
+                for n, country in enumerate(("DE", "FR", "GB", "IT", "ES", "NL", "PL"), start=1)
+            },
+        )
+
+        body = self.preview(authenticated_client, split.project_id, strength=2, floor=10, site=site)
+
+        assert [place["place"] for place in body["places"]] == ["PL", "NL", "ES", "IT", "GB"]
+
+    def test_a_project_with_no_records_or_a_site_with_no_places(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        project_id = _project(authenticated_client, sample_project_data)["id"]
+
+        assert self.preview(authenticated_client, project_id, strength=10, floor=10) == {"site": None, "places": []}
+        assert self.preview(authenticated_client, project_id, strength=10, floor=10, site="new.example.com") == {
+            "site": "new.example.com", "places": []
+        }
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"strength": 0, "floor": 10},
+            {"strength": 21, "floor": 10},
+            {"strength": 5, "floor": 0},
+            {"strength": 5, "floor": 101},
+            {"floor": 10},
+            {"strength": 5},
+        ],
+    )
+    def test_the_draft_is_bounded_as_the_settings_are(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any], params: dict[str, int]
+    ) -> None:
+        project_id = _project(authenticated_client, sample_project_data)["id"]
+        response = authenticated_client.get(
+            f"/api/v1/projects/{project_id}/exit-reputation/strength-preview", params=params
+        )
+        assert response.status_code == 422
+
+    def test_a_site_that_names_none_is_a_400_and_every_signed_in_role_reads_it(
+        self,
+        authenticated_client: TestClient,
+        sample_project_data: dict[str, Any],
+        viewer_auth_headers: dict[str, str],
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        url = f"/api/v1/projects/{split.project_id}/exit-reputation/strength-preview"
+        params = {"strength": 10, "floor": 10}
+
+        refused = authenticated_client.get(url, params={**params, "site": "co.uk"})
+        assert (refused.status_code, refused.json()["detail"]) == (400, "not a site: co.uk is a public suffix")
+        viewed = authenticated_client.get(url, params=params, headers=viewer_auth_headers)
+        assert viewed.status_code == 200 and viewed.json()["site"] == Split.SITE
+        assert authenticated_client.get(url, params=params, headers={"Authorization": "Bearer nope"}).status_code == 401
+        assert (
+            authenticated_client.get(
+                "/api/v1/projects/nope/exit-reputation/strength-preview", params=params
+            ).status_code
+            == 404
+        )

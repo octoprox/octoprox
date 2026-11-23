@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """The decisions records carry: an exit IP's avoid ("Avoid for" doubled per recent avoid, lifted by good reports) and a
-connector's factor (one less its block rate, moved a whole step at a time), with the examples the design gives at the
+connector's factor (one less its block rate in steps of 0.05 / Strength, moved a whole step at a time), with the examples the design gives at the
 defaults (Avoid for 60 minutes, Remember for 24 hours, Connector memory 100 requests, one fresh bad report avoids, half
 the reports bad)."""
 
@@ -32,6 +32,7 @@ T0 = datetime(2026, 11, 15, 12, 0, 0)
 KEY = ExitIpKey("project-1", "203.0.113.7", "google.com")
 CONNECTOR = ConnectorSiteKey("project-1", "connector-1", "google.com", "US")
 DEFAULTS = ReputationPolicy.of_settings(60, 24, 100, 1, 50)
+STRENGTH_10 = ReputationPolicy.of_settings(60, 24, 100, 1, 50, 10)
 
 
 def at(hours: float) -> datetime:
@@ -329,9 +330,18 @@ class TestConnectorFactor:
         flush(r, T0, requests=100, blocked=13)
         # 0.87 is nearer 0.85 than 0.9.
         assert r.block_rate == pytest.approx(0.13) and r.factor == 0.85
-        floored = connector_record()
-        flush(floored, T0, requests=100, blocked=95)
-        assert floored.factor == 0.1
+        # No floor is stored: routing's lowest factor is the project's, applied as it routes.
+        low = connector_record()
+        flush(low, T0, requests=100, blocked=95)
+        assert low.factor == 0.05
+
+    def test_a_factor_is_at_least_one_step_so_never_zero(self) -> None:
+        r = connector_record()
+        flush(r, T0, requests=100, blocked=100)
+        assert r.factor == 0.05
+        strong = connector_record()
+        flush(strong, T0, requests=100, blocked=100, policy=STRENGTH_10)
+        assert strong.factor == 0.005
 
     def test_good_reports_are_counted_but_leave_the_rate(self) -> None:
         r = connector_record()
@@ -389,12 +399,24 @@ class TestHysteresis:
         flush(r, T0, good=1)
         assert r.factor == 0.9
 
-    def test_from_a_step_above_the_floor_to_the_floor(self) -> None:
+    def test_a_step_short_of_a_hair_in_floating_point_is_one_in_steps(self) -> None:
         """0.15 - 0.1 is a hair short of 0.05 in floating point; in steps it is one."""
         r = weighed(connector_record(), 100.0, 85.0, 0.15)
 
-        flush(r, T0, blocked=10)
+        flush(r, T0, blocked=5)
 
+        assert r.factor == 0.1
+
+    def test_down_to_one_step_and_back(self) -> None:
+        r = weighed(connector_record(), 100.0, 85.0, 0.15)
+        flush(r, T0, blocked=13)
+        assert r.factor == 0.05
+        # 0.08 is less than a step from 0.05.
+        r.weighted_blocked = 92.0
+        flush(r, T0, good=1)
+        assert r.factor == 0.05
+        r.weighted_blocked = 90.0
+        flush(r, T0, good=1)
         assert r.factor == 0.1
 
     def test_a_rate_a_hair_short_of_a_whole_step_moves_it(self) -> None:
@@ -416,6 +438,42 @@ class TestHysteresis:
         # 20.3 weighted again, 4.6 of them blocked: decided as a new factor, with no step to clear.
         change = flush(r, at(1), requests=11)
         assert r.factor == 0.75 and change == ConnectorChange(CONNECTOR, None, 0.75)
+
+
+class TestStrength:
+    """At strength 10 a factor is stored in steps of 0.005, and moves a whole one of them at a time."""
+
+    def test_the_step_is_0_05_over_the_strength(self) -> None:
+        assert (DEFAULTS.factor_steps, STRENGTH_10.factor_steps) == (20, 200)
+        r = connector_record()
+        flush(r, T0, requests=100, blocked=13, policy=STRENGTH_10)
+        assert r.factor == 0.87
+        busy = connector_record()
+        # Blocked 1.3% of the time: 0.987 is nearer 0.985 than 0.99.
+        flush(busy, T0, requests=1000, blocked=13, policy=STRENGTH_10)
+        assert busy.factor == 0.985
+
+    def test_the_factor_stays_until_the_rate_is_a_whole_step_of_its_grid_from_it(self) -> None:
+        r = weighed(connector_record(), 1000.0, 130.0, 0.87)
+
+        # 0.866 is less than a step (0.005) from 0.87.
+        change = flush(r, T0, blocked=4, policy=STRENGTH_10)
+        assert r.factor == 0.87 and not change.moved
+
+        change = flush(r, T0, blocked=1, policy=STRENGTH_10)
+        assert r.factor == 0.865 and change == ConnectorChange(CONNECTOR, 0.87, 0.865)
+
+    def test_a_factor_stored_at_another_strength_is_read_on_the_new_grid(self) -> None:
+        # 0.85 from strength 1, the rate 0.87: four steps of 0.005 away.
+        r = weighed(connector_record(), 100.0, 13.0, 0.85)
+        flush(r, T0, good=1, policy=STRENGTH_10)
+        assert r.factor == 0.87
+        # Back at strength 1, 0.87 is less than a step of 0.05 from 0.85's 17 steps.
+        flush(r, T0, good=1)
+        assert r.factor == 0.87
+        r.weighted_blocked = 6.0
+        flush(r, T0, good=1)
+        assert r.factor == 0.95
 
 
 class TestPlaces:
@@ -468,7 +526,8 @@ class TestBatches:
             exit_reputation_connector_half_life_requests=50,
             exit_reputation_bad_reports=3,
             exit_reputation_bad_share=25,
+            exit_reputation_strength=10,
         )
         assert ReputationPolicy.of(project) == ReputationPolicy(
-            half_life=12 * 3600.0, connector_half_life=50.0, threshold=2.5, bad_share=0.25, avoid_base=1800.0
+            half_life=12 * 3600.0, connector_half_life=50.0, threshold=2.5, bad_share=0.25, avoid_base=1800.0, strength=10
         )

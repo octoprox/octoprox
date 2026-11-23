@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Eye, EyeOff, Info, AlertTriangle, Shield, ShieldCheck, MapPin } from 'lucide-react'
-import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchAlertSettings, fetchGeoDatabases, fetchGeoSettings } from '../api/client'
+import { ProjectCreate, ProjectUpdate, ProjectSummary, downloadCaCertificate, fetchAlertSettings, fetchGeoDatabases, fetchGeoSettings, getExitReputationStrengthPreview } from '../api/client'
 import type { AlertSettingsOverrides, ConflictRule, ContradictedAction, ExitReputationMode, UnknownAction } from '../api/client'
 import { AlertSettingsForm, draftErrors, draftOf, overridesOf, sameOverrides, type AlertDraft } from './AlertSettingsForm'
 import { locationExamples, scenarioSteps, ROW_KIND_FACTS } from './locationExamples'
@@ -12,10 +12,13 @@ import type { RowKind, Ask } from './locationExamples'
 import { RichSelect, RichSelectOption } from './RichSelect'
 import { AdminLink } from './AdminLink'
 import { EntityHistory } from './audit/EntityHistory'
+import { factorText } from './ConnectorReputation'
+import { formatShare } from './TrafficSplit'
 import { Button, Input, Select, Textarea, Label, Alert, Inspector, Tabs, Segmented, InfoTip, QueryContent } from './ui'
 import { isInUse } from '../utils/geo'
 import { DOCS_URL } from '../utils/docs'
 import { plural } from '../utils/format'
+import { useDebounced } from '../hooks/useDebounced'
 import { useToast } from '../contexts/ToastContext'
 import { useProjectSettingsSave } from '../hooks/useProjectSettingsSave'
 
@@ -177,6 +180,8 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
     exit_reputation_connector_half_life_requests: project?.exit_reputation_connector_half_life_requests ?? 100,
     exit_reputation_bad_reports: project?.exit_reputation_bad_reports ?? 1,
     exit_reputation_bad_share: project?.exit_reputation_bad_share ?? 50,
+    exit_reputation_strength: project?.exit_reputation_strength ?? 1,
+    exit_reputation_floor: project?.exit_reputation_floor ?? 10,
   }))
   const [formData, setFormData] = useState<ProjectCreate>(loaded)
   const [showPassword, setShowPassword] = useState(false)
@@ -218,6 +223,11 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
 
   const reputationMode: ExitReputationMode = formData.exit_reputation ?? 'off'
   const reputationAvoids = reputationMode === 'avoid'
+  // The Strength and Lowest factor the preview asks about: the pair once typing pauses, so a first keystroke or a
+  // field emptied on the way to a new value asks nothing, and the two never pair up with a stale other.
+  const [previewStrength, previewFloor] = useDebounced(`${formData.exit_reputation_strength ?? ''} ${formData.exit_reputation_floor ?? ''}`, 400)
+    .split(' ')
+    .map((value) => (value ? Number(value) : undefined))
 
   const submit = () => {
     if (!valid) return
@@ -620,17 +630,61 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
               />
             </div>
           </div>
+          {/* How hard dynamic connectors are weighed against the best one: side by side, stacked on a phone. */}
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(12rem,1fr))] gap-3">
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Strength</span>
+                  <InfoTip label="About Strength">How hard a dynamic connector is weighed against the best one at a place: its success rate is compared with the best's, to this power. 1 is the gentle trim Octoprox always made: a connector blocked 12% of the time keeps 88% of its weight. At 10 it keeps about a third, while the best keeps nearly all of its.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={1} max={20} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_strength ?? ''}
+                onChange={(e) => setFormData({ ...formData, exit_reputation_strength: boundedInt(e.target.value, 1, 20) })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Lowest factor (%)</span>
+                  <InfoTip label="About the lowest factor">A dynamic connector never drops under this share of its weight for a site, so some requests still reach it and show when it recovers. 10 keeps at least ×0.1.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={1} max={100} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_floor ?? ''}
+                onChange={(e) => setFormData({ ...formData, exit_reputation_floor: boundedInt(e.target.value, 1, 100) })}
+              />
+            </div>
+          </div>
+          {reputationMode !== 'off' && (formData.exit_reputation_strength ?? 1) > 5 && (formData.exit_reputation_connector_half_life_requests ?? 100) < 1000 && (
+            <p className="text-xs text-warning">At this strength a few unlucky requests move a connector's weight a lot. A Connector memory of 1,000 or more steadies it.</p>
+          )}
+          {project && reputationMode !== 'off' && previewStrength !== undefined && previewFloor !== undefined
+            && (previewStrength !== loaded.exit_reputation_strength || previewFloor !== loaded.exit_reputation_floor) && (
+            <StrengthPreview
+              projectId={project.id} strength={previewStrength} floor={previewFloor}
+              saved={`${loaded.exit_reputation_strength} ${loaded.exit_reputation_floor}`}
+            />
+          )}
           {(() => {
             const minutes = formData.exit_reputation_avoid_minutes ?? 60
             const hours = formData.exit_reputation_half_life_hours ?? 24
             const memory = formData.exit_reputation_connector_half_life_requests ?? 100
             const reports = formData.exit_reputation_bad_reports ?? 1
             const share = formData.exit_reputation_bad_share ?? 50
+            const strength = formData.exit_reputation_strength ?? 1
+            const floor = (formData.exit_reputation_floor ?? 10) / 100
             return (
               <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
                 <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>
                   {reputationAvoids ? '' : 'Once the mode avoids: '}{reports} fresh bad {plural(reports, 'report keeps', 'reports keep')} an exit IP away from a site for {minutesText(minutes)}. Each further avoid doubles that while the earlier ones are remembered, counting half after {hours} {plural(hours, 'hour', 'hours')}, never past 7 days. At least {share}% of the IP's recent reports for the site must be bad, and good reports can end an avoid early. A dynamic connector is weighed for a site by the share of its recent requests there reported blocked: evidence counts half after {memory.toLocaleString()} more {plural(memory, 'request', 'requests')}, and at least half every hour.
+                  {strength > 1 && ` At strength ${strength}, dynamic connectors are compared with the best one at each place, never under the lowest factor, ${factorText(floor)}.`}
                 </span>
               </div>
             )
@@ -659,7 +713,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
           <div className="rounded-lg border border-line p-3 text-xs leading-relaxed text-fg-muted space-y-1.5">
             <div className="font-medium text-fg">What Avoid acts on</div>
             <p><span className="text-fg">Connectors with IPs</span> (static lists, ISP and datacenter ports, cloud instances, pooled slots): an IP avoided for a site is not routed to for that site, and the connector's weight there follows its usable IPs: 12 of 20 usable gives ×0.6.</p>
-            <p><span className="text-fg">Dynamic connectors</span>: weighted for a site by their block rate there, per requested location, decided once a minute: 30% of their recent requests reported blocked gives ×0.7, never under ×0.1. Their IPs are not avoided one by one.</p>
+            <p><span className="text-fg">Dynamic connectors</span>: weighted for a site by their block rate there, per requested location, decided once a minute: 30% of their recent requests reported blocked gives ×0.7{(formData.exit_reputation_strength ?? 1) > 1 ? `, then weighed against the best one at the place at strength ${formData.exit_reputation_strength}` : ''}, never under {factorText((formData.exit_reputation_floor ?? 10) / 100)}. Their IPs are not avoided one by one.</p>
             <p>No preflight is needed: reports name the exit themselves.</p>
           </div>
           <a href={`${DOCS_URL}/exit-reputation`} target="_blank" rel="noreferrer" className="inline-flex items-center text-xs text-primary hover:brightness-110 pointer-coarse:min-h-11">
@@ -684,6 +738,57 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
 
       {activeTab === 'history' && project && <EntityHistory entityType="project" entityId={project.id} />}
     </form>
+  )
+}
+
+/** A share's move as the preview lists it, held on one line from the name's last word: "geonode 47% → 24%". */
+const moveText = (name: string, from: number, to: number) => `${name}\u00a0${formatShare(from)}\u00a0→\u00a0${formatShare(to)}`
+
+/**
+ * What a draft Strength and Lowest factor change for the site the Reputation tab opens on, at its busiest places, as
+ * Avoid would route: only the connectors whose share moves by a point or more. The form passes the pair once typing
+ * pauses; ``saved`` keys the answer to the settings it was worked out beside, so one from before a save is not reused.
+ */
+function StrengthPreview({ projectId, strength, floor, saved }: { projectId: string; strength: number; floor: number; saved: string }) {
+  const query = useQuery({
+    queryKey: ['exit-reputation-strength-preview', projectId, saved, strength, floor],
+    queryFn: () => getExitReputationStrengthPreview(projectId, { strength, floor }),
+    // The last draft's answer stays up, dimmed, while the next is worked out.
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
+  })
+  const data = query.data
+  const site = data?.site
+  const places = (data?.places ?? []).map((place) => ({
+    ...place,
+    moved: place.connectors.filter((c) => Math.abs(c.draft_share - c.current_share) >= 1),
+  }))
+  const still = places.length > 0 && places.every((place) => place.moved.length === 0)
+  return (
+    <div className={`rounded-lg border border-line p-3 text-xs leading-relaxed text-fg-muted space-y-1.5 ${query.isPlaceholderData ? 'opacity-60' : ''}`} aria-live="polite">
+      <div className="font-medium text-fg wrap-anywhere">What this changes{site ? ` for ${site}` : ''}, as Avoid would route</div>
+      {query.isError && !data ? (
+        <p className="text-danger">Could not work out the preview{query.error instanceof Error && query.error.message ? `: ${query.error.message}` : ''}.</p>
+      ) : !data ? (
+        <p className="text-fg-subtle">Working out the shares…</p>
+      ) : !site || places.length === 0 ? (
+        <p>No place has reports{site ? ` for ${site}` : ''} yet, so there is nothing to compare.</p>
+      ) : still ? (
+        <p>No connector's share moves by a point or more at the {plural(places.length, 'place', `${places.length} busiest places`)} for {site}.</p>
+      ) : (
+        <ul className="space-y-1">
+          {places.map((place) => (
+            // Breaks between words, a word only when it cannot fit; a share's move never splits from its name's end.
+            <li key={place.place} className="break-words">
+              <span className="text-fg">{place.label}</span>:{' '}
+              {place.moved.length > 0
+                ? place.moved.map((c) => moveText(c.name, c.current_share, c.draft_share)).join(', ')
+                : <span className="text-fg-subtle">no share moves by a point</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   )
 }
 

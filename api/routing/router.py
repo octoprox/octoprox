@@ -31,7 +31,7 @@ from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.sdk.strategies import META_SESSION_ID, is_dynamic_gateway
 from api.reputation.site import site_of
-from api.reputation.weight import ConnectorReputation
+from api.reputation.weight import ConnectorReputation, ReputationRule
 from api.routing.exclusions import LocalExclusions
 from api.routing.snapshot import ConnectorView, RoutingSnapshot
 from api.strategies import ProxyGroup, RoutingStrategy, get_strategy
@@ -88,13 +88,15 @@ _NO_FACTORS: Mapping[str, float] = MappingProxyType({})
 
 
 class RequestReputation(NamedTuple):
-    """What a project's exit reputation says about one request's site now: the rows kept away from it, and the factors
-    of its dynamic connectors there, read at the request's place (its ``LocationTarget`` key, "" for none)."""
+    """What a project's exit reputation says about one request's site now: the rows kept away from it, the factors
+    of its dynamic connectors there, read at the request's place (its ``LocationTarget`` key, "" for none), and the
+    project's rule for weighing them against the best one."""
 
     site: str | None = None
     place: str = ""
     avoided: frozenset[str] = frozenset()
     factors: Mapping[str, Mapping[str, float]] = MappingProxyType({})
+    rule: ReputationRule = ReputationRule()
 
     def of(self, view: ConnectorView, usable: int, avoided: int) -> ConnectorReputation:
         """A connector's reputation for the request (:class:`ConnectorReputation`): a dynamic one's by its block rate at
@@ -106,6 +108,8 @@ class RequestReputation(NamedTuple):
 
 # A request whose project's exit reputation does not avoid, or that names no site.
 _UNRATED = RequestReputation()
+# The connectors of such a request: none rated.
+_NOT_RATED: Mapping[str, ConnectorReputation] = MappingProxyType({})
 
 
 class AvoidedSite(NamedTuple):
@@ -694,6 +698,7 @@ class Router:
             target.key if target is not None else "",
             snapshot.avoided(project_id, site, utc_now()),
             snapshot.factors(project_id, site),
+            ReputationRule.of(project),
         )
 
     @staticmethod
@@ -705,10 +710,25 @@ class Router:
     ) -> list[ProxyGroup]:
         """The proxies by connector, in the order the connectors first appear, each group weighted by its connector's
         routing weight; for a request with a site in a project that avoids, the effective weight there (``avoided``:
-        each connector's eligible rows left out for the site), marked lowered where it is under the configured one."""
+        each connector's eligible rows left out for the site), marked lowered where it is under the configured one.
+
+        Every connector of the request is rated before any group is made: the project's rule weighs each dynamic one
+        against the best of them.
+        """
         rows: dict[str, list[Proxy]] = {}
         for proxy in proxies:
             rows.setdefault(proxy.connector_id, []).append(proxy)
+        rated: Mapping[str, ConnectorReputation] = _NOT_RATED
+        if reputation.site is not None:
+            rated = reputation.rule.apply(
+                {
+                    connector_id: reputation.of(
+                        view, len(members), avoided.get(connector_id, 0) if avoided is not None else 0
+                    )
+                    for connector_id, members in rows.items()
+                    if (view := snapshot.connector_view(connector_id)) is not None
+                }
+            )
         groups: list[ProxyGroup] = []
         for connector_id, members in rows.items():
             view = snapshot.connector_view(connector_id)
@@ -717,10 +737,9 @@ class Router:
                 continue
             weight: float = view.weight
             lowered = False
-            if reputation.site is not None:
-                left_out = avoided.get(connector_id, 0) if avoided is not None else 0
-                rated = reputation.of(view, len(members), left_out)
-                weight, lowered = rated.weight(weight), rated.lowers
+            judged = rated.get(connector_id)
+            if judged is not None:
+                weight, lowered = judged.weight(weight), judged.lowers
             groups.append(
                 ProxyGroup(key=connector_id, weight=weight, proxies=members, members=view.proxies, lowered=lowered)
             )

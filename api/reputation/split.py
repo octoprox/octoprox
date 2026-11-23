@@ -13,6 +13,7 @@ see docs/api.md (Traffic split, Site across places).
 from __future__ import annotations
 
 import asyncio
+import copy
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,7 +26,7 @@ from typing import TYPE_CHECKING
 from api.db.reputation_repository import ExitReputationRepository
 from api.models.location import COUNTRY_NAMES, LocationTarget, state_name_slug
 from api.reputation.record import ConnectorSiteReputation, ReputationPolicy, place_levels
-from api.reputation.weight import ConnectorReputation, PlaceState
+from api.reputation.weight import ConnectorReputation, PlaceState, ReputationRule
 from api.routing.router import RequestReputation
 
 if TYPE_CHECKING:
@@ -162,6 +163,7 @@ class ReputationSplit:
         self._avoided = avoided
         self._now = now
         self._policy = ReputationPolicy.of(project)
+        self.rule = ReputationRule.of(project)
         # (site, place) -> the rows eligible for a request to the site from the place, by connector; on the first ask.
         self._by_request: dict[tuple[str, str], dict[str, ProxyGroup]] = {}
         # (connector, site) -> level of a requested place -> its record.
@@ -224,6 +226,26 @@ class ReputationSplit:
         )
         return found or first
 
+    def under(self, project: Project) -> ReputationSplit:
+        """The same split under another version of the project's settings, such as a draft of them: the records read
+        and the eligibility worked out are shared, never read again.
+
+        At another strength each factor is decided again on its grid from the records' weights, as routing's next
+        flushes would decide them; the stored ones sit on the saved strength's grid, too coarse to tell small gaps.
+        """
+        split = copy.copy(self)
+        split._project = project
+        split._policy = ReputationPolicy.of(project)
+        split.rule = ReputationRule.of(project)
+        if split._policy.strength != self._policy.strength:
+            split._factors = {}
+            for (connector_id, site), by_level in self._records.items():
+                for place, record in by_level.items():
+                    factor = record.factor_on(split._policy)
+                    if factor is not None:
+                        split._factors.setdefault(site, {}).setdefault(connector_id, {})[place] = factor
+        return split
+
     @property
     def applied(self) -> bool:
         """Whether routing weighs the connectors by it: the project's mode avoids."""
@@ -282,10 +304,11 @@ class ReputationSplit:
         """Each connector's part of the requests to ``site`` from ``place``, by id, none for a connector routing keeps
         off them; for None (a request naming no site), the configured weights alone."""
         groups = self.groups_for(site, place) if site is not None else self.groups
-        reputations = {
-            connector_id: self._reputation(connector_id, site, place) if site is not None else _NONE
-            for connector_id in connector_ids
-        }
+        reputations = (
+            self._compared(site, place, groups, connector_ids)
+            if site is not None
+            else dict.fromkeys(connector_ids, _NONE)
+        )
         configured = {
             connector_id: float(groups[connector_id].weight) if connector_id in groups else 0.0
             for connector_id in reputations
@@ -346,6 +369,23 @@ class ReputationSplit:
             if any(share.takes and share.reputation.usable_ips != share.reputation.eligible_ips for share in at.values()):
                 listed[country] = at
         return listed
+
+    def _compared(
+        self, site: str, place: str, groups: Mapping[str, ProxyGroup], connector_ids: Iterable[str]
+    ) -> dict[str, ConnectorReputation]:
+        """Each connector's reputation for ``site`` from ``place``, compared by the project's rule with the best of the
+        connectors routing finds eligible (``groups``), as gateways weigh them; one routing keeps off is shown as it
+        would stand beside them."""
+        taking = self.rule.apply({connector_id: self._reputation(connector_id, site, place) for connector_id in groups})
+        compared: dict[str, ConnectorReputation] = {}
+        for connector_id in connector_ids:
+            reputation = taking.get(connector_id)
+            if reputation is None:
+                reputation = self.rule.apply({**taking, connector_id: self._reputation(connector_id, site, place)})[
+                    connector_id
+                ]
+            compared[connector_id] = reputation
+        return compared
 
     def _reputation(self, connector_id: str, site: str, place: str) -> ConnectorReputation:
         """A connector's reputation for ``site``, as gateways would weigh it for a request from ``place``."""

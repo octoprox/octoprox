@@ -22,6 +22,7 @@ from .world import (
     OPENVPN_DEVICES,
     P1,
     P1_PLACES,
+    P4,
     PROJECTS,
     USERS,
     WIREGUARD_DEVICES,
@@ -44,8 +45,11 @@ class NotHandledError(Exception):
 # --------------------------------------------------------------------------- builders
 
 def project_json(pid: str) -> dict:
+    """The project; Real estate listings avoids by exit reputation at a Strength above 1, with the longer Connector
+    memory that steadies it."""
     p = PROJECTS[pid]
     pc = pool_counts(pid)
+    avoids = pid == P4
     return {
         "id": p.id, "name": p.name, "description": p.description, "username": p.username, "password": p.password,
         "routing_strategy": p.strategy, "connection_timeout": 30, "max_retries": 2, "tls_mitm_mode": "off",
@@ -53,9 +57,11 @@ def project_json(pid: str) -> dict:
         "location_contradicted": "evidence", "location_unknown": "vendor", "location_preflight": True,
         "location_session_move": False, "location_conflict_rule": None, "location_city_radius_km": None,
         "exit_headers": True, "observation_log": True, "observation_retention_days": None,
-        "exit_reputation": "off", "exit_reputation_avoid_minutes": 60, "exit_reputation_half_life_hours": 24,
-        "exit_reputation_connector_half_life_requests": 100, "exit_reputation_bad_reports": 1,
-        "exit_reputation_bad_share": 50, "pending_deletion": False,
+        "exit_reputation": "avoid" if avoids else "off", "exit_reputation_avoid_minutes": 60,
+        "exit_reputation_half_life_hours": 24, "exit_reputation_connector_half_life_requests": 1000 if avoids else 100,
+        "exit_reputation_bad_reports": 1, "exit_reputation_bad_share": 50,
+        "exit_reputation_strength": analytics.REPUTATION_STRENGTH.get(pid, 1), "exit_reputation_floor": 10,
+        "pending_deletion": False,
         "created_at": ago(days=p.created_days_ago), "updated_at": ago(days=1, hours=7),
         "credential_count": len(credentials_of(pid)), "connector_count": len(connectors_of(pid)),
         "proxy_count": pc["total"], "healthy_proxy_count": pc["healthy"],
@@ -392,8 +398,16 @@ def _project_get(pid: str, sub: str, q: dict[str, str]) -> object:
         return {"snapshots": series.project_history(pid, q.get("range", "24h"))}
     if sub == "/metrics/traffic-split":
         return analytics.traffic_split(pid, q.get("range", "1h"), q.get("site"), q.get("place"))
+    if sub == "/exit-reputation":
+        # No exit IP records in the demo: the Reputation tab's places carry the story.
+        return {
+            "records": [], "total": 0, "total_exact": True,
+            "limit": int(q.get("limit", 100)), "offset": int(q.get("offset", 0)),
+        }
     if sub == "/exit-reputation/places":
         return analytics.site_places(pid, q.get("site"))
+    if sub == "/exit-reputation/strength-preview":
+        return analytics.strength_preview(pid, int(q.get("strength", 1)), int(q.get("floor", 10)), q.get("site"))
     if sub == "/connectors":
         conns = connectors_of(pid)
         return {"total": len(conns), "connectors": [connector_json(c) for c in conns]}

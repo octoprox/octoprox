@@ -67,11 +67,17 @@ def _feed(pool_routing: dict[str, Any], rows: dict[str, dict[str, str]], mode: E
     return feed
 
 
-def _record(connector_id: str, place: str, factor: float | None, reports: int = 0) -> ConnectorSiteReputation:
-    """A record of the connector for the site at ``place``, storing ``factor``, with ``reports`` blocked reports."""
+def _record(
+    connector_id: str, place: str, factor: float | None, reports: int = 0, block_rate: float | None = None
+) -> ConnectorSiteReputation:
+    """A record of the connector for the site at ``place``, storing ``factor``, with ``reports`` blocked reports, and
+    weights of 100 requests blocked at ``block_rate`` (one less the factor when not given)."""
     record = ConnectorSiteReputation.new(ConnectorSiteKey("p", connector_id, SITE, place), utc_now())
     record.factor = factor
     record.blocked_reports = reports
+    if factor is not None:
+        record.weighted_requests = 100.0
+        record.weighted_blocked = 100.0 * (1.0 - factor if block_rate is None else block_rate)
     return record
 
 
@@ -249,6 +255,94 @@ def test_configured_effective_and_avoid_shares(mode: ExitReputationMode, effecti
     assert rounded("configured_share") == {"pool": 25.0, "dyn": 75.0}
     assert rounded("avoid_share") == {"pool": 21.74, "dyn": 78.26}
     assert rounded("effective_share") == effective
+
+
+# A second dynamic connector's factors for the site: better than the first's in the United States and New York City.
+STRONGER = {"US": 0.95, "US/NY/new_york": 0.9, "GB": 0.6}
+
+
+def _two_dynamic(strength: int, pool_routing: dict[str, Any] | None = None) -> tuple[FeedBuilder, list[ConnectorSiteReputation]]:
+    """``_feed``'s project at ``strength`` with a second Oxylabs dynamic connector ``dyn2`` (weight 3, ``STRONGER``),
+    and every dynamic connector's records."""
+    feed = _feed(pool_routing or {}, US | GB, ExitReputationMode.AVOID)
+    feed.projects["p"] = feed.projects["p"].model_copy(update={"exit_reputation_strength": strength})
+    feed.add(
+        Connector(
+            id="dyn2", name="Dyn2", credential_id="oxy", credential_type="oxylabs", project_id="p",
+            config={"session_mode": "dynamic", "session_duration_minutes": 10}, routing_config={"weight": 3},
+        ),
+        healthy(Proxy(
+            id="gw2", host="pr.oxylabs.io", port=7777, protocol=ProxyProtocol.HTTP,
+            username="customer-alice-sessid-probe1probe1-sesstime-10", password="{password}", connector_id="dyn2",
+            metadata={"provider": "oxylabs", "proxy_type": "residential", "dynamic_sessions": "true"},
+        )),
+    )
+    for place, factor in STRONGER.items():
+        feed.factor("p", "dyn2", SITE, place, factor)
+    return feed, [*_records(), *(_record("dyn2", place, factor) for place, factor in STRONGER.items())]
+
+
+@pytest.mark.parametrize("strength", [1, 10])
+@pytest.mark.parametrize("place", ["", "US", "US/NY", "US/NY/new_york", "GB", "DE"])
+async def test_at_any_strength_the_effective_weights_are_those_routing_hands_its_strategy(strength: int, place: str) -> None:
+    feed, records = _two_dynamic(strength)
+    feed.avoid("p", "198.51.100.1", SITE, utc_now() + timedelta(hours=1))
+
+    shares = _split(feed, {"198.51.100.1"}, records).shares(SITE, place, ["pool", "dyn", "dyn2"])
+
+    taking = {connector_id: share.effective_weight for connector_id, share in shares.items() if share.effective_weight}
+    assert taking == pytest.approx(await _routed(feed.router(), place))
+
+
+def test_the_best_is_found_among_every_connector_taking_the_requests_not_only_those_asked_about() -> None:
+    feed, records = _two_dynamic(10)
+    split = _split(feed, set(), records)
+
+    alone = split.shares(SITE, "US", ["dyn"])["dyn"].reputation
+
+    assert (alone.success, alone.best, alone.best_connector_id) == (0.5, 0.95, "dyn2")
+    assert alone.value == pytest.approx(max(0.1, 0.5 * (0.5 / 0.95) ** 9))
+    assert alone == split.shares(SITE, "US", ["pool", "dyn", "dyn2"])["dyn"].reputation
+
+
+def test_a_connector_routing_keeps_off_is_shown_beside_those_taking_the_requests() -> None:
+    # The pool reserves the United States: neither dynamic connector takes its requests.
+    feed, records = _two_dynamic(10, {"reserved_countries": ["US"]})
+
+    shares = _split(feed, set(), records).shares(SITE, "US", ["pool", "dyn", "dyn2"])
+
+    assert (shares["dyn"].state, shares["dyn2"].state) == (PlaceState.TAKES_NONE, PlaceState.TAKES_NONE)
+    # Each stands as it would beside the pool alone: its own best.
+    assert (shares["dyn"].reputation.value, shares["dyn"].reputation.best_connector_id) == (0.5, "dyn")
+    assert (shares["dyn2"].reputation.value, shares["dyn2"].reputation.best_connector_id) == (0.95, "dyn2")
+
+
+def test_a_split_under_a_draft_of_the_settings_shares_the_records() -> None:
+    feed, records = _two_dynamic(1)
+    split = _split(feed, set(), records)
+    project = split._project
+
+    draft = split.under(project.model_copy(update={"exit_reputation_strength": 10, "exit_reputation_floor": 20}))
+
+    assert split.shares(SITE, "US", ["dyn"])["dyn"].reputation.value == 0.5
+    assert draft.shares(SITE, "US", ["dyn"])["dyn"].reputation.value == 0.2
+    assert (draft.rule.strength, draft.rule.floor, split.rule.strength) == (10, 0.2, 1)
+
+
+def test_a_draft_at_another_strength_decides_each_factor_again_on_its_grid() -> None:
+    """Blocked 2% and 1.3%, both connectors store 1 at strength 1; at 20 they tell apart, as routing's next flushes
+    would tell them."""
+    feed, _ = _two_dynamic(1)
+    records = [_record("dyn", "US", 1.0, block_rate=0.02), _record("dyn2", "US", 1.0, block_rate=0.013)]
+    split = _split(feed, set(), records)
+
+    draft = split.under(split._project.model_copy(update={"exit_reputation_strength": 20}))
+
+    assert split.shares(SITE, "US", ["dyn"])["dyn"].reputation.value == 1.0
+    compared = draft.shares(SITE, "US", ["dyn"])["dyn"].reputation
+    # Steps of 0.0025 at strength 20: 0.987 is stored as 0.9875.
+    assert (compared.success, compared.best, compared.best_connector_id) == (0.98, 0.9875, "dyn2")
+    assert compared.value == pytest.approx(0.98 * (0.98 / 0.9875) ** 19)
 
 
 @pytest.mark.parametrize(

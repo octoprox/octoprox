@@ -216,6 +216,10 @@ export interface Project {
   exit_reputation_bad_reports: number
   /** The least share of an IP's recent reports for a site, in percent, that must be bad to avoid it there (1 to 99). */
   exit_reputation_bad_share: number
+  /** "Strength": how hard a dynamic connector is weighed against the best one at a place (1 to 20); 1 is the plain block-rate trim. */
+  exit_reputation_strength: number
+  /** "Lowest factor": the least a dynamic connector's weight for a site is multiplied by, in percent (1 to 100). */
+  exit_reputation_floor: number
   /** Deleted, and waiting for its cloud instances to be terminated: its clients are turned away until it goes. */
   pending_deletion: boolean
   created_at: string
@@ -288,6 +292,8 @@ export interface ProjectCreate {
   exit_reputation_connector_half_life_requests?: number
   exit_reputation_bad_reports?: number
   exit_reputation_bad_share?: number
+  exit_reputation_strength?: number
+  exit_reputation_floor?: number
 }
 
 export interface ProjectUpdate {
@@ -320,6 +326,8 @@ export interface ProjectUpdate {
   exit_reputation_connector_half_life_requests?: number
   exit_reputation_bad_reports?: number
   exit_reputation_bad_share?: number
+  exit_reputation_strength?: number
+  exit_reputation_floor?: number
 }
 
 export interface Proxy {
@@ -923,6 +931,14 @@ export interface PlaceCell {
   /** A dynamic connector's factor stored at this place itself. */
   own_factor?: number | null
   /**
+   * A judged dynamic connector's own factor (one less its block rate) at the level its reputation came from, before it
+   * is compared with the best one here; missing when not judged.
+   */
+  success?: number | null
+  /** The best judged dynamic connector for the place's requests and its own factor; missing when none is judged. */
+  best_success?: number | null
+  best_connector_id?: string | null
+  /**
    * Blocked reports and requests as routing last counted them, not decayed since: a dynamic connector's at this place
    * itself, a connector with IPs' for the whole site. Missing without a record.
    */
@@ -998,6 +1014,9 @@ export interface SitePlacesView {
   mode: ExitReputationMode
   /** Routing weighs the connectors by it: the project avoids. */
   reputation_applied: boolean
+  /** The project's Strength (1 to 20) and Lowest factor (0.01 to 1) the values were worked out with. */
+  reputation_strength: number
+  reputation_floor: number
   /** Every site with connector records, most reported first; an asked site without any first. */
   sites: ReputationSite[]
   /** By name, as the traffic split lists them. */
@@ -1015,6 +1034,32 @@ export interface SitePlacesView {
 /** One site (the exact host, or a URL) across every place; none asks for the most reported one with a place to list. */
 export const fetchSitePlaces = async (projectId: string, site?: string): Promise<SitePlacesView> =>
   (await api.get(`/projects/${projectId}/exit-reputation/places`, { params: site ? { site } : {} })).data
+
+/** One connector's share of a place's requests as Avoid would route them, 0-100: at the saved settings and at the draft's. */
+export interface StrengthPreviewConnector {
+  connector_id: string
+  name: string
+  current_share: number
+  draft_share: number
+}
+
+/** One of the site's most reported places, with the connectors that take its requests. */
+export interface StrengthPreviewPlace {
+  place: string
+  label: string
+  reports: number
+  connectors: StrengthPreviewConnector[]
+}
+
+/** What a draft Strength and Lowest factor would change for a site's busiest places; no site when the project has no records. */
+export interface StrengthPreviewResponse {
+  site: string | null
+  places: StrengthPreviewPlace[]
+}
+
+/** The shares at a draft `strength` (1 to 20) and `floor` (percent, 1 to 100) next to the saved ones; no site asks for the one the Reputation tab opens on. */
+export const getExitReputationStrengthPreview = async (projectId: string, params: { strength: number; floor: number; site?: string }): Promise<StrengthPreviewResponse> =>
+  (await api.get(`/projects/${projectId}/exit-reputation/strength-preview`, { params })).data
 
 export interface ProxyListResponse {
   total: number
@@ -2099,6 +2144,14 @@ export interface ConnectorTrafficShare {
   usable_ips: number | null
   eligible_ips: number | null
   /**
+   * A judged dynamic connector's own factor (one less its block rate) at the level its reputation came from, before it
+   * is compared with the best one; missing when not judged.
+   */
+  success?: number | null
+  /** The best judged dynamic connector for the site's requests from the place and its own factor; missing when none is judged. */
+  best_success?: number | null
+  best_connector_id?: string | null
+  /**
    * The weight routing uses for the site's requests from the place (0 when the connector takes none of them), and its
    * share of them in percent; where the project does not avoid, the configured weights of the connectors serving them.
    */
@@ -2138,6 +2191,9 @@ export interface TrafficSplitResponse {
   reputation_sites: ReputationSite[]
   /** Every place with connector data for the site, busiest first; empty without a site. */
   reputation_places: ReputationPlace[]
+  /** The project's Strength (1 to 20) and Lowest factor (0.01 to 1) the reputations were worked out with. */
+  reputation_strength: number
+  reputation_floor: number
 }
 
 /** The split under the current weights, and with `site` (and `place`, a LocationTarget key) under the effective weights for it. */

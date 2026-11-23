@@ -36,8 +36,8 @@ MAX_EXIT_SITES = 100
 MAX_COUNT = 2**31 - 1
 # Below this many weighted requests a connector's record tells too little, and stores no factor.
 MIN_FACTOR_REQUESTS = 20.0
-# The least a connector's factor goes to, and how finely it is stored: steps of 1 / FACTOR_STEPS (0.05).
-FACTOR_FLOOR = 0.1
+# How finely a connector's factor is stored at strength 1: steps of 1 / FACTOR_STEPS (0.05); a project's strength
+# divides the step, since a higher strength tells finer success rates apart.
 FACTOR_STEPS = 20
 # How far short of a whole step a block rate may fall and still move a stored factor: in floating point 1 - 17 / 20 is
 # a hair over 0.15.
@@ -60,14 +60,15 @@ class ReputationStatus(StrEnum):
 class ReputationPolicy:
     """How a project weighs evidence: an exit IP record's half-life in seconds ("Remember for"), a connector record's in
     requests ("Connector memory"), the bad weight past which an exit is avoided (the project's bad reports to avoid,
-    less half a report), the least share of a site's reports that must be bad (0 to 1), and a first avoid's length in
-    seconds ("Avoid for")."""
+    less half a report), the least share of a site's reports that must be bad (0 to 1), a first avoid's length in
+    seconds ("Avoid for"), and the strength connectors are compared at, which sets how finely a factor is stored."""
 
     half_life: float
     connector_half_life: float
     threshold: float
     bad_share: float
     avoid_base: float
+    strength: int = 1
 
     @classmethod
     def of(cls, project: Project) -> ReputationPolicy:
@@ -78,6 +79,7 @@ class ReputationPolicy:
             project.exit_reputation_connector_half_life_requests,
             project.exit_reputation_bad_reports,
             project.exit_reputation_bad_share,
+            project.exit_reputation_strength,
         )
 
     @classmethod
@@ -88,9 +90,10 @@ class ReputationPolicy:
         connector_half_life_requests: int,
         bad_reports: int,
         bad_share: int,
+        strength: int = 1,
     ) -> ReputationPolicy:
         """The policy of the settings as a project stores them: minutes, hours, requests, fresh bad reports, a
-        percentage."""
+        percentage and a strength."""
         return cls(
             half_life=half_life_hours * 3600.0,
             connector_half_life=float(connector_half_life_requests),
@@ -98,7 +101,13 @@ class ReputationPolicy:
             threshold=bad_reports - 0.5,
             bad_share=bad_share / 100,
             avoid_base=avoid_minutes * 60.0,
+            strength=strength,
         )
+
+    @property
+    def factor_steps(self) -> int:
+        """How many steps a connector's factor is stored in: ``FACTOR_STEPS`` per unit of strength."""
+        return FACTOR_STEPS * self.strength
 
     def avoid_length(self, avoids: float) -> timedelta:
         """How long an avoid lasts after ``avoids`` earlier ones (decayed, rounded to whole ones): "Avoid for" doubled
@@ -429,17 +438,27 @@ class ConnectorSiteReputation(ReputationRecord):
         self.good_reports = min(self.good_reports + good, MAX_COUNT)
         self.requests += requests
         self._seen(now)
-        self.factor = self._decided()
+        self.factor = self._decided(policy)
         return ConnectorChange(self.key, before, self.factor)
 
-    def _decided(self) -> float | None:
+    def _decided(self, policy: ReputationPolicy) -> float | None:
         """The factor the weights make: none below ``MIN_FACTOR_REQUESTS`` weighted requests; else one less the block
-        rate, never under ``FACTOR_FLOOR``, to the nearest step, a stored one kept until the rate is a whole step from
-        it."""
+        rate to the nearest step of the project's (0.05 / strength), at least one step, a stored one kept until the rate
+        is a whole step from it. Routing's lowest factor is the project's, applied as it routes."""
         if self.weighted_requests < MIN_FACTOR_REQUESTS:
             return None
-        steps = max(FACTOR_FLOOR, 1.0 - self.weighted_blocked / self.weighted_requests) * FACTOR_STEPS
-        # Compared in whole steps, never as factors: 0.15 - 0.1 is a hair short of 0.05.
-        if self.factor is not None and abs(steps - round(self.factor * FACTOR_STEPS)) < 1 - _STEP_TOLERANCE:
+        grid = policy.factor_steps
+        steps = (1.0 - self.weighted_blocked / self.weighted_requests) * grid
+        # Compared in whole steps, never as factors: 0.15 - 0.1 is a hair short of 0.05. A factor stored at another
+        # strength is read on this one's grid.
+        if self.factor is not None and abs(steps - round(self.factor * grid)) < 1 - _STEP_TOLERANCE:
             return self.factor
-        return round(steps) / FACTOR_STEPS
+        return max(round(steps), 1) / grid
+
+    def factor_on(self, policy: ReputationPolicy) -> float | None:
+        """The factor the last flush's weights make on ``policy``'s grid with none stored to keep, as a flush at its
+        strength would settle on: none below ``MIN_FACTOR_REQUESTS`` weighted requests, else one step at least."""
+        if self.weighted_requests < MIN_FACTOR_REQUESTS:
+            return None
+        grid = policy.factor_steps
+        return max(round((1.0 - self.weighted_blocked / self.weighted_requests) * grid), 1) / grid

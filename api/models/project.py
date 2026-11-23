@@ -80,6 +80,11 @@ MAX_REPUTATION_BAD_REPORTS = 10
 # The highest minimum bad share, in percent: at 100 a single good report would keep an exit from ever being avoided
 # again for the site, since decayed weights never reach zero.
 MAX_REPUTATION_BAD_SHARE = 99
+# The highest strength a dynamic connector is compared with the best at a place at: at 20 one blocked 12% of the time
+# beside one blocked 1.3% keeps about a tenth of its weight.
+MAX_REPUTATION_STRENGTH = 20
+# The highest lowest factor, in percent: at 100 no dynamic connector's weight is ever lowered.
+MAX_REPUTATION_FLOOR = 100
 
 
 def mitm_fields(
@@ -172,7 +177,9 @@ class Project(Audited):
     # Exit reputation (see docs/exit-reputation.md): what exit reports do, how many minutes a first avoid lasts (each
     # repeat doubles it), how many hours an exit IP's reports take to count half ("Remember for"), how many more
     # requests a connector's evidence takes to count half ("Connector memory"), how many fresh bad reports avoid an exit
-    # for a site, and the least share (percent) of the site's recent reports that must be bad.
+    # for a site, the least share (percent) of the site's recent reports that must be bad, how hard a dynamic connector
+    # is weighed against the best one at a place ("Strength", 1 the plain trim), and the least share (percent) of its
+    # weight a dynamic connector keeps ("Lowest factor").
     exit_reputation: ExitReputationMode = ExitReputationMode.OFF
     exit_reputation_avoid_minutes: int = Field(default=60, ge=1, le=MAX_REPUTATION_AVOID_MINUTES)
     exit_reputation_half_life_hours: int = Field(default=24, ge=1, le=MAX_REPUTATION_HALF_LIFE_HOURS)
@@ -181,6 +188,8 @@ class Project(Audited):
     )
     exit_reputation_bad_reports: int = Field(default=1, ge=1, le=MAX_REPUTATION_BAD_REPORTS)
     exit_reputation_bad_share: int = Field(default=50, ge=1, le=MAX_REPUTATION_BAD_SHARE)
+    exit_reputation_strength: int = Field(default=1, ge=1, le=MAX_REPUTATION_STRENGTH)
+    exit_reputation_floor: int = Field(default=10, ge=1, le=MAX_REPUTATION_FLOOR)
 
     # Deleted, and waiting for its cloud instances to be terminated: its clients are turned away and it takes no new
     # connector. Only a delete sets it (``ProjectRepository.mark_pending_deletion``); create and edit never write it.
@@ -250,6 +259,8 @@ class ProjectCreate(BaseModel):
     )
     exit_reputation_bad_reports: int = Field(default=1, ge=1, le=MAX_REPUTATION_BAD_REPORTS)
     exit_reputation_bad_share: int = Field(default=50, ge=1, le=MAX_REPUTATION_BAD_SHARE)
+    exit_reputation_strength: int = Field(default=1, ge=1, le=MAX_REPUTATION_STRENGTH)
+    exit_reputation_floor: int = Field(default=10, ge=1, le=MAX_REPUTATION_FLOOR)
 
     @model_validator(mode="after")
     def validate_mitm_fields(self) -> "ProjectCreate":
@@ -293,6 +304,8 @@ class ProjectUpdate(BaseModel):
     ) = None
     exit_reputation_bad_reports: Annotated[int, Field(ge=1, le=MAX_REPUTATION_BAD_REPORTS)] | None = None
     exit_reputation_bad_share: Annotated[int, Field(ge=1, le=MAX_REPUTATION_BAD_SHARE)] | None = None
+    exit_reputation_strength: Annotated[int, Field(ge=1, le=MAX_REPUTATION_STRENGTH)] | None = None
+    exit_reputation_floor: Annotated[int, Field(ge=1, le=MAX_REPUTATION_FLOOR)] | None = None
 
     def changes(self) -> dict[str, object]:
         """The fields this edit sets, with the empty strings that clear an override turned into None."""
@@ -332,6 +345,8 @@ class ProjectResponse(BaseModel):
     exit_reputation_connector_half_life_requests: int = 100
     exit_reputation_bad_reports: int = 1
     exit_reputation_bad_share: int = 50
+    exit_reputation_strength: int = 1
+    exit_reputation_floor: int = 10
     pending_deletion: bool = False
     created_at: datetime
     updated_at: datetime
@@ -369,6 +384,8 @@ class ProjectSummary(BaseModel):
     exit_reputation_connector_half_life_requests: int = 100
     exit_reputation_bad_reports: int = 1
     exit_reputation_bad_share: int = 50
+    exit_reputation_strength: int = 1
+    exit_reputation_floor: int = 10
     pending_deletion: bool = False
     credential_count: int = 0
     connector_count: int = 0

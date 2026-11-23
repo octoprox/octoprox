@@ -43,17 +43,18 @@ type _Factor = tuple[int, float, str, str, str, str]
 
 class ReputationScope(NamedTuple):
     """What one avoiding project's exit reputation is read for: the exit IPs its rows with IPs were last seen exiting
-    from, and its dynamic connectors."""
+    from, and its dynamic connectors; and the strength they are compared at, which sets the factors carried."""
 
     ips: frozenset[str] = frozenset()
     connectors: frozenset[str] = frozenset()
+    strength: int = 1
 
     @classmethod
     def of(cls, projects: Iterable[Project], sections: Iterable[ConnectorSection]) -> dict[str, ReputationScope]:
         """Each project whose mode avoids, by id, with what a compile's connector sections give it to read for: every
         row of a section counts whatever its status, pooled slots by their last sighting, and a connector with a dynamic
         gateway row is dynamic."""
-        avoiding = {project.id for project in projects if project.exit_reputation.avoids}
+        avoiding = {project.id: project.exit_reputation_strength for project in projects if project.exit_reputation.avoids}
         ips: dict[str, set[str]] = {project_id: set() for project_id in avoiding}
         connectors: dict[str, set[str]] = {project_id: set() for project_id in avoiding}
         for section in sections:
@@ -66,7 +67,7 @@ class ReputationScope(NamedTuple):
                 elif (ip := static_exit_ip(proxy)) is not None:
                     ips[project_id].add(ip)
         return {
-            project_id: cls(frozenset(ips[project_id]), frozenset(connectors[project_id]))
+            project_id: cls(frozenset(ips[project_id]), frozenset(connectors[project_id]), avoiding[project_id])
             for project_id in sorted(avoiding)
         }
 
@@ -163,7 +164,7 @@ class FeedReputation:
                 for site, by_place in sorted(read.factors[connector_id].items()):
                     factors.extend(
                         (len(place_levels(place)), factor, project_id, connector_id, site, place)
-                        for place, factor in sorted(_telling(by_place).items())
+                        for place, factor in sorted(_telling(by_place, compared=scope.strength > 1).items())
                     )
         cut = len(avoids) > MAX_FEED_IP_AVOIDS or len(factors) > MAX_FEED_FACTORS
         if cut and not self._cut:
@@ -179,7 +180,11 @@ class FeedReputation:
             # Stable: avoids ending together keep their key order.
             avoids = sorted(avoids, key=lambda avoid: avoid[0], reverse=True)[:MAX_FEED_IP_AVOIDS]
         if len(factors) > MAX_FEED_FACTORS:
-            factors = sorted(factors, key=lambda factor: (factor[0], factor[1]))[:MAX_FEED_FACTORS]
+            # A 1 a comparing project carries only to judge its connector goes first; the others as they always went.
+            comparing = {project_id for project_id, scope in self._scopes.items() if scope.strength > 1}
+            factors = sorted(factors, key=lambda factor: (factor[1] == 1.0 and factor[2] in comparing, *factor[:2]))[
+                :MAX_FEED_FACTORS
+            ]
         section = self._sectioned(avoids, factors)
         if section != self._section:
             self._section = section
@@ -203,15 +208,19 @@ class FeedReputation:
         )
 
 
-def _telling(factors: Mapping[str, float]) -> dict[str, float]:
+def _telling(factors: Mapping[str, float], *, compared: bool) -> dict[str, float]:
     """The factors of one connector and site, by level of the requested place, that change what routing takes: each
     that differs from what its coarser levels give (the finest of them with a factor, 1 when none has one).
 
-    Routing takes the finest level with a factor, so leaving out the others gives every request the same weight.
+    Routing takes the finest level with a factor, so leaving out the others gives every request the same weight. Where
+    connectors are ``compared`` (Strength above 1), a factor of 1 with none coarser stays too: it judges the connector,
+    which may be the best one its others are compared with. At strength 1 it changes no weight.
     """
     telling: dict[str, float] = {}
     for place, factor in factors.items():
-        coarser = next((factors[level] for level in place_levels(place)[1:] if level in factors), 1.0)
+        coarser = next(
+            (factors[level] for level in place_levels(place)[1:] if level in factors), None if compared else 1.0
+        )
         if factor != coarser:
             telling[place] = factor
     return telling

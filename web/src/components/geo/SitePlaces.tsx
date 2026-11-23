@@ -16,7 +16,7 @@ import {
 import { ProviderLogo } from '../ProviderLogo'
 import { RichSelect } from '../RichSelect'
 import { ShareBar, formatShare, swatch } from '../TrafficSplit'
-import { HATCHED, STATE_LOOKS, factorText, factorTint, factorTone, levelName, placeLevels } from '../ConnectorReputation'
+import { HATCHED, STATE_LOOKS, factorText, factorTint, factorTone, levelName, placeLevels, strengthNote, type StrengthRule } from '../ConnectorReputation'
 import { Card, CardHeader, InfoTip, Inspector, InspectorSection, LogoLoader, Reloading } from '../ui'
 import { LoadError, loadFailed } from '../ui/LoadError'
 import { compact, plural, relativeTime } from '../../utils/format'
@@ -121,6 +121,19 @@ class PlaceTree {
 type Line =
   | { kind: 'place'; row: SitePlace; depth: number; kids: number; open: boolean; dim: boolean }
   | { kind: 'more'; parent: string; depth: number; hidden: SitePlace[] }
+
+/** The project's Strength and Lowest factor the view was worked out with, naming connectors as the view does. */
+const ruleOf = (data: SitePlacesView): StrengthRule => ({
+  strength: data.reputation_strength,
+  floor: data.reputation_floor,
+  nameOf: (id) => data.connectors.find((c) => c.connector_id === id)?.name,
+})
+
+/** The counts of a connector at ``row``'s place, when its factor came from the place itself: they are its own there. */
+const ownCounts = (row: SitePlace) => (id: string) => {
+  const cell = row.cells[id]
+  return cell && cell.reputation_place === row.place ? cell : undefined
+}
 
 /** A place as a sentence names it: its label, or "no place" for requests that name none. */
 const placeWords = (row: SitePlace) => (row.place ? row.label : 'requests naming no place')
@@ -400,6 +413,7 @@ function SiteBody({ data, site, sitePicker, preset, onPreset, inspecting, onInsp
     badge: `${LEVEL_WORDS[p.level]} · ${compact(p.reports)}`,
   }))
   const connectors = data.connectors
+  const rule = ruleOf(data)
   return (
     <div className="space-y-3">
       {/* A phone: the site, then the presets across, then Jump and Expand all; one wrapping line once there is room. */}
@@ -489,6 +503,7 @@ function SiteBody({ data, site, sitePicker, preset, onPreset, inspecting, onInsp
                     connectors={connectors}
                     site={site}
                     labelOf={labelOf}
+                    rule={rule}
                     active={inspecting === line.row.place}
                     highlighted={highlight === line.row.place}
                     onToggle={() => toggle(line.row.place)}
@@ -510,13 +525,14 @@ function SiteBody({ data, site, sitePicker, preset, onPreset, inspecting, onInsp
 }
 
 /** One place: its name (a button that opens it), reports, the split, a cell per connector and the lowest value. */
-function PlaceRow({ line, nested, connectors, site, labelOf, active, highlighted, onToggle, onOpen, rowRef }: {
+function PlaceRow({ line, nested, connectors, site, labelOf, rule, active, highlighted, onToggle, onOpen, rowRef }: {
   line: Extract<Line, { kind: 'place' }>
   /** Some place has places under it: a row without them keeps the chevron's room, so names line up. */
   nested: boolean
   connectors: SiteConnector[]
   site: string
   labelOf: (place: string) => string
+  rule: StrengthRule
   active: boolean
   highlighted: boolean
   onToggle: () => void
@@ -579,8 +595,9 @@ function PlaceRow({ line, nested, connectors, site, labelOf, active, highlighted
       <td className={cn(CELL, WIDE, bg)}><ShareBar connectors={connectors} share={share} className="w-32" /></td>
       {connectors.map((c) => {
         const cell = row.cells[c.connector_id]
+        const compared = cell && takes(cell) ? strengthNote(cell, c.connector_id, rule, ownCounts(row)) : ''
         return (
-          <td key={c.connector_id} className={cn(CELL, bg, 'text-center')} title={cell ? `${c.name}: ${cellReason(c, cell, row, site, labelOf)}.` : undefined}>
+          <td key={c.connector_id} className={cn(CELL, bg, 'text-center')} title={cell ? `${c.name}: ${cellReason(c, cell, row, site, labelOf)}.${compared ? ` ${compared}` : ''}` : undefined}>
             <CellValue cell={cell} labelOf={labelOf} />
           </td>
         )
@@ -647,7 +664,7 @@ export function SitePlacesCard({ query, site, onSite, inspecting, onInspect, onE
           <span className="inline-flex items-center gap-1.5">
             Every place for a site
             <InfoTip label="About every place for a site">
-              Each row is a place requests to the site named, and each cell what one connector's weight is multiplied by for them. A dynamic connector's factor is one less its block rate from the place, once the place has enough requests of its own (20), else the nearest coarser level's; a connector with IPs has the share of its IPs there not avoided for the site. Split here is the expected split of the place's requests by weight times that factor.
+              Each row is a place requests to the site named, and each cell what one connector's weight is multiplied by for them. A dynamic connector's factor is one less its block rate from the place, once the place has enough requests of its own (20), else the nearest coarser level's; a connector with IPs has the share of its IPs there not avoided for the site.{data && data.reputation_strength > 1 && ` At strength ${data.reputation_strength}, a dynamic connector's factor is then compared with the best one's at the place, never under the lowest factor, ${factorText(data.reputation_floor)}.`} Split here is the expected split of the place's requests by weight times that factor.
             </InfoTip>
           </span>
         }
@@ -678,7 +695,7 @@ export function SitePlacesCard({ query, site, onSite, inspecting, onInspect, onE
 }
 
 /** One connector in the place inspector: its value, how its share moves, why, and its factor at every level. */
-function PlaceConnector({ connector, index, cell, row, site, tree, labelOf }: {
+function PlaceConnector({ connector, index, cell, row, site, tree, labelOf, rule }: {
   connector: SiteConnector
   index: number
   cell: PlaceCell
@@ -686,8 +703,10 @@ function PlaceConnector({ connector, index, cell, row, site, tree, labelOf }: {
   site: string
   tree: PlaceTree
   labelOf: (place: string) => string
+  rule: StrengthRule
 }) {
   const serving = takes(cell)
+  const compared = serving ? strengthNote(cell, connector.connector_id, rule, ownCounts(row)) : ''
   const levels = connector.dynamic && serving ? levelLine(connector.connector_id, row.place, tree, labelOf) : ''
   const delta = cell.effective_share - cell.configured_share
   return (
@@ -707,7 +726,7 @@ function PlaceConnector({ connector, index, cell, row, site, tree, labelOf }: {
           </span>
         </div>
       )}
-      <p className="text-xs text-fg-muted wrap-anywhere">{cellReason(connector, cell, row, site, labelOf)}.</p>
+      <p className="text-xs text-fg-muted wrap-anywhere">{cellReason(connector, cell, row, site, labelOf)}.{compared && ` ${compared}`}</p>
       {levels && <p className="text-xs text-fg-subtle">By level: {levels}.</p>}
     </div>
   )
@@ -734,6 +753,7 @@ export function PlaceInspector({ projectId, inspected, onClose }: { projectId: s
   }
   const labelOf = (place: string) => tree.byPlace.get(place)?.label ?? place.split('/').filter(Boolean).join(', ')
   const applied = data.reputation_applied
+  const rule = ruleOf(data)
   const entries = data.connectors.map((connector, index) => ({ connector, index, cell: row.cells[connector.connector_id] })).filter((e) => !!e.cell)
   // A value under 1 is lowered here when it is the place's own, and lowered via a coarser level when inherited from
   // it: a lane per level, the nearest first.
@@ -787,7 +807,7 @@ export function PlaceInspector({ projectId, inspected, onClose }: { projectId: s
         <InspectorSection key={lane.title} title={`${lane.title} · ${lane.items.length}`}>
           <div>
             {lane.items.map((e) => (
-              <PlaceConnector key={e.connector.connector_id} connector={e.connector} index={e.index} cell={e.cell} row={row} site={data.site ?? ''} tree={tree} labelOf={labelOf} />
+              <PlaceConnector key={e.connector.connector_id} connector={e.connector} index={e.index} cell={e.cell} row={row} site={data.site ?? ''} tree={tree} labelOf={labelOf} rule={rule} />
             ))}
           </div>
           {lane === lastLowered && gains && (

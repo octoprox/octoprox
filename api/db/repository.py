@@ -221,6 +221,8 @@ class ProjectRepository:
             exit_reputation_connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
             exit_reputation_bad_reports=project.exit_reputation_bad_reports,
             exit_reputation_bad_share=project.exit_reputation_bad_share,
+            exit_reputation_strength=project.exit_reputation_strength,
+            exit_reputation_floor=project.exit_reputation_floor,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -263,6 +265,8 @@ class ProjectRepository:
             model.exit_reputation_connector_half_life_requests = project.exit_reputation_connector_half_life_requests
             model.exit_reputation_bad_reports = project.exit_reputation_bad_reports
             model.exit_reputation_bad_share = project.exit_reputation_bad_share
+            model.exit_reputation_strength = project.exit_reputation_strength
+            model.exit_reputation_floor = project.exit_reputation_floor
             model.updated_at = utc_now()
             await self._session.flush()
         return self._to_domain(model) if model else None
@@ -429,6 +433,8 @@ class ProjectRepository:
             exit_reputation_connector_half_life_requests=model.exit_reputation_connector_half_life_requests,
             exit_reputation_bad_reports=model.exit_reputation_bad_reports,
             exit_reputation_bad_share=model.exit_reputation_bad_share,
+            exit_reputation_strength=model.exit_reputation_strength,
+            exit_reputation_floor=model.exit_reputation_floor,
             pending_deletion=bool(model.pending_deletion),
             created_at=model.created_at,
             updated_at=model.updated_at,

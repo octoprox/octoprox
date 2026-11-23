@@ -86,6 +86,28 @@ def _mixed(
     )
 
 
+def _two_dynamic(strength: int = 1, floor: int = 10) -> FeedBuilder:
+    """``_mixed``'s feed with a second Oxylabs dynamic connector ``dyn2`` (gateway row ``gw2``), the project at
+    ``strength`` and lowest factor ``floor`` percent."""
+    feed = _mixed()
+    feed.projects["p"] = feed.projects["p"].model_copy(
+        update={"exit_reputation_strength": strength, "exit_reputation_floor": floor}
+    )
+    return feed.add(
+        Connector(
+            id="dyn2", name="Dyn2", credential_id="oxy", credential_type="oxylabs", project_id="p",
+            config={"session_mode": "dynamic", "session_duration_minutes": 10},
+        ),
+        healthy(Proxy(
+            id="gw2", host="pr.oxylabs.io", port=7777, protocol=ProxyProtocol.HTTP,
+            username="customer-alice-sessid-probe1probe1-sesstime-10", password="{password}", connector_id="dyn2",
+            metadata={
+                "provider": "oxylabs", "proxy_type": "residential", "session_id": "probe1probe1", "dynamic_sessions": "true",
+            },
+        )),
+    )
+
+
 def _later(hours: float = 1) -> datetime:
     return utc_now() + timedelta(hours=hours)
 
@@ -485,6 +507,39 @@ class TestEffectiveWeights:
             await router.select_proxy_for_project("p", None, host)
 
         assert handed == [{"conn": True, "dyn": True}, {"conn": False, "dyn": False}, {"conn": False, "dyn": False}]
+
+    async def test_at_strength_1_a_dynamic_connector_keeps_its_own_factor_never_under_the_lowest(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        feed = _two_dynamic()
+        feed.factor("p", "dyn", "www.google.com", "", 0.88).factor("p", "dyn2", "www.google.com", "", 0.985)
+        feed.factor("p", "dyn", "www.bing.com", "", 0.05).factor("p", "dyn2", "www.bing.com", "", 1.0)
+        router = feed.router()
+
+        assert await _weights(router, monkeypatch, "www.google.com") == {"conn": 1.0, "dyn": 0.88, "dyn2": 0.985}
+        assert await _weights(router, monkeypatch, "www.bing.com") == {"conn": 1.0, "dyn": 0.1, "dyn2": 1.0}
+
+    async def test_at_strength_10_a_dynamic_connector_is_weighed_against_the_best_at_the_place(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        feed = _two_dynamic(strength=10)
+        feed.factor("p", "dyn", "www.google.com", "US", 0.88).factor("p", "dyn2", "www.google.com", "US", 0.985)
+        # In Germany the first is the better one; in France only it is judged.
+        feed.factor("p", "dyn", "www.google.com", "DE", 0.95).factor("p", "dyn2", "www.google.com", "DE", 0.5)
+        feed.factor("p", "dyn", "www.google.com", "FR", 0.88)
+        router = feed.router()
+
+        us = await _weights(router, monkeypatch, "www.google.com", LocationTarget(country="US"))
+        # The pool's rows name no country: it takes none of these requests.
+        assert us == pytest.approx({"dyn": 0.88 * (0.88 / 0.985) ** 9, "dyn2": 0.985})
+        # The split between the two moves from 47% / 53% at strength 1 to about 24% / 76%.
+        assert us["dyn"] / (us["dyn"] + us["dyn2"]) == pytest.approx(0.24, abs=0.01)
+        de = await _weights(router, monkeypatch, "www.google.com", LocationTarget(country="DE"))
+        # 0.5 against 0.95 to the ninth is far under the lowest factor.
+        assert de == pytest.approx({"dyn": 0.95, "dyn2": 0.1})
+        # Alone among the judged, a connector is the best: its own success; the other keeps its weight.
+        fr = await _weights(router, monkeypatch, "www.google.com", LocationTarget(country="FR"))
+        assert fr == pytest.approx({"dyn": 0.88, "dyn2": 1.0})
 
     async def test_round_robin_gives_a_site_its_split_whatever_the_requests_between(self) -> None:
         """Round robin's order is shared by every request of the project, so requests to a site whose weights exit

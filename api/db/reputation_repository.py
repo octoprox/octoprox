@@ -309,6 +309,7 @@ class ExitReputationRepository:
                 p.exit_reputation_connector_half_life_requests,
                 p.exit_reputation_bad_reports,
                 p.exit_reputation_bad_share,
+                p.exit_reputation_strength,
             )
             .where(any_of(p.id, sorted(project_ids)))
             .with_for_update(read=True, key_share=True)
@@ -323,6 +324,7 @@ class ExitReputationRepository:
                     row.exit_reputation_connector_half_life_requests,
                     row.exit_reputation_bad_reports,
                     row.exit_reputation_bad_share,
+                    row.exit_reputation_strength,
                 )
                 settings[row.id] = _Settings(policy, mode.avoids)
         return settings

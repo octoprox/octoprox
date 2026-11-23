@@ -242,6 +242,8 @@ class TestUpdate:
             exit_reputation_connector_half_life_requests=40,
             exit_reputation_bad_reports=2,
             exit_reputation_bad_share=75,
+            exit_reputation_strength=10,
+            exit_reputation_floor=5,
         )
 
         saved = await project_service.update(project.id, edit, actor)
@@ -253,7 +255,9 @@ class TestUpdate:
             saved.exit_reputation_connector_half_life_requests,
             saved.exit_reputation_bad_reports,
             saved.exit_reputation_bad_share,
-        ) == (ExitReputationMode.AVOID, 15, 6, 40, 2, 75)
+            saved.exit_reputation_strength,
+            saved.exit_reputation_floor,
+        ) == (ExitReputationMode.AVOID, 15, 6, 40, 2, 75, 10, 5)
         assert await stored(sessions, project.id) == saved
         assert await queued_job_keys(redis_client, JobKind.REATTRIBUTE) == []
         *_, entry = await audit_entries(sessions, project.id)
@@ -264,6 +268,8 @@ class TestUpdate:
             "exit_reputation_connector_half_life_requests": [100, 40],
             "exit_reputation_bad_reports": [1, 2],
             "exit_reputation_bad_share": [50, 75],
+            "exit_reputation_strength": [1, 10],
+            "exit_reputation_floor": [10, 5],
         }
 
 
