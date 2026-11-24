@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { startTransition, useEffect, useState, type ReactNode } from 'react'
-import { NavLink as RouterNavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router'
+import { Link as RouterLink, NavLink as RouterNavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
   BarChart3, Server, Link2, KeyRound, Eye, Settings as SettingsIcon, ChevronLeft, ChevronRight,
   ArrowLeft, User as UserIcon, Palette, Users as UsersIcon, DatabaseBackup, Puzzle,
-  Activity, Globe, Router, Shield, ShieldCheck, Target, LogIn, Plug, AlertTriangle, Flag, History, Bell,
+  Activity, Globe, Router, Shield, ShieldCheck, Target, LogIn, Plug, AlertTriangle, Flag, History, Bell, Link as LinkIcon, Share2,
 } from 'lucide-react'
 import octoproxLogo from '../../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../../assets/logos/octoprox_horizontal_dark.svg'
@@ -17,12 +17,14 @@ import { useProject } from '../../contexts/ProjectContext'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useNavigationGuardContext } from '../../contexts/NavigationGuardContext'
+import { useToast } from '../../contexts/ToastContext'
+import { useDocumentTitle, useUrlParams } from '../../hooks/useUrlState'
 import { useScrollEdges } from '../../hooks/useScrollEdges'
 import { useProjectAttention } from '../../hooks/useProjectAttention'
 import { fetchProjectMetrics, fetchProjectScalingMetrics, poolBreakdown } from '../../api/client'
 import { popSettingsOrigin, setSettingsOrigin } from '../../utils/settingsOrigin'
 import { HelpMenu } from '../HelpMenu'
-import { ProjectPanel, type ProjectSettingsTab } from '../ProjectForm'
+import { PROJECT_SETTINGS_TABS, ProjectPanel, type ProjectSettingsTab, type SettingsTab } from '../ProjectForm'
 import { NewVersionBanner } from '../NewVersion'
 import { LicenseBanner } from '../license/LicenseBanner'
 import { UserMenu } from '../UserMenu'
@@ -94,10 +96,16 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
   // The Overview card's query: its unmuted problems light the Overview entry. Warnings never do.
   const { data: attention } = useProjectAttention(area ? undefined : projectId)
   const problems = attention?.problems ?? 0
-  // Project settings belong to the page they were opened on: leaving it closes them.
-  const [projectSettingsOn, setProjectSettingsOn] = useState<string | null>(null)
-  // The tab a page's link asked the settings to open on, a new object each time so an open panel switches again.
-  const [projectSettingsTab, setProjectSettingsTab] = useState<{ tab: ProjectSettingsTab } | null>(null)
+  // Project settings open on a tab in `settings=`, so a link opens them there. They belong to the page they were
+  // opened on: leaving it drops the query and closes them.
+  const [params, setUrl] = useUrlParams()
+  const settingsParam = params.get('settings')
+  const settingsTab = !area && (PROJECT_SETTINGS_TABS as readonly (string | null)[]).includes(settingsParam) ? settingsParam as SettingsTab : null
+  // A tab that is not one is dropped, as other views drop a value they do not know.
+  const unknownSettings = !area && settingsParam !== null && !settingsTab
+  useEffect(() => {
+    if (unknownSettings) setUrl({ settings: null })
+  }, [unknownSettings, setUrl])
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     if (isNarrow()) return true // a phone never opens on the overlay
     try { return localStorage.getItem(COLLAPSED_KEY) === '1' } catch { return false }
@@ -126,9 +134,6 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
     if (isNarrow()) setCollapsed(true)
   }, [location.key])
 
-  // Leaving the page closes project settings for good, so coming back to it does not reopen them.
-  useEffect(() => { setProjectSettingsOn(null) }, [location.pathname])
-
   // Keep the project context in sync with the URL.
   useEffect(() => {
     if (projectId) setSelectedProjectId(projectId)
@@ -137,18 +142,20 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
   const base = `/projects/${projectId}`
 
   const enterAdmin = () => {
-    setSettingsOrigin(location.pathname)
+    setSettingsOrigin(location.pathname + location.search)
     navigate('/admin')
   }
   // Back to the page the area was entered from; without one, the project open before or the project list.
   // Popped only once leaving is confirmed, so cancelling the unsaved-changes prompt keeps it.
   const leaveArea = () => guard.request(() => routerNavigate(popSettingsOrigin() || (selectedProjectId ? `/projects/${selectedProjectId}/overview` : '/')))
 
-  // The same page in the other project. Query string and hash belong to the old project.
+  // The same page in the other project, on the same tab. The rest of the query (an open panel, a site, a filter) and
+  // the hash belong to the old project.
   // The router applies a navigation as a transition; the new id joins it, so no page renders it under the old URL.
   const switchProject = (id: string) => guard.request(() => startTransition(() => {
     setSelectedProjectId(id)
-    routerNavigate(inProject(location.pathname, id))
+    const tab = params.get('tab')
+    routerNavigate(inProject(location.pathname, id) + (tab ? `?${new URLSearchParams({ tab })}` : ''))
   }))
   const showAllProjects = () => guard.request(() => startTransition(() => {
     setSelectedProjectId(null)
@@ -157,14 +164,16 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
   // Pages read the project from the context, so they wait until it holds the project in the URL (after a switch,
   // or Back into another project). A failed load clears the selection and lets the page show that.
   const projectPending = !!projectId && !!selectedProjectId && (selectedProjectId !== projectId || !selectedProject)
+  // Without a tab, an open panel stays where it is.
   const openProjectSettings = (tab?: ProjectSettingsTab) => {
     if (isNarrow()) setCollapsed(true) // the panel covers the screen on a phone
-    setProjectSettingsTab(tab ? { tab } : null)
-    setProjectSettingsOn(location.pathname)
+    setUrl({ settings: tab ?? settingsTab ?? 'general' })
   }
+  const closeProjectSettings = () => setUrl({ settings: null })
 
   const segment = location.pathname.split('/').filter(Boolean).pop() || ''
   const pageTitle = PAGE_TITLES[segment] || 'Overview'
+  useDocumentTitle(pageTitle, area ? AREAS[area].title : selectedProject?.name)
 
   return (
     <div className="h-screen flex bg-bg text-fg overflow-hidden">
@@ -259,7 +268,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
                 {canMutate && selectedProject && (
                   <>
                     <NavGroup label="Project" collapsed={collapsed} />
-                    <NavButton icon={<SettingsIcon />} label="Project settings" collapsed={collapsed} onClick={projectSettingsOn === location.pathname ? () => setProjectSettingsOn(null) : () => openProjectSettings()} active={projectSettingsOn === location.pathname} />
+                    <NavButton icon={<SettingsIcon />} label="Project settings" collapsed={collapsed} onClick={settingsTab ? closeProjectSettings : () => openProjectSettings()} active={!!settingsTab} />
                   </>
                 )}
               </>
@@ -287,7 +296,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
               <span className="text-fg-muted truncate">{AREAS[area].title}</span>
             ) : selectedProject ? (
               <>
-                <button onClick={() => navigate(`${base}/overview`)} className="text-fg-muted hover:text-fg truncate">{selectedProject.name}</button>
+                <RouterLink to={`${base}/overview`} onClick={(e) => { if (!guard.blocked) return; e.preventDefault(); navigate(`${base}/overview`) }} className="text-fg-muted hover:text-fg truncate">{selectedProject.name}</RouterLink>
                 {selectedProject.pending_deletion && <DeletingBadge className="py-0.5" />}
               </>
             ) : (
@@ -295,6 +304,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
             )}
             <ChevronRight className="w-3 h-3 text-fg-subtle flex-none" />
             <span className="font-semibold truncate">{pageTitle}</span>
+            <ShareLink />
           </div>
           {projectId && <PoolTicker projectId={projectId} />}
         </header>
@@ -305,7 +315,7 @@ export default function AppShell({ onLogout, area }: { onLogout: () => void; are
           ) : (
             // Keyed by project, so a switch starts the page afresh instead of keeping the old project's panels and filters.
             <ShellPanelContext
-              value={projectSettingsOn === location.pathname && selectedProject ? <ProjectPanel project={selectedProject} onClose={() => setProjectSettingsOn(null)} tabRequest={projectSettingsTab} /> : null}
+              value={settingsTab && canMutate && selectedProject ? <ProjectPanel project={selectedProject} tab={settingsTab} onTabChange={(tab) => setUrl({ settings: tab })} onClose={closeProjectSettings} /> : null}
             >
               <ProjectSettingsContext value={canMutate && selectedProject && !area ? openProjectSettings : null}>
                 <PageScopeContext value={area === 'admin' ? AREAS.admin.scope : null}>
@@ -390,6 +400,42 @@ function NavItem({ to, end, icon, label, collapsed, badge }: { to: string; end?:
           : <span className="flex-none text-[10.5px] font-semibold leading-none px-1.5 py-1 rounded-full bg-danger-soft text-danger tabular-nums" aria-hidden>{badge.count}</span>
       )}
     </RouterNavLink>
+  )
+}
+
+/**
+ * Shares the address of what is on screen, the view in it included: the share sheet on a touch screen, the clipboard
+ * elsewhere. An app installed to a home screen has no address bar to copy from. Browsers allow neither over plain http.
+ */
+function ShareLink() {
+  const toast = useToast()
+  const touch = window.matchMedia('(pointer: coarse)').matches
+  const viaSheet = touch && typeof navigator.share === 'function'
+  if (!viaSheet && !navigator.clipboard) return null
+  const share = async () => {
+    const url = window.location.href
+    if (viaSheet) {
+      try { await navigator.share({ title: document.title, url }) } catch { /* dismissed */ }
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(url)
+      toast.show('Link copied')
+    } catch {
+      toast.show('The link could not be copied', 'error')
+    }
+  }
+  const label = viaSheet ? 'Share a link to this view' : 'Copy a link to this view'
+  return (
+    <button
+      type="button"
+      onClick={share}
+      title={label}
+      aria-label={label}
+      className="flex-none p-1 rounded-md text-fg-subtle hover:text-fg hover:bg-surface-raised transition-colors pointer-coarse:w-11 pointer-coarse:h-11 pointer-coarse:-my-2.5 pointer-coarse:inline-flex pointer-coarse:items-center pointer-coarse:justify-center"
+    >
+      {viaSheet ? <Share2 className="w-3.5 h-3.5" /> : <LinkIcon className="w-3.5 h-3.5" />}
+    </button>
   )
 }
 

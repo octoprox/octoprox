@@ -1,13 +1,13 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState, type ReactNode } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { startTransition, useMemo, useState, type ReactNode } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Download, History, Lock } from 'lucide-react'
 import {
   exportActivity, fetchActivity, fetchAuditRetention, fetchProjects, updateAuditRetention,
-  type ActivityFilters, type AuditEntityType, type AuditEntry, type LicenseStatus,
+  type ActivityFilters, type AuditEntityType, type AuditEntry, type LicenseStatus, type UserListResponse,
 } from '../../api/client'
 import { AdminLink } from '../../components/AdminLink'
 import { AuditEntryView } from '../../components/audit/EntityHistory'
@@ -16,8 +16,10 @@ import { EnterpriseCard, type EnterpriseFeature } from '../../components/Enterpr
 import { UntilPicker } from '../../components/geo/UntilPicker'
 import { EmptyState, Page } from '../../components/layout/Page'
 import { RetentionCard } from '../../components/RetentionCard'
+import { GuardedLink } from '../../components/RouteList'
 import { useToast } from '../../contexts/ToastContext'
 import { activityReadable, isEnterprise, useEdition, useLicense } from '../../hooks/useEdition'
+import { useUrlParams } from '../../hooks/useUrlState'
 import { useWidth } from '../../hooks/useWidth'
 import { ACTION_LABELS, ENTITY_LABELS, actionLabel, actionTone, entityLabel } from '../../utils/audit'
 import { cn } from '../../utils/cn'
@@ -41,6 +43,26 @@ const ACTIVITY_FEATURES: EnterpriseFeature[] = [
 // Filters and their buttons: 16 px text and 44 px targets on touch screens, compact under a mouse.
 const FILTER_CONTROL = 'py-1.5 text-base pointer-fine:text-[13px] pointer-coarse:h-11'
 
+// The filters in the address, under the API's own names: Until is an ISO time.
+const FILTER_KEYS = ['entity_type', 'action', 'actor', 'project_id', 'until'] as const
+
+/** The applied filters a link carries. */
+function filtersFrom(params: URLSearchParams): ActivityFilters {
+  const filters: ActivityFilters = {}
+  for (const key of FILTER_KEYS) {
+    const value = params.get(key)
+    if (value) (filters as Record<string, string>)[key] = value
+  }
+  return filters
+}
+
+// The project page whose inspector shows each kind of entity, with its History.
+const PROJECT_PAGES: Partial<Record<AuditEntityType, string>> = {
+  connector: 'connectors', proxy: 'proxies', credential: 'credentials', wireguard_device: 'devices', openvpn_device: 'devices',
+}
+
+const HEADER_LINK = 'inline-flex items-center font-medium text-primary hover:brightness-110 pointer-coarse:min-h-11'
+
 /**
  * Administration, Activity: how long the audit log keeps its entries, for every edition, and with an Octoprox
  * Enterprise license every entry across the install, filtered, paged and exported. Enterprise endpoints are asked
@@ -50,7 +72,11 @@ export default function ActivitySection() {
   const toast = useToast()
   const editionQuery = useEdition()
   const licenseQuery = useLicense()
-  const [filters, setFilters] = useState<ActivityFilters>({})
+  // Filters as applied are in the address, so a link opens the same log; the open entry is not (there is no
+  // reading one entry back by its id).
+  const [params, setUrl] = useUrlParams()
+  const filters = useMemo(() => filtersFrom(params), [params])
+  const setFilters = (next: ActivityFilters) => setUrl(Object.fromEntries(FILTER_KEYS.map((key) => [key, next[key] ?? null])))
   const [selected, setSelected] = useState<AuditEntry | null>(null)
   const readable = isEnterprise(editionQuery.data) && licenseQuery.data !== undefined && activityReadable(licenseQuery.data)
 
@@ -146,7 +172,11 @@ function ActivityLog({ filters, onFiltersChange, selectedId, onSelect }: {
   selectedId: string | null
   onSelect: (entry: AuditEntry) => void
 }) {
-  const [pageIndex, setPageIndex] = useState(0)
+  // New filters start from the first page again, whether picked here or opened by a link.
+  const filtersKey = JSON.stringify(filters)
+  const [page, setPage] = useState({ filters: filtersKey, index: 0 })
+  const pageIndex = page.filters === filtersKey ? page.index : 0
+  const setPageIndex = (index: number) => setPage({ filters: filtersKey, index })
   const [pageSize, setPageSize] = useState(50)
   const [showRequestIds, setShowRequestIds] = useState(false)
   const [ref, width] = useWidth()
@@ -160,11 +190,12 @@ function ActivityLog({ filters, onFiltersChange, selectedId, onSelect }: {
   })
   const { data, isLoading, isPlaceholderData } = activityQuery
 
-  // Any filter starts from the first page again.
-  const change = (patch: ActivityFilters) => {
-    setPageIndex(0)
-    onFiltersChange({ ...filters, ...patch })
-  }
+  const change = (patch: ActivityFilters) => onFiltersChange({ ...filters, ...patch })
+  // The picker reads a link's Until once. When the address changes it otherwise (the sidebar's reset), it starts
+  // again; not for its own picks, so a preset stays shown as picked. A pick is noted in a transition, so it lands
+  // with the address the router writes for it.
+  const [until, setUntil] = useState({ value: filters.until, key: 0 })
+  if (until.value !== filters.until) setUntil({ value: filters.until, key: until.key + 1 })
 
   const columns: ColumnDef<DataTableFeatures, AuditEntry>[] = useMemo(() => [
     {
@@ -235,7 +266,8 @@ function ActivityLog({ filters, onFiltersChange, selectedId, onSelect }: {
             <option value="">All actions</option>
             {Object.entries(ACTION_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </Select>
-          <ActorFilter applied={filters.actor} onApply={(actor) => change({ actor })} />
+          {/* Keyed by the applied name, so the box shows a link's. */}
+          <ActorFilter key={filters.actor ?? ''} applied={filters.actor} onApply={(actor) => change({ actor })} />
           <Select
             aria-label="Project"
             value={filters.project_id ?? ''}
@@ -248,7 +280,11 @@ function ActivityLog({ filters, onFiltersChange, selectedId, onSelect }: {
           {/* The shared picker's presets are wider than a phone: they scroll sideways in their own row, not the page.
               On touch screens its buttons and fields get 44 px targets and 16 px text like the other filters. */}
           <div className="max-w-full overflow-x-auto [&_[role=radio]]:whitespace-nowrap pointer-coarse:[&_button]:min-h-11 pointer-coarse:[&_input]:h-11 pointer-coarse:[&_input]:text-base">
-            <UntilPicker onChange={(until) => change({ until })} />
+            <UntilPicker
+              key={until.key}
+              initial={filters.until}
+              onChange={(value) => startTransition(() => { setUntil({ value, key: until.key }); change({ until: value }) })}
+            />
           </div>
           <label className="inline-flex items-center gap-2 text-[13px] text-fg-muted pointer-coarse:min-h-11 @lg:ml-auto">
             <input type="checkbox" checked={showRequestIds} onChange={(e) => setShowRequestIds(e.target.checked)} className="w-4 h-4" />
@@ -329,16 +365,40 @@ function ProjectName({ id, names }: { id: string | null; names: Map<string, stri
   return name ? <span title={name}>{name}</span> : <span className="font-mono text-[11px] text-fg-subtle" title={`Deleted project ${id}`}>{id.slice(0, 8)}</span>
 }
 
-/** One entry beside the log: what it changed, and the request id that finds it in the server logs. */
+/**
+ * The page that shows an entry's entity with its History open; null for a kind with no page of its own, and for a
+ * deletion, whose entity is gone.
+ */
+function entityLink(entry: AuditEntry, service: boolean): string | null {
+  const id = entry.entity_id
+  if (!id || entry.action === 'deleted') return null
+  const history = (path: string, also?: Record<string, string>) => `${path}?${new URLSearchParams({ ...also, open: id, view: 'history' })}`
+  const page = PROJECT_PAGES[entry.entity_type]
+  if (page) return entry.project_id ? history(`/projects/${entry.project_id}/${page}`) : null
+  if (entry.entity_type === 'user') return history('/admin/users', service ? { tab: 'service' } : undefined)
+  if (entry.entity_type === 'provider') return history('/admin/providers')
+  if (entry.entity_type === 'project') return `/projects/${id}/overview?settings=history`
+  return null
+}
+
+/** Whether a user's entry is about a service account, as far as the entry (its kind, when created) or the users already loaded tell. */
+function aboutServiceAccount(entry: AuditEntry, users: UserListResponse | undefined): boolean {
+  return entry.changes.kind?.[1] === 'service' || !!users?.users.some((u) => u.id === entry.entity_id && u.kind === 'service')
+}
+
+/** One entry beside the log: what it changed, a link to what it changed, and the request id that finds it in the server logs. */
 function EntryPanel({ entry, onClose }: { entry: AuditEntry; onClose: () => void }) {
+  const queryClient = useQueryClient()
   const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects })
   const project = entry.project_id ? projects?.projects.find((p) => p.id === entry.project_id) : undefined
   const { type, name } = entityNames(entry)
   const tokenId = entry.details.auth_token_id
+  const href = entityLink(entry, entry.entity_type === 'user' && aboutServiceAccount(entry, queryClient.getQueryData<UserListResponse>(['users'])))
   return (
     <Inspector
       title={name ?? type}
       subtitle={name ? `${type} · ${formatDateTime(entry.created_at)}` : formatDateTime(entry.created_at)}
+      actions={href ? <GuardedLink to={href} className={HEADER_LINK}>{type} history</GuardedLink> : undefined}
       onClose={onClose}
     >
       <AuditEntryView entry={entry} />

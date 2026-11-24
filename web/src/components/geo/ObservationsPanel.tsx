@@ -13,6 +13,7 @@ import { Alert, Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
 import { HeaderWithTip, TIPS, VerdictCell, countryVerdict, placeLabel } from './columns'
 import { UntilPicker } from './UntilPicker'
+import { filterPatch, filterValues, linkedFilters, useDropGoneConnector, type FilterValues } from './headerFilters'
 import { AdminLink } from '../AdminLink'
 
 const SOURCE_OPTIONS = ['discovery', 'health_check', 'geo_lookup', 'manual', 'preflight'].map((s) => ({ value: s, label: s.replace('_', ' ') }))
@@ -23,21 +24,29 @@ const VERDICT_OPTIONS: { value: ObservationVerdict; label: string }[] = [
   { value: 'no_claim', label: 'no claim' },
 ]
 
-/** The header filters, keyed by column id, as the server's query parameters. */
-function toServerFilters(columnFilters: ColumnFiltersState): ObservationFilters {
-  const value = (id: string) => {
-    const v = columnFilters.find((f) => f.id === id)?.value
-    return typeof v === 'string' && v.trim() ? v.trim() : undefined
-  }
+const HEADER_FILTERS = ['connector', 'source', 'ip', 'claimed', 'resolved', 'verdict', 'proxy_id'] as const
+/** The header filters by column id and Until (an ISO time), as a link carries them too. */
+export const OBSERVATION_FILTERS = [...HEADER_FILTERS, 'until'] as const
+// A link's select filters hold only what their selects offer.
+const LINKED_CHOICES = { verdict: VERDICT_OPTIONS.map((o) => o.value), source: SOURCE_OPTIONS.map((o) => o.value) }
+
+/** The applied header filters, keyed by column id, as the server's query parameters. */
+function toServerFilters(values: FilterValues): ObservationFilters {
   return {
-    connector_id: value('connector'),
-    source: value('source'),
-    ip: value('ip'),
-    claimed_country: value('claimed'),
-    resolved_country: value('resolved'),
-    verdict: value('verdict') as ObservationVerdict | undefined,
-    proxy_id: value('proxy_id'),
+    connector_id: values.connector,
+    source: values.source,
+    ip: values.ip,
+    claimed_country: values.claimed,
+    resolved_country: values.resolved,
+    verdict: values.verdict as ObservationVerdict | undefined,
+    proxy_id: values.proxy_id,
   }
+}
+
+/** A linked Until as an ISO time, or undefined (now) when it does not read as one. */
+function linkedUntil(value: string | undefined): string | undefined {
+  const at = value ? Date.parse(value) : NaN
+  return Number.isNaN(at) ? undefined : new Date(at).toISOString()
 }
 
 /**
@@ -52,24 +61,32 @@ function toServerFilters(columnFilters: ColumnFiltersState): ObservationFilters 
  * when `projectId` is given; across every project, with a project filter
  * and the project shown under the connector, otherwise.
  */
-export function ObservationsPanel({ projectId }: { projectId?: string }) {
+export function ObservationsPanel({ projectId, initialFilters, onFilters }: {
+  projectId?: string
+  /** The header filters and Until a link opened the log with, by column id (OBSERVATION_FILTERS); read once. */
+  initialFilters?: Record<string, string>
+  /** Hears the filters once applied, each of OBSERVATION_FILTERS set or null, not every keystroke. */
+  onFilters?: (applied: Record<string, string | null>) => void
+}) {
   const [projectFilter, setProjectFilter] = useState('')
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>(() => linkedFilters(initialFilters, HEADER_FILTERS, LINKED_CHOICES))
   const [pageIndex, setPageIndex] = useState(0)
   const [pageSize, setPageSize] = useState(50)
-  const [until, setUntil] = useState<string | undefined>()
+  const [until, setUntil] = useState<string | undefined>(() => linkedUntil(initialFilters?.until))
   const scope = projectId ?? (projectFilter || undefined)
 
-  // Typed filters should not fire a request per keystroke.
-  const [applied, setApplied] = useState<ObservationFilters>({})
+  // Typed filters should not fire a request per keystroke. A link's apply at once: through the debounce the log
+  // would load unfiltered first.
+  const [applied, setApplied] = useState<FilterValues>(() => filterValues(columnFilters))
   useEffect(() => {
-    const handle = setTimeout(() => setApplied(toServerFilters(columnFilters)), 300)
+    const handle = setTimeout(() => setApplied(filterValues(columnFilters)), 300)
     return () => clearTimeout(handle)
   }, [columnFilters])
   // Any filter change starts from the first page again.
   useEffect(() => { setPageIndex(0) }, [scope, applied, pageSize, until])
+  useEffect(() => { onFilters?.({ ...filterPatch(applied, HEADER_FILTERS), until: until ?? null }) }, [applied, until])
 
-  const filters: ObservationFilters = { ...applied, project_id: scope, until }
+  const filters: ObservationFilters = { ...toServerFilters(applied), project_id: scope, until }
   // A page the server called off for its time limit is not asked for again
   // until the filters or the page change: each try reads for the whole limit.
   const { data, isLoading, isPlaceholderData, isError, error } = useQuery({
@@ -94,6 +111,12 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
     // Keyed on when each query last delivered data: the query objects change identity every render.
     [connectorQueries.map((q) => q.dataUpdatedAt).join()],
   )
+  const connectorsLoaded = (!!scope || !!projects) && connectorQueries.every((q) => q.isSuccess && !q.isFetching)
+  useDropGoneConnector(initialFilters?.connector?.trim(), connectorsLoaded ? connectorOptions : null, () => {
+    const next = columnFilters.filter((f) => f.id !== 'connector')
+    setColumnFilters(next)
+    setApplied(filterValues(next))
+  })
 
   const columns: ColumnDef<DataTableFeatures, IpObservation>[] = useMemo(() => [
     { accessorKey: 'observed_at', header: 'When', size: 130, enableSorting: false, cell: ({ getValue }) => <span title={formatDateTime(getValue<string>())}>{relativeTime(getValue<string>())}</span> },
@@ -159,9 +182,13 @@ export function ObservationsPanel({ projectId }: { projectId?: string }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <p className="text-xs text-fg-muted">Every time an exit IP was seen behind a proxy, newest first. Raw rows follow the retention window set in <AdminLink page="geo">IP attribution</AdminLink>, unless a project sets its own. Country and IP filters match exactly; Until shows the log up to an earlier moment.</p>
-        <div className="flex items-center gap-2 flex-wrap">
-          <UntilPicker onChange={setUntil} />
+        <p className="text-xs text-fg-muted">Every time an exit IP was seen behind a proxy, newest first. Raw rows follow the retention window set in <AdminLink page="geo" query="tab=policy">IP attribution</AdminLink>, unless a project sets its own. Country and IP filters match exactly; Until shows the log up to an earlier moment.</p>
+        <div className="flex items-center gap-2 flex-wrap max-w-full">
+          {/* The picker's presets are wider than a phone: they scroll sideways in their own row, not the page. On touch
+              screens its buttons and fields get 44 px targets and 16 px text, as on Activity. */}
+          <div className="max-w-full overflow-x-auto [&_[role=radio]]:whitespace-nowrap pointer-coarse:[&_button]:min-h-11 pointer-coarse:[&_input]:h-11 pointer-coarse:[&_input]:text-base">
+            <UntilPicker initial={until} onChange={setUntil} />
+          </div>
           {!projectId && (
             <Select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)} className="w-44" aria-label="Project">
               <option value="">All projects</option>

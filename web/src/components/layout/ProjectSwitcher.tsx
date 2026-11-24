@@ -122,7 +122,7 @@ export function ProjectSwitcher({ collapsed, projectId, label, onSwitch, onAllPr
           ) : shown.length === 0 ? (
             <div className="px-3 py-2 text-fg-muted">{needle ? 'No project matches' : 'No projects yet'}</div>
           ) : shown.map((p) => (
-            <ProjectItem key={p.id} project={p} problems={problems.get(p.id)} current={p.id === projectId} onPick={() => pick(p)} />
+            <ProjectItem key={p.id} project={p} problems={problems.get(p.id)} current={p.id === projectId} onPick={() => pick(p)} onFollow={menu.close} />
           ))}
         </div>
 
@@ -139,29 +139,30 @@ export function ProjectSwitcher({ collapsed, projectId, label, onSwitch, onAllPr
 
 const itemClasses = 'w-full flex items-center gap-2.5 px-3 h-8 pointer-coarse:h-11 text-left outline-none transition-colors hover:bg-surface-raised focus-visible:bg-surface-raised'
 
-function ProjectItem({ project, problems, current, onPick }: { project: ProjectSummary; problems: number | undefined; current: boolean; onPick: () => void }) {
+/**
+ * One project: the row picks it, and its problem count, a link of its own beside the row's button rather than inside
+ * it, opens its Overview's Needs attention panel. The row takes a press anywhere outside the count as the button's.
+ */
+function ProjectItem({ project, problems, current, onPick, onFollow }: { project: ProjectSummary; problems: number | undefined; current: boolean; onPick: () => void; onFollow: () => void }) {
   const healthy = project.healthy_proxy_count
   const total = project.proxy_count
   return (
-    <button
-      type="button"
-      role="menuitemradio"
-      aria-checked={current}
-      onClick={onPick}
-      className={cn(itemClasses, current ? 'text-fg font-medium' : 'text-fg-muted hover:text-fg')}
-    >
-      <Check className={cn('w-3.5 h-3.5 flex-none text-primary', !current && 'invisible')} />
-      <span className="truncate flex-1" title={project.name}>{project.name}</span>
-      {project.pending_deletion ? <DeletingBadge className="py-0.5" /> : (
+    <div onClick={onPick} className={cn(itemClasses, 'has-[button:focus-visible]:bg-surface-raised', current ? 'text-fg font-medium' : 'text-fg-muted hover:text-fg')}>
+      <button type="button" role="menuitemradio" aria-checked={current} className="flex-1 min-w-0 self-stretch flex items-center gap-2.5 text-left outline-none">
+        <Check className={cn('w-3.5 h-3.5 flex-none text-primary', !current && 'invisible')} />
+        <span className="truncate flex-1" title={project.name}>{project.name}</span>
+        {project.pending_deletion ? <DeletingBadge className="py-0.5" /> : <span className="sr-only">, {healthy} of {total} proxies healthy</span>}
+      </button>
+      {!project.pending_deletion && (
         <>
-          <ProblemCount count={problems} />
-          <span className="flex-none inline-flex items-center gap-1.5 text-xs text-fg-subtle tabular-nums" title={`${healthy} of ${total} proxies healthy`}>
+          <ProblemCount count={problems} projectId={project.id} role="menuitem" onFollow={onFollow} />
+          <span className="flex-none inline-flex items-center gap-1.5 text-xs text-fg-subtle tabular-nums" title={`${healthy} of ${total} proxies healthy`} aria-hidden>
             <span className={cn('w-2 h-2 rounded-full', total === 0 ? 'bg-fg-subtle/50' : healthy === total ? 'bg-success' : healthy === 0 ? 'bg-danger' : 'bg-warning')} />
             {healthy}/{total}
           </span>
         </>
       )}
-    </button>
+    </div>
   )
 }
 

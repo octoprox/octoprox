@@ -214,13 +214,16 @@ class TestPool:
         line = _one(scene.lines())
         assert (line.key, line.severity, line.subject) == ("pool_no_routable", Severity.PROBLEM, "No proxy can take requests")
         assert line.text == ": 4 unhealthy, 2 quarantined by rate limits. Requests fail until one recovers."
+        # Degraded and quarantined rows too: one status filter would hide them.
         assert (line.link, line.action) == ("proxies", "Proxies")
 
     def test_none_quarantined_leaves_the_quarantine_out(self) -> None:
         scene = Scene()
         scene.proxies(scene.connector("Static"), 2, ProxyStatus.UNHEALTHY)
 
-        assert _one(scene.lines()).text == ": 2 unhealthy. Requests fail until one recovers."
+        line = _one(scene.lines())
+        assert line.text == ": 2 unhealthy. Requests fail until one recovers."
+        assert (line.link, line.action) == ("proxies?status=unhealthy", "Proxies")
 
     def test_every_proxy_quarantined_says_clients_are_told_to_retry(self) -> None:
         scene = Scene()
@@ -231,6 +234,7 @@ class TestPool:
         assert (line.subject, line.text) == (
             "Every proxy", " is quarantined by its rate limit, so clients are told to retry later."
         )
+        assert (line.link, line.action) == ("proxies?status=quarantined", "Proxies")
 
     def test_every_connector_over_its_traffic_limit(self) -> None:
         scene = Scene()
@@ -287,6 +291,7 @@ class TestPool:
             line = found[0]
             assert (line.subject, line.severity) == (f"{unhealthy} of {unhealthy + healthy} proxies", Severity.WARNING)
             assert line.text == " keep failing health checks and get no requests, most on Mixed."
+            assert (line.link, line.action) == ("proxies?status=unhealthy", "Proxies")
 
     def test_the_share_leaves_out_a_connector_with_no_healthy_proxy_its_own_line_names(self) -> None:
         scene = Scene()
@@ -546,7 +551,7 @@ class TestRefusals:
             line = found[0]
             assert (line.key, line.kind) == ("refusals:no_proxy_available", AttentionKind.REFUSALS)
             assert (line.subject, line.link, line.action) == (
-                f"{refused} requests ({round(refused / 10)}%)", "failures", "Failures"
+                f"{refused} requests ({round(refused / 10)}%)", "failures?kind=no_proxy_available", "Failures"
             )
             assert line.text == (
                 " in the last 15 minutes failed: no proxy matched the country, city or proxy they asked for."
@@ -747,6 +752,7 @@ class TestTraffic:
             line = found[0]
             assert (line.text, line.severity) == (text, Severity.WARNING)
             assert line.when is not None and (line.when.kind, line.when.at) == ("resets", usage.period_end)
+            assert (line.link, line.action) == (f"connectors?open={connector.id}&config=traffic", "Open connector")
 
     def test_a_terabyte_limit_reads_in_terabytes(self) -> None:
         scene = Scene()
@@ -781,6 +787,7 @@ class TestExitLocations:
             assert found[0].text == (
                 f": 10 of {inside + 13} proxies are in countries the connector does not list, so they take no requests."
             )
+            assert (found[0].link, found[0].action) == (f"locations?tab=accuracy&open={connector.id}", "Exit locations")
         # Three at least, whatever the share.
         scene = Scene()
         connector = scene.connector("German", config={"countries": ["DE"]})
@@ -811,6 +818,7 @@ class TestExitLocations:
         found = scene.lines(AttentionKind.EXITS_CONTRADICTED)
 
         assert [line.text for line in found] == ([text] if text else [])
+        assert [line.link for line in found] == ([f"locations?tab=accuracy&open={connector.id}"] if text else [])
 
     def test_a_quarter_of_the_checked_proxies_at_least(self) -> None:
         scene = Scene(location_contradicted=ContradictedAction.REFUSE)

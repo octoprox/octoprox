@@ -222,9 +222,22 @@ function AlertCell({ alert, compact }: { alert: AlertEntry; compact: boolean }) 
 /** The subject search, applied on Enter or Apply rather than on every key, and cleared in one tap. */
 function SubjectFilter({ applied, onApply }: { applied: string | undefined; onApply: (q: string | undefined) => void }) {
   const [text, setText] = useState(applied ?? '')
+  // The box follows a search set from outside it: a link, or the sidebar entry resetting the page. Its own, which the
+  // address shows a moment later, leaves what was typed meanwhile.
+  const [shownFor, setShownFor] = useState(applied)
+  const [sent, setSent] = useState<{ q: string | undefined } | null>(null)
+  if (shownFor !== applied) {
+    setShownFor(applied)
+    setSent(null)
+    if (!(sent && sent.q === applied)) setText(applied ?? '')
+  }
+  const apply = (q: string | undefined) => {
+    setSent({ q })
+    onApply(q)
+  }
   const typed = text.trim() || undefined
   return (
-    <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); onApply(typed) }}>
+    <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); apply(typed) }}>
       <Input
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -244,7 +257,7 @@ function SubjectFilter({ applied, onApply }: { applied: string | undefined; onAp
           type="button"
           size="icon"
           variant="ghost"
-          onClick={() => { setText(''); onApply(undefined) }}
+          onClick={() => { setText(''); apply(undefined) }}
           aria-label="Clear the subject search"
           title="Clear the subject search"
           className="flex-none pointer-coarse:w-11 pointer-coarse:h-11"

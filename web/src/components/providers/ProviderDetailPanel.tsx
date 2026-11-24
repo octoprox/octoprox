@@ -1,11 +1,11 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Copy, Download, ExternalLink } from 'lucide-react'
 import { exportProviderYaml, fetchProvider, ProviderSummary } from '../../api/client'
 import { useProviders } from '../../hooks/useProviders'
+import { useUrlTab } from '../../hooks/useUrlState'
 import { Badge, Button, Inspector, InspectorSection, KeyValue, QueryContent, Tabs, INSPECTOR_WIDTH_WIDE } from '../ui'
 import { ProviderLogo } from '../ProviderLogo'
 import { TestPanel } from './TestPanel'
@@ -29,7 +29,6 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
   const detailQuery = useQuery({ queryKey: ['provider', provider.id], queryFn: () => fetchProvider(provider.id) })
   const { data: detail } = detailQuery
   const { presets } = useProviders()
-  const [tab, setTab] = useState<Tab>('details')
   const testable = provider.kind === 'descriptor'
   const custom = provider.source === 'custom'
   const tabs: { id: Tab; label: string }[] = [
@@ -37,6 +36,8 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
     ...(testable ? [{ id: 'test' as const, label: 'Test' }] : []),
     ...(custom ? [{ id: 'history' as const, label: 'History' }] : []),
   ]
+  // In view=, so a link opens it; one this provider lacks reads as Details.
+  const [tab, setTab, reveal] = useUrlTab(tabs.map((t) => t.id), 'details', 'view')
   const download = async () => {
     const yaml = await exportProviderYaml(provider.id)
     const blob = new Blob([yaml], { type: 'application/yaml' })
@@ -52,15 +53,16 @@ export function ProviderDetailPanel({ provider, onClose, onDuplicate, onEdit }: 
       onClose={onClose}
       width={INSPECTOR_WIDTH_WIDE}
       footer={(
-        <>
-          {provider.kind === 'descriptor' && <Button type="button" variant="outline" size="sm" onClick={download}><Download className="w-3.5 h-3.5" /> Export YAML</Button>}
+        // Wraps on a phone, where the three buttons do not fit on one line.
+        <div className="flex flex-wrap items-center gap-2 w-full">
+          {provider.kind === 'descriptor' && <Button type="button" variant="outline" size="sm" onClick={download} className="pointer-coarse:h-11"><Download className="w-3.5 h-3.5" /> Export YAML</Button>}
           <span className="flex-1" />
-          {provider.kind === 'descriptor' && detail?.spec && <Button type="button" variant="outline" size="sm" onClick={() => onDuplicate(detail.spec!)}><Copy className="w-3.5 h-3.5" /> Duplicate as custom</Button>}
-          {onEdit && <Button type="button" size="sm" onClick={onEdit}>Edit</Button>}
-        </>
+          {provider.kind === 'descriptor' && detail?.spec && <Button type="button" variant="outline" size="sm" onClick={() => onDuplicate(detail.spec!)} className="pointer-coarse:h-11"><Copy className="w-3.5 h-3.5" /> Duplicate as custom</Button>}
+          {onEdit && <Button type="button" size="sm" onClick={onEdit} className="pointer-coarse:h-11">Edit</Button>}
+        </div>
       )}
     >
-      {tabs.length > 1 && <Tabs<Tab> tabs={tabs} active={tab} onChange={setTab} size="sm" className={custom ? 'pointer-coarse:*:min-h-11' : undefined} />}
+      {tabs.length > 1 && <Tabs<Tab> tabs={tabs} active={tab} onChange={setTab} reveal={reveal} size="sm" className={custom ? 'pointer-coarse:*:min-h-11' : undefined} />}
       {tab === 'test' && testable ? (
         <QueryContent query={detailQuery} what="the provider">
           {(loaded) => loaded.spec && <TestPanel key={provider.id} spec={loaded.spec} presets={presets} stored={provider} />}

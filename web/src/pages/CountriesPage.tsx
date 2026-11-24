@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Link } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { AlertTriangle, Flag, Plus } from 'lucide-react'
@@ -15,6 +15,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useNavigationGuard } from '../contexts/NavigationGuardContext'
 import { invalidateAttention } from '../hooks/useProjectAttention'
+import { useUrlParam } from '../hooks/useUrlState'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { RichSelect } from '../components/RichSelect'
@@ -86,8 +87,12 @@ export default function CountriesPage() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
   const { canMutate } = useAuth()
-  const [searchParams, setSearchParams] = useSearchParams()
-  const [panel, setPanel] = useState<string | 'new' | null>(null)
+  // The open country is in `country=`; Add country stays here, since a link never opens a picker.
+  const [linked, setCountry] = useUrlParam('country')
+  const wanted = linked?.toUpperCase() === 'UK' ? 'GB' : linked?.toUpperCase()
+  const opened = wanted && COUNTRY_CODES.includes(wanted) ? wanted : null
+  const [adding, setAdding] = useState(false)
+  const panel = opened ?? (adding ? 'new' : null)
 
   const query = useQuery({
     queryKey: ['countries', selectedProjectId],
@@ -96,16 +101,13 @@ export default function CountriesPage() {
   })
   const overview = query.data
 
-  // Deep link: ?country=<code>, UK read as GB like the server does; anything that is no country code is ignored.
+  // UK is read as GB like the server does, and the address keeps the code as read; anything that is no country code
+  // is dropped from it.
   useEffect(() => {
-    const code = searchParams.get('country')
-    if (code) {
-      const wanted = code.toUpperCase() === 'UK' ? 'GB' : code.toUpperCase()
-      if (COUNTRY_CODES.includes(wanted)) setPanel(wanted)
-      searchParams.delete('country')
-      setSearchParams(searchParams, { replace: true })
-    }
-  }, [searchParams])
+    if (linked !== null && linked !== opened) setCountry(opened)
+  }, [linked, opened, setCountry])
+  // An opened country, by a click here or a link, closes Add country, so the two never both hold the panel.
+  useEffect(() => { if (opened) setAdding(false) }, [opened])
 
   const rows: CountryRow[] = useMemo(() => (overview?.countries ?? []).map(({ country, routes }) => ({
     code: country,
@@ -162,8 +164,8 @@ export default function CountriesPage() {
       code={panel === 'new' ? null : panel}
       overview={overview}
       canMutate={canMutate}
-      onClose={() => setPanel(null)}
-      onPick={(code) => setPanel(code)}
+      onClose={panel === 'new' ? () => setAdding(false) : () => setCountry(null)}
+      onPick={(code) => setCountry(code)}
       onSaved={onSaved}
     />
   ) : null
@@ -173,7 +175,7 @@ export default function CountriesPage() {
       title="Countries"
       count={overview?.countries.length}
       subtitle="Which connectors serve each country, and where a request naming it goes now"
-      actions={canMutate && overview && overview.connectors.length > 0 ? <Button size="sm" onClick={() => setPanel('new')}><Plus className="w-3.5 h-3.5" /> Add country</Button> : undefined}
+      actions={canMutate && overview && overview.connectors.length > 0 ? <Button size="sm" onClick={() => { setCountry(null); setAdding(true) }}><Plus className="w-3.5 h-3.5" /> Add country</Button> : undefined}
       panel={panelNode}
     >
       <QueryContent query={query} what="the countries">
@@ -204,8 +206,8 @@ export default function CountriesPage() {
               columns={columns}
               data={rows}
               getRowId={(row) => row.code}
-              onRowClick={(row) => setPanel(row.code)}
-              activeRowId={panel && panel !== 'new' ? panel : null}
+              onRowClick={(row) => setCountry(row.code)}
+              activeRowId={opened}
               emptyMessage="No connector lists, reserves or excludes a country, or has an exit in one yet."
             />
           </>

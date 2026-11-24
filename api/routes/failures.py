@@ -10,7 +10,7 @@ import builtins
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
 from api.core import utc_now
@@ -271,6 +271,24 @@ async def failure_summary(
         ],
         enabled=settings_of(request).failure_log_enabled,
     )
+
+
+# After /head and /summary, so neither is read as an example's id.
+@router.get("/{failure_id}", response_model=FailureRecord)
+async def get_failure(
+    request: Request,
+    project_id: str,
+    failure_id: Annotated[
+        str, Path(pattern=r"^[a-z_]+:[0-9a-f]+$", description="The example's id, as the list gives it")
+    ],
+) -> FailureRecord:
+    """One example by its id, for a link to it; 404 once the log no longer keeps it."""
+    await require_project(request, project_id)
+    kind, _, fingerprint = failure_id.partition(":")
+    row = await redis_client_of(request).get_failure(project_id, kind, fingerprint)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Failure example not found")
+    return _record(row)
 
 
 @router.delete("")

@@ -20,6 +20,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { formatRangeTick, rangeTicks, useTimeRange } from '../contexts/TimeRangeContext'
 import { useToast } from '../contexts/ToastContext'
+import { useDropGone, useUrlParam, useUrlTab } from '../hooks/useUrlState'
 import { AdminLink } from '../components/AdminLink'
 import { EntityHistory } from '../components/audit/EntityHistory'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
@@ -163,10 +164,9 @@ const ADAPTERS: Record<Protocol, Adapter> = {
 }
 const PROTOCOLS: Protocol[] = ['wireguard', 'openvpn']
 
-type PanelState = { kind: 'edit'; protocol: Protocol; id: string } | { kind: 'new' } | null
-
 /** What an open device shows: its details, or its History in their place. */
 type DeviceView = 'details' | 'history'
+const DEVICE_VIEWS: readonly DeviceView[] = ['details', 'history']
 
 /**
  * The project's tunnel devices: anything that cannot speak to a proxy (TVs,
@@ -179,8 +179,16 @@ export default function DevicesPage() {
   const { selectedProjectId } = useProject()
   const { canMutate, isAdmin } = useAuth()
   const toast = useToast()
-  const [panel, setPanel] = useState<PanelState>(null)
+  // The open device and its tab are in the address, so a link opens them; the add device form is not. Ids are
+  // unique across both tunnels, so the id alone finds the device.
+  const [openId, setOpenId] = useUrlParam('open')
+  const [view, setView, viewReveal] = useUrlTab(DEVICE_VIEWS, 'details', 'view')
+  const [adding, setAdding] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<Device | null>(null)
+  const openPanel = (id: string | null) => setOpenId(id, { view: null })
+  const openNew = () => { setAdding(true); openPanel(null) }
+  // A device opened by a link, or just added, replaces the add device form.
+  useEffect(() => { if (openId) setAdding(false) }, [openId])
 
   // One list per protocol, merged below; sessions and counters move, so both poll.
   const wireguard = useQuery({
@@ -202,6 +210,12 @@ export default function DevicesPage() {
     [wireguard.data, openvpn.data],
   )
   const unconfigured = lists.filter((l) => l.query.data && !l.query.data.serverConfigured).map((l) => l.protocol)
+  const openDevice = openId ? devices.find((d) => d.id === openId) ?? null : null
+  useDropGone(
+    ['open', 'view'],
+    !!openId && !!wireguard.data && !!openvpn.data && !wireguard.isFetching && !openvpn.isFetching && !openDevice,
+    'That device no longer exists.',
+  )
   const invalidate = (protocol?: Protocol) =>
     queryClient.invalidateQueries({ queryKey: protocol ? ['tunnel-devices', protocol, selectedProjectId] : ['tunnel-devices'] })
 
@@ -209,7 +223,7 @@ export default function DevicesPage() {
     mutationFn: (device: Device) => ADAPTERS[device.protocol].remove(selectedProjectId!, device.id),
     onSuccess: (_r, device) => {
       invalidate(device.protocol)
-      if (panel?.kind === 'edit' && panel.id === device.id) setPanel(null)
+      if (openId === device.id) openPanel(null)
       setPendingDelete(null)
       toast.show('Device removed')
     },
@@ -292,25 +306,38 @@ export default function DevicesPage() {
   ], [canMutate])
 
   let panelNode: React.ReactNode = null
-  if (panel?.kind === 'edit') {
-    const device = devices.find((d) => d.protocol === panel.protocol && d.id === panel.id)
-    panelNode = device ? (
+  // A linked device shows once both lists are in and one holds it, or the link is dropped; meanwhile no add device
+  // form shows.
+  if (openDevice) {
+    panelNode = (
       <DevicePanel
-        key={`${device.protocol}:${device.id}`}
-        device={device}
-        serverConfigured={!unconfigured.includes(device.protocol)}
+        key={`${openDevice.protocol}:${openDevice.id}`}
+        device={openDevice}
+        serverConfigured={!unconfigured.includes(openDevice.protocol)}
         canMutate={canMutate}
-        onClose={() => setPanel(null)}
-        onDelete={() => setPendingDelete(device)}
-        onChanged={() => invalidate(device.protocol)}
+        view={view}
+        onViewChange={setView}
+        viewReveal={viewReveal}
+        onClose={() => openPanel(null)}
+        onDelete={() => setPendingDelete(openDevice)}
+        onChanged={() => invalidate(openDevice.protocol)}
       />
-    ) : null
-  } else if (panel?.kind === 'new') {
+    )
+  } else if (!openId && adding) {
     panelNode = (
       <NewDevicePanel
         unconfigured={unconfigured}
-        onClose={() => setPanel(null)}
-        onCreated={(device) => { invalidate(device.protocol); setPanel({ kind: 'edit', protocol: device.protocol, id: device.id }); toast.show(`Device "${device.name}" added`) }}
+        onClose={() => setAdding(false)}
+        onCreated={(device) => {
+          // Into its list before the refetch, so the new device opens at once rather than reading as gone.
+          queryClient.setQueryData<{ devices: Device[]; serverConfigured: boolean }>(
+            ['tunnel-devices', device.protocol, selectedProjectId],
+            (old) => old && { ...old, devices: [...old.devices, device] },
+          )
+          invalidate(device.protocol)
+          openPanel(device.id)
+          toast.show(`Device "${device.name}" added`)
+        }}
       />
     )
   }
@@ -324,7 +351,7 @@ export default function DevicesPage() {
       count={total}
       subtitle="Devices that cannot use a proxy join this project through a WireGuard or OpenVPN tunnel; everything they send is routed through the pool"
       toolbar={total ? <Badge color={online > 0 ? 'green' : 'gray'}>{online} online</Badge> : undefined}
-      actions={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add device</Button> : undefined}
+      actions={canMutate ? <Button size="sm" onClick={openNew}><Plus className="w-3.5 h-3.5" /> Add device</Button> : undefined}
       panel={panelNode}
     >
       {unconfigured.filter((p) => devices.some((d) => d.protocol === p)).map((protocol) => (
@@ -341,16 +368,16 @@ export default function DevicesPage() {
               icon={<Router />}
               title="No devices yet"
               description="Add a device to get a WireGuard config and QR code, or an OpenVPN profile. Import it on the device and its traffic exits through this project's proxies, no proxy settings needed."
-              action={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add device</Button> : undefined}
+              action={canMutate ? <Button size="sm" onClick={openNew}><Plus className="w-3.5 h-3.5" /> Add device</Button> : undefined}
             />
           ) : (
             <DataTable
               columns={columns}
               data={devices}
               getRowId={(row) => `${row.protocol}:${row.id}`}
-              onRowClick={(row) => setPanel({ kind: 'edit', protocol: row.protocol, id: row.id })}
-              activeRowId={panel?.kind === 'edit' ? `${panel.protocol}:${panel.id}` : null}
-              columnVisibility={panel ? { traffic: false, routing: false, actions: false } : {}}
+              onRowClick={(row) => openPanel(row.id)}
+              activeRowId={openDevice ? `${openDevice.protocol}:${openDevice.id}` : null}
+              columnVisibility={panelNode ? { traffic: false, routing: false, actions: false } : {}}
             />
           )}
         </QueryContent>
@@ -524,10 +551,13 @@ function NewDevicePanel({ unconfigured, onClose, onCreated }: { unconfigured: Pr
   )
 }
 
-function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, onChanged }: {
+function DevicePanel({ device, serverConfigured, canMutate, view, onViewChange, viewReveal, onClose, onDelete, onChanged }: {
   device: Device
   serverConfigured: boolean
   canMutate: boolean
+  view: DeviceView
+  onViewChange: (view: DeviceView) => void
+  viewReveal: object | null
   onClose: () => void
   onDelete: () => void
   onChanged: () => void
@@ -541,7 +571,6 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
     session_id: device.session_id ?? '', country: device.country ?? '', state: device.state ?? '', city: device.city ?? '',
   })
   const [confirmRotate, setConfirmRotate] = useState(false)
-  const [view, setView] = useState<DeviceView>('details')
   useEffect(() => {
     setName(device.name)
     setRouting({ session_id: device.session_id ?? '', country: device.country ?? '', state: device.state ?? '', city: device.city ?? '' })
@@ -603,7 +632,8 @@ function DevicePanel({ device, serverConfigured, canMutate, onClose, onDelete, o
       <Tabs<DeviceView>
         tabs={[{ id: 'details', label: 'Details' }, { id: 'history', label: 'History' }]}
         active={view}
-        onChange={setView}
+        onChange={onViewChange}
+        reveal={viewReveal}
         className="pointer-coarse:*:min-h-11"
       />
       {/* Hidden rather than unmounted while History shows, so an edit not saved yet is still there afterwards. */}

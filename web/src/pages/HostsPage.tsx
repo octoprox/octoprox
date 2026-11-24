@@ -1,9 +1,9 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { isAxiosError } from 'axios'
 import { ColumnDef } from '@tanstack/react-table'
 import {
   AreaChart, Area, BarChart, Bar, Rectangle, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, type BarShapeProps,
@@ -16,12 +16,14 @@ import {
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useDebounced } from '../hooks/useDebounced'
+import { useDropGone, useUrlChoice, useUrlParams } from '../hooks/useUrlState'
 import { formatRangeTick, rangeDomain, rangeTicks, useTimeRange } from '../contexts/TimeRangeContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { bytesShort, bytesTick, compact, formatBytes, parseApiDate, plural } from '../utils/format'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { ProviderLogo } from '../components/ProviderLogo'
+import { GuardedLink } from '../components/RouteList'
 import { Alert, Card, CardHeader, InfoTip, Input, LogoLoader, RELOADING, Reloading, Segmented, Select } from '../components/ui'
 import { cn } from '../utils/cn'
 
@@ -30,7 +32,8 @@ const TOP_SERIES = 8
 /** How many hosts the table loads; the header says when there are more and search reaches them. */
 const TABLE_LIMIT = 500
 
-type Metric = 'requests' | 'bytes'
+const METRICS = ['requests', 'bytes'] as const
+type Metric = (typeof METRICS)[number]
 const METRIC_OPTIONS: { value: Metric; label: string }[] = [
   { value: 'requests', label: 'Requests' },
   { value: 'bytes', label: 'Data' },
@@ -70,15 +73,33 @@ function buildChartData(history: HostsHistoryResponse | undefined, metric: Metri
   return [...byTime.values()].sort((a, b) => a.time - b.time)
 }
 
+/** A connector the project no longer has answers 404, which no retry changes. */
+const notFound = (error: unknown) => isAxiosError(error) && error.response?.status === 404
+const retryUnlessNotFound = (failures: number, error: unknown) => !notFound(error) && failures < 3
+
 export default function HostsPage() {
-  const navigate = useNavigate()
   const { selectedProjectId, selectedProject } = useProject()
   const { isDark } = useTheme()
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
-  const [connectorId, setConnectorId] = useState<string>('')
-  const [metric, setMetric] = useState<Metric>('requests')
-  const [search, setSearch] = useState('')
+  // The connector, the metric and the applied search are in the address, so a link opens the same view.
+  const [params, setUrl] = useUrlParams()
+  const connectorId = params.get('connector') ?? ''
+  const [metric, setMetric] = useUrlChoice('metric', METRICS, 'requests')
+  const urlSearch = params.get('search') ?? ''
+  const [search, setSearch] = useState(urlSearch)
   const debouncedSearch = useDebounced(search.trim(), 300)
+  // What the box last wrote, so the address catching up with it later, while more is typed, is not taken for a change.
+  const written = useRef(urlSearch)
+  useEffect(() => {
+    written.current = debouncedSearch
+    setUrl({ search: debouncedSearch || null })
+  }, [debouncedSearch, setUrl])
+  // A link or the sidebar changing the address's search puts it in the box.
+  useEffect(() => {
+    if (urlSearch === written.current) return
+    written.current = urlSearch
+    setSearch(urlSearch)
+  }, [urlSearch])
 
   const { data, isLoading, isPending, isPlaceholderData, isError, error } = useQuery({
     queryKey: ['host-metrics', selectedProjectId, range, connectorId, debouncedSearch],
@@ -86,6 +107,7 @@ export default function HostsPage() {
     enabled: !!selectedProjectId,
     refetchInterval: 30000,
     placeholderData: (previous) => previous,
+    retry: retryUnlessNotFound,
   })
   const { data: history, dataUpdatedAt: historyUpdatedAt, isPending: historyPending, isPlaceholderData: historyReloading } = useQuery({
     queryKey: ['host-history', selectedProjectId, range, connectorId],
@@ -93,7 +115,9 @@ export default function HostsPage() {
     enabled: !!selectedProjectId,
     refetchInterval: 60000,
     placeholderData: (previous) => previous,
+    retry: retryUnlessNotFound,
   })
+  useDropGone('connector', !!connectorId && isError && notFound(error), 'That connector no longer exists.')
 
   const overflow = data?.overflow_host ?? '(other)'
   const hosts = data?.hosts ?? []
@@ -249,8 +273,9 @@ export default function HostsPage() {
       count={totals ? totals.host_count : undefined}
       actions={
         <>
-          {connectors.length > 1 && (
-            <Select value={connectorId} onChange={(e) => setConnectorId(e.target.value)} className="w-auto py-1.5 text-[13px]" aria-label="Connector">
+          {/* With one connector there is nothing to pick, unless a link picked it: then it is the way back to all. */}
+          {(connectors.length > 1 || (connectorId && connectors.length > 0)) && (
+            <Select value={connectorId} onChange={(e) => setUrl({ connector: e.target.value || null })} className="w-auto py-1.5 text-[13px]" aria-label="Connector">
               <option value="">All connectors</option>
               {connectors.map((c) => (
                 <option key={c.connector_id} value={c.connector_id}>{c.name}{c.enabled ? '' : ' (disabled)'}</option>
@@ -402,7 +427,7 @@ export default function HostsPage() {
               <ConnectorBreakdown
                 host={row}
                 nameOf={(id) => connectorName.get(id)}
-                onOpenConnector={(id) => navigate(`${base}/connectors?open=${id}`)}
+                linkOf={(id) => `${base}/connectors?open=${id}`}
               />
             )}
           />
@@ -413,10 +438,10 @@ export default function HostsPage() {
 }
 
 /** A host's traffic split by the connector that carried it, under its row. */
-function ConnectorBreakdown({ host, nameOf, onOpenConnector }: {
+function ConnectorBreakdown({ host, nameOf, linkOf }: {
   host: HostMetrics
   nameOf: (connectorId: string) => HostsResponse['connectors'][number] | undefined
-  onOpenConnector: (connectorId: string) => void
+  linkOf: (connectorId: string) => string
 }) {
   const total = host.request_count || 1
   return (
@@ -435,14 +460,8 @@ function ConnectorBreakdown({ host, nameOf, onOpenConnector }: {
         const name = part.name ?? connector?.name
         const rate = part.request_count > 0 ? (part.success_count / part.request_count) * 100 : null
         const share = (part.request_count / total) * 100
-        return (
-          <button
-            key={part.connector_id}
-            type="button"
-            onClick={() => name && onOpenConnector(part.connector_id)}
-            disabled={!name}
-            className="w-full grid grid-cols-[minmax(0,1fr)_auto] @xl:grid-cols-[minmax(0,2fr)_repeat(6,minmax(0,1fr))] items-center gap-x-3 gap-y-0.5 py-1.5 @xl:py-0 @xl:h-8 px-1.5 rounded-md text-[12.5px] text-left hover:bg-surface-raised transition-colors disabled:hover:bg-transparent disabled:cursor-default"
-          >
+        const row = (
+          <>
             <span className="flex items-center gap-2 min-w-0">
               <ProviderLogo type={part.credential_type ?? connector?.credential_type} className="w-4 h-4 text-[16px] flex-none" />
               {name ? <span className="truncate">{name}</span> : <span className="truncate text-fg-subtle italic">deleted connector</span>}
@@ -465,8 +484,13 @@ function ConnectorBreakdown({ host, nameOf, onOpenConnector }: {
               </span>
               {formatShare(share)}
             </span>
-          </button>
+          </>
         )
+        const classes = 'w-full grid grid-cols-[minmax(0,1fr)_auto] @xl:grid-cols-[minmax(0,2fr)_repeat(6,minmax(0,1fr))] items-center gap-x-3 gap-y-0.5 py-1.5 @xl:py-0 @xl:h-8 pointer-coarse:min-h-11 px-1.5 rounded-md text-[12.5px] text-left'
+        // A deleted connector has no inspector to open.
+        return name
+          ? <GuardedLink key={part.connector_id} to={linkOf(part.connector_id)} className={cn(classes, 'hover:bg-surface-raised transition-colors')}>{row}</GuardedLink>
+          : <div key={part.connector_id} className={classes}>{row}</div>
       })}
     </div>
   )

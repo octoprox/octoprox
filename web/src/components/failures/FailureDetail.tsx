@@ -3,10 +3,13 @@
 
 import { type ReactNode } from 'react'
 import { FailureRecord } from '../../api/client'
+import { useProject } from '../../contexts/ProjectContext'
+import { cn } from '../../utils/cn'
 import { formatDateTime, formatMs, formatTime, parseApiDate } from '../../utils/format'
 import { Badge, CopyButton, Inspector, InspectorSection, KeyValue } from '../ui'
 import { StatusCodeBadge } from '../mitm/RequestDetail'
 import { LATENCY_STEPS } from '../charts/LatencyChart'
+import { GuardedLink } from '../RouteList'
 
 /** Where a kind of failure comes from, which decides whether Overview counts it. */
 export type FailureGroup = 'upstream' | 'refused' | 'intercepted' | 'other'
@@ -47,8 +50,8 @@ interface KindInfo {
   group: FailureGroup
   /** One fixed hue per kind, so the chart, the summary and the table agree. */
   color: string
-  /** What it means and what to look at. */
-  hint: ReactNode
+  /** What it means and what to look at, which may name a page for this one example. */
+  hint: ReactNode | ((record: FailureRecord) => ReactNode)
 }
 
 /** Every kind the backend logs (api/core/stats.py FailureKind). */
@@ -105,7 +108,12 @@ export const KIND_INFO: Record<string, KindInfo> = {
     label: 'Exits avoided',
     group: 'refused',
     color: '#854d0e',
-    hint: 'Exit reputation keeps exit IPs away from a site after bad exit reports: every row that could serve the request has its IP avoided there, or a sticky session\'s row does while the project does not move refused sessions. Only connectors with IPs avoid IPs; a dynamic connector is weighted instead and never refuses. The message names the site. Avoids end after the project\'s Avoid for, longer for an IP avoided again: a larger pool leaves more IPs for the site, and a shorter Avoid for in the project\'s Exit reputation settings gives avoided IPs back sooner. The Exit locations page lists them on its Reputation tab.',
+    hint: (record) => (
+      <>
+        Exit reputation keeps exit IPs away from a site after bad exit reports: every row that could serve the request has its IP avoided there, or a sticky session's row does while the project does not move refused sessions. Only connectors with IPs avoid IPs; a dynamic connector is weighted instead and never refuses. The message names the site. Avoids end after the project's Avoid for, longer for an IP avoided again: a larger pool leaves more IPs for the site, and a shorter Avoid for in the project's Exit reputation settings gives avoided IPs back sooner. The Exit locations page lists them on its{' '}
+        <PageLink to={record.target ? `locations?tab=reputation&site=${encodeURIComponent(hostOf(record.target).toLowerCase())}` : 'locations?tab=reputation'}>Reputation tab</PageLink>.
+      </>
+    ),
   },
   traffic_limit_exceeded: {
     label: 'Traffic limit reached',
@@ -117,7 +125,12 @@ export const KIND_INFO: Record<string, KindInfo> = {
     label: 'Wrong exit location',
     group: 'upstream',
     color: '#4f46e5',
-    hint: 'Exit verification found the proxy exiting somewhere other than the requested location, and the request was refused rather than sent from the wrong place. A message starting "Exit location not checked" means the echo got through the proxy but no answer placed the exit; a vendor failing the echo itself is listed under its own kind, such as Refused by the vendor. See Exit locations.',
+    hint: (record) => (
+      <>
+        Exit verification found the proxy exiting somewhere other than the requested location, and the request was refused rather than sent from the wrong place. A message starting "Exit location not checked" means the echo got through the proxy but no answer placed the exit; a vendor failing the echo itself is listed under its own kind, such as Refused by the vendor. See{' '}
+        <PageLink to={record.proxy_id ? `locations?tab=observations&proxy_id=${encodeURIComponent(record.proxy_id)}` : 'locations'}>Exit locations</PageLink>.
+      </>
+    ),
   },
   invalid_location: {
     label: 'Invalid location',
@@ -142,6 +155,32 @@ export function KindBadge({ kind }: { kind: string }) {
   return <Badge color={GROUP_INFO[info.group].color} className="whitespace-nowrap">{info.label}</Badge>
 }
 
+/** The host a failure's target names: host:port, [IPv6]:port, or the URL of an intercepted request. */
+function hostOf(target: string): string {
+  const authority = target.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/', 1)[0]
+  const v6 = /^\[([^\]]+)\]/.exec(authority)
+  return v6 ? v6[1] : authority.replace(/:\d+$/, '')
+}
+
+/**
+ * Another of the project's pages as a real link, so it can be copied or opened in a new tab. A plain click asks first
+ * while an editor has unsaved work, as the sidebar does.
+ */
+function PageLink({ to, className, children }: { to: string; className?: string; children: ReactNode }) {
+  const { selectedProjectId } = useProject()
+  if (!selectedProjectId) return <>{children}</>
+  return <GuardedLink to={`/projects/${selectedProjectId}/${to}`} className={cn('text-primary hover:underline', className)}>{children}</GuardedLink>
+}
+
+/** A panel value that opens its own page, 44 px tall on a touch screen. */
+function ValueLink({ to, children }: { to: string; children: ReactNode }) {
+  return (
+    <PageLink to={to} className="inline-flex items-center max-w-full pointer-coarse:min-h-11">
+      <span className="truncate min-w-0">{children}</span>
+    </PageLink>
+  )
+}
+
 /** Time of day for today's entries, date and time for older ones. */
 export function formatWhen(value: string): string {
   const d = parseApiDate(value)
@@ -154,6 +193,8 @@ export function FailurePanel({ record, onClose }: { record: FailureRecord; onClo
   const info = kindInfo(record.kind)
   const tunnel = !!record.peer_id
   const note = info.group === 'refused' && record.proxy_id ? REFUSED_AFTER_A_PROXY_NOTE : GROUP_INFO[info.group].note
+  const hint = typeof info.hint === 'function' ? info.hint(record) : info.hint
+  const connector = record.connector_name || (record.connector_id ? 'deleted connector' : 'none chosen')
 
   return (
     <Inspector
@@ -185,13 +226,21 @@ export function FailurePanel({ record, onClose }: { record: FailureRecord; onClo
         )}
       </div>
 
-      {info.hint && <p className="text-[12.5px] text-fg-muted leading-relaxed">{info.hint}</p>}
+      {hint && <p className="text-[12.5px] text-fg-muted leading-relaxed">{hint}</p>}
       {note && <p className="text-[12px] text-fg-subtle leading-relaxed">{note}</p>}
 
       <InspectorSection title="Request">
         <div>
-          <KeyValue label={tunnel ? 'Device' : 'Method'} value={tunnel ? (record.peer_name || record.peer_id) : (record.method || '-')} />
-          <KeyValue label="Target" value={record.target || '-'} mono />
+          {tunnel ? (
+            <KeyValue label="Device" value={<ValueLink to={`devices?open=${encodeURIComponent(record.peer_id!)}`}>{record.peer_name || record.peer_id}</ValueLink>} />
+          ) : (
+            <KeyValue label="Method" value={record.method || '-'} />
+          )}
+          <KeyValue
+            label="Target"
+            value={record.target ? <ValueLink to={`hosts?search=${encodeURIComponent(hostOf(record.target).toLowerCase())}`}>{record.target}</ValueLink> : '-'}
+            mono
+          />
           <KeyValue label="Answered" value={tunnel ? `connection closed (a proxy client gets ${record.status})` : record.status} />
           {record.session_id && <KeyValue label={record.count > 1 ? 'Session (first)' : 'Session'} value={record.session_id} mono />}
           {record.location && <KeyValue label="Location" value={record.location} mono />}
@@ -200,8 +249,19 @@ export function FailurePanel({ record, onClose }: { record: FailureRecord; onClo
 
       <InspectorSection title="Upstream">
         <div>
-          <KeyValue label="Connector" value={record.connector_name || (record.connector_id ? 'deleted connector' : 'none chosen')} />
-          {record.proxy && <KeyValue label="Proxy" value={record.proxy} mono />}
+          <KeyValue
+            label="Connector"
+            value={record.connector_id && record.connector_name
+              ? <ValueLink to={`connectors?open=${encodeURIComponent(record.connector_id)}`}>{connector}</ValueLink>
+              : connector}
+          />
+          {record.proxy && (
+            <KeyValue
+              label="Proxy"
+              value={record.proxy_id ? <ValueLink to={`proxies?open=${encodeURIComponent(record.proxy_id)}`}>{record.proxy}</ValueLink> : record.proxy}
+              mono
+            />
+          )}
           {record.upstream_status != null && <KeyValue label="Vendor status" value={record.upstream_status} />}
           {record.latency_ms != null && <KeyValue label={record.count > 1 ? 'Time to fail (average)' : 'Time to fail'} value={formatMs(record.latency_ms)} />}
         </div>

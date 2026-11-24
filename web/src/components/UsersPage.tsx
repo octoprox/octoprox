@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState, useMemo } from 'react'
+import { startTransition, useEffect, useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Trash2, Send, Copy, Check, KeyRound, Bot } from 'lucide-react'
@@ -15,6 +15,7 @@ import { ProviderMark } from './SignInProviderMark'
 import { useAuth } from '../contexts/AuthContext'
 import { formatDate, formatDateTime, relativeTime } from '../utils/format'
 import { useToast } from '../contexts/ToastContext'
+import { useDropGone, useUrlParams, useUrlTab } from '../hooks/useUrlState'
 import {
   fetchUsers, createUser, inviteUser, reinviteUser, updateUser, deleteUser, createServiceAccount,
   UserAccount, UserCreate, UserInviteCreate, InviteResponse, UserUpdate, UserRole, AuthProviderKind,
@@ -32,10 +33,13 @@ const roleOptions: RichSelectOption[] = [
   { value: 'viewer', label: 'Viewer', description: 'Read-only, except exit reports, which steer routing where a project avoids' },
 ]
 
-type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | { kind: 'new-service' } | null
+/** An add form: local, never in the address. */
+type CreatePanel = 'new' | 'new-service' | null
 
 /** What an open user shows: their details, or their History in their place. */
 type UserView = 'details' | 'history'
+
+const USER_VIEWS: readonly UserView[] = ['details', 'history']
 
 /** Which accounts the page lists: the people who sign in, or the service accounts programs use through API tokens. */
 type AccountsView = 'people' | 'service'
@@ -45,14 +49,20 @@ const ACCOUNTS_VIEWS: { value: AccountsView; label: string }[] = [
   { value: 'service', label: 'Service accounts' },
 ]
 
+const ACCOUNTS_TABS: readonly AccountsView[] = ['people', 'service']
+
 export default function UsersPage() {
   const queryClient = useQueryClient()
   const { authStatus } = useAuth()
   const toast = useToast()
-  const [accounts, setAccounts] = useState<AccountsView>('people')
-  const [panel, setPanel] = useState<PanelState>(null)
+  // The list (tab=), the open account (open=) and its tab (view=) are in the address, so a link opens them there.
+  const [params, setUrl] = useUrlParams()
+  const [linkedAccounts, setAccounts] = useUrlTab(ACCOUNTS_TABS, 'people')
+  const openId = params.get('open')
+  const [creating, setCreating] = useState<CreatePanel>(null)
   const [pendingDelete, setPendingDelete] = useState<UserAccount | null>(null)
-  const [inviteUrl, setInviteUrl] = useState<string | null>(null)
+  // Kept with the user it was made for, so another user opened meanwhile never shows it.
+  const [invite, setInvite] = useState<{ id: string; url: string } | null>(null)
 
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: fetchUsers })
   const { data } = usersQuery
@@ -60,14 +70,27 @@ export default function UsersPage() {
     const all = data?.users ?? []
     return [all.filter((u) => u.kind !== 'service'), all.filter((u) => u.kind === 'service')]
   }, [data])
+  const openUser = openId ? data?.users.find((u) => u.id === openId) ?? null : null
+  // An open account shows in its own list, which a link to it may not name.
+  const accounts: AccountsView = openUser ? (openUser.kind === 'service' ? 'service' : 'people') : linkedAccounts
   const showingService = accounts === 'service'
+  useEffect(() => { if (accounts !== linkedAccounts) setAccounts(accounts) }, [accounts, linkedAccounts, setAccounts])
+  // Not on a list kept from earlier while it is read again: a user added since is missing from it.
+  useDropGone(['open', 'view'], !!openId && usersQuery.isSuccess && !usersQuery.isFetching && !openUser, 'That user no longer exists.')
+  // An account opened by a link closes an add form, so the two never show at once.
+  useEffect(() => { if (openId) setCreating(null) }, [openId])
+
+  // In the router's transition with the address, so an add form hands over to the account without an empty frame.
+  const openAccount = (id: string) => startTransition(() => { setCreating(null); setUrl({ open: id, view: null }) })
+  const closePanel = () => { setCreating(null); setUrl({ open: null, view: null }) }
+  const startCreate = (kind: 'new' | 'new-service') => { setCreating(kind); setUrl({ open: null, view: null }) }
 
   const reinviteMutation = useMutation({
     mutationFn: (userId: string) => reinviteUser(userId),
     onSuccess: (resp: InviteResponse, userId) => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
-      setInviteUrl(resp.invite_url)
-      setPanel({ kind: 'edit', id: userId })
+      setInvite({ id: userId, url: resp.invite_url })
+      openAccount(userId)
     },
     onError: (err: any) => toast.show(err.message || 'Failed to regenerate invite', 'error'),
   })
@@ -76,7 +99,7 @@ export default function UsersPage() {
     mutationFn: (user: UserAccount) => deleteUser(user.id),
     onSuccess: (_r, user) => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
-      if (panel?.kind === 'edit' && panel.id === user.id) setPanel(null)
+      if (openId === user.id) closePanel()
       setPendingDelete(null)
       toast.show(user.kind === 'service' ? 'Service account deleted' : 'User deleted')
     },
@@ -232,55 +255,54 @@ export default function UsersPage() {
     },
   ], [])
 
-  const openUser = panel?.kind === 'edit' ? data?.users.find((u) => u.id === panel.id) ?? null : null
-
   let panelNode: React.ReactNode = null
-  if (panel?.kind === 'edit' && openUser?.kind === 'service') {
+  if (openUser?.kind === 'service') {
     panelNode = (
       <ServiceAccountPanel
         key={openUser.id}
         account={openUser}
-        onClose={() => setPanel(null)}
+        onClose={closePanel}
         onDelete={() => setPendingDelete(openUser)}
         onSaved={() => toast.show('Service account updated')}
       />
     )
-  } else if (panel?.kind === 'edit' && openUser) {
+  } else if (openUser) {
     panelNode = (
       <UserPanel
         key={openUser.id}
         user={openUser}
         isSelf={openUser.id === authStatus?.user_id}
-        inviteUrl={inviteUrl}
-        onClose={() => { setPanel(null); setInviteUrl(null) }}
+        inviteUrl={invite?.id === openUser.id ? invite.url : null}
+        onClose={() => { closePanel(); setInvite(null) }}
         onDelete={() => setPendingDelete(openUser)}
         onReinvite={() => reinviteMutation.mutate(openUser.id)}
         onSaved={() => toast.show('User updated')}
       />
     )
-  } else if (panel?.kind === 'new') {
+  } else if (creating === 'new') {
     panelNode = (
       <UserPanel
         key="new"
         inviteUrl={null}
-        onClose={() => setPanel(null)}
+        onClose={closePanel}
         onCreated={(u, url) => {
           // An invite link must be shown once, so that case stays open; otherwise close.
-          setInviteUrl(url)
-          setPanel(url ? { kind: 'edit', id: u.id } : null)
+          setInvite(url ? { id: u.id, url } : null)
+          if (url) openAccount(u.id)
+          else closePanel()
           toast.show(url ? 'Invite created' : `User "${u.username}" created`)
         }}
         onSaved={() => {}}
       />
     )
-  } else if (panel?.kind === 'new-service') {
+  } else if (creating === 'new-service') {
     panelNode = (
       <ServiceAccountPanel
         key="new-service"
-        onClose={() => setPanel(null)}
+        onClose={closePanel}
         onCreated={(account) => {
           // Its inspector next, where its first token is issued.
-          setPanel({ kind: 'edit', id: account.id })
+          openAccount(account.id)
           toast.show(`Service account "${account.username}" created`)
         }}
         onSaved={() => {}}
@@ -288,7 +310,7 @@ export default function UsersPage() {
     )
   }
 
-  const addServiceAccount = () => setPanel({ kind: 'new-service' })
+  const addServiceAccount = () => startCreate('new-service')
 
   return (
     <Page
@@ -302,13 +324,13 @@ export default function UsersPage() {
           size="sm"
           options={ACCOUNTS_VIEWS}
           value={accounts}
-          onChange={(next) => { setAccounts(next); setPanel(null); setInviteUrl(null) }}
+          onChange={(next) => { setCreating(null); setAccounts(next, { open: null, view: null }); setInvite(null) }}
           className="pointer-coarse:*:min-h-11"
         />
       }
       actions={showingService
         ? <Button size="sm" onClick={addServiceAccount} className="pointer-coarse:h-11"><Plus className="w-3.5 h-3.5" /> Add service account</Button>
-        : <Button size="sm" onClick={() => setPanel({ kind: 'new' })} className="pointer-coarse:h-11"><Plus className="w-3.5 h-3.5" /> Add user</Button>}
+        : <Button size="sm" onClick={() => startCreate('new')} className="pointer-coarse:h-11"><Plus className="w-3.5 h-3.5" /> Add user</Button>}
       panel={panelNode}
     >
       <QueryContent query={usersQuery} what="the users">
@@ -321,9 +343,9 @@ export default function UsersPage() {
             emptyMessage="No users found."
             enableColumnFilters
             getRowId={(row) => row.id}
-            onRowClick={(row) => { setInviteUrl(null); setPanel({ kind: 'edit', id: row.id }) }}
-            activeRowId={panel?.kind === 'edit' ? panel.id : null}
-            columnVisibility={panel ? { last_login_at: false, created_at: false, actions: false } : {}}
+            onRowClick={(row) => { setInvite(null); openAccount(row.id) }}
+            activeRowId={openId}
+            columnVisibility={panelNode ? { last_login_at: false, created_at: false, actions: false } : {}}
           />
         ) : serviceAccounts.length === 0 ? (
           <EmptyState
@@ -341,9 +363,9 @@ export default function UsersPage() {
             emptyMessage="No service accounts found."
             enableColumnFilters
             getRowId={(row) => row.id}
-            onRowClick={(row) => setPanel({ kind: 'edit', id: row.id })}
-            activeRowId={panel?.kind === 'edit' ? panel.id : null}
-            columnVisibility={panel ? { created_at: false } : {}}
+            onRowClick={(row) => openAccount(row.id)}
+            activeRowId={openId}
+            columnVisibility={panelNode ? { created_at: false } : {}}
           />
         )}
       </QueryContent>
@@ -381,7 +403,9 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
   const [isActive, setIsActive] = useState(user?.is_active ?? true)
   const [useInvite, setUseInvite] = useState(isCreate)
   const [error, setError] = useState<string | null>(null)
-  const [view, setView] = useState<UserView>('details')
+  const [linkedView, setView, reveal] = useUrlTab(USER_VIEWS, 'details', 'view')
+  // The add form has no History.
+  const view = user ? linkedView : 'details'
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['users'] })
   const createMutation = useMutation({
@@ -442,6 +466,7 @@ function UserPanel({ user, isSelf, inviteUrl, onClose, onDelete, onReinvite, onS
           tabs={[{ id: 'details', label: 'Details' }, { id: 'history', label: 'History' }]}
           active={view}
           onChange={setView}
+          reveal={reveal}
           className="pointer-coarse:*:min-h-11"
         />
       )}
@@ -529,7 +554,9 @@ function ServiceAccountPanel({ account, onClose, onDelete, onSaved, onCreated }:
   const [role, setRole] = useState<UserRole>(account?.role || 'viewer')
   const [isActive, setIsActive] = useState(account?.is_active ?? true)
   const [error, setError] = useState<string | null>(null)
-  const [view, setView] = useState<UserView>('details')
+  const [linkedView, setView, reveal] = useUrlTab(USER_VIEWS, 'details', 'view')
+  // The add form has no History.
+  const view = account ? linkedView : 'details'
 
   const createMutation = useMutation({
     mutationFn: (data: ServiceAccountCreate) => createServiceAccount(data),
@@ -587,6 +614,7 @@ function ServiceAccountPanel({ account, onClose, onDelete, onSaved, onCreated }:
           tabs={[{ id: 'details', label: 'Details' }, { id: 'history', label: 'History' }]}
           active={view}
           onChange={setView}
+          reveal={reveal}
           className="pointer-coarse:*:min-h-11"
         />
       )}

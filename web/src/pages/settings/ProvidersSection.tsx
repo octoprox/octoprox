@@ -1,13 +1,14 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useCallback, useMemo, useState } from 'react'
+import { startTransition, useCallback, useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Plus, Puzzle, Trash2 } from 'lucide-react'
 import { deleteProvider, fetchProvider, ProviderDetail, ProviderSpec, ProviderSummary } from '../../api/client'
 import { useProviders, useProvidersQuery } from '../../hooks/useProviders'
 import { useToast } from '../../contexts/ToastContext'
+import { useDropGone, useUrlParams } from '../../hooks/useUrlState'
 import { DataTable, type DataTableFeatures } from '../../components/DataTable'
 import { Page, EmptyState } from '../../components/layout/Page'
 import { ProviderLogo } from '../../components/ProviderLogo'
@@ -15,7 +16,9 @@ import { ProviderBuilder, duplicateSpec } from '../../components/providers/Provi
 import { ProviderDetailPanel } from '../../components/providers/ProviderDetailPanel'
 import { Badge, Button, ConfirmDialog, INSPECTOR_WIDTH_WIDE, QueryContent, QueryStatus } from '../../components/ui'
 
-type PanelState = { kind: 'view'; id: string } | { kind: 'edit'; id: string } | { kind: 'new'; spec?: ProviderSpec } | null
+/** The builder stays local: its draft belongs to this browser, so a link opens only a provider's inspector. */
+type BuilderState = { kind: 'edit'; id: string } | { kind: 'new'; spec?: ProviderSpec }
+type PanelState = { kind: 'view'; id: string } | BuilderState | null
 
 /** Admin catalog of provider types: shipped ones read-only, custom descriptors editable in the builder. */
 export default function ProvidersSection() {
@@ -23,20 +26,43 @@ export default function ProvidersSection() {
   const { providers, byId } = useProviders()
   const providersQuery = useProvidersQuery()
   const toast = useToast()
-  const [panel, setPanelState] = useState<PanelState>(null)
+  // The open provider is open= (its tab view=), so a link opens it; a builder takes its place while one is open.
+  const [params, setUrl] = useUrlParams()
+  const openId = params.get('open')
+  const [builder, setBuilder] = useState<BuilderState | null>(null)
+  const panel: PanelState = builder ?? (openId ? { kind: 'view', id: openId } : null)
   const [pendingDelete, setPendingDelete] = useState<ProviderSummary | null>(null)
   const [builderDirty, setBuilderDirty] = useState(false)
   const [blockedPanel, setBlockedPanel] = useState<PanelState | undefined>(undefined)
   const onDirtyChange = useCallback((dirty: boolean) => setBuilderDirty(dirty), [])
+  // In the router's transition with the address, so a builder hands over to the provider without an empty frame.
+  const showPanel = (next: PanelState) => startTransition(() => {
+    const id = next?.kind === 'view' ? next.id : null
+    setBuilder(next && next.kind !== 'view' ? next : null)
+    // The inspector's tab belongs to the provider it was picked on.
+    if (id !== openId) setUrl({ open: id, view: null })
+  })
   // Swapping panels unmounts the builder; while it has unsaved changes, ask first.
   const setPanel = (next: PanelState) => {
-    const leavingBuilder = panel && panel.kind !== 'view'
-    if (builderDirty && leavingBuilder && !(next && 'id' in next && panel && 'id' in panel && next.id === panel.id && next.kind === panel.kind)) {
+    if (builderDirty && builder && !(next && 'id' in next && 'id' in builder && next.id === builder.id && next.kind === builder.kind)) {
       setBlockedPanel(next)
       return
     }
-    setPanelState(next)
+    showPanel(next)
   }
+  // A provider opened by a link takes the builder's place too, so it asks the same way: the address keeps the
+  // builder until leaving it is confirmed.
+  useEffect(() => {
+    if (!openId || !builder) return
+    if (builderDirty) {
+      setBlockedPanel({ kind: 'view', id: openId })
+      setUrl({ open: null, view: null })
+    } else {
+      setBuilder(null)
+    }
+  }, [openId])
+  // A save refetches the catalog: a provider just created is missing from it until that answers.
+  useDropGone(['open', 'view'], !!openId && providersQuery.isSuccess && !providersQuery.isFetching && !byId[openId], 'That provider no longer exists.')
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteProvider(id),
@@ -124,9 +150,9 @@ export default function ProvidersSection() {
       <EditBuilder
         key={panel.id}
         providerId={panel.id}
-        onClose={() => setPanelState(null)}
+        onClose={() => showPanel(null)}
         onDelete={() => setPendingDelete(byId[panel.id])}
-        onSaved={(p) => { setBuilderDirty(false); setPanelState({ kind: 'view', id: p.id }); toast.show('Provider saved') }}
+        onSaved={(p) => { setBuilderDirty(false); showPanel({ kind: 'view', id: p.id }); toast.show('Provider saved') }}
         onDirtyChange={onDirtyChange}
       />
     )
@@ -135,8 +161,8 @@ export default function ProvidersSection() {
       <ProviderBuilder
         key={panel.spec?.id ?? 'new'}
         initialSpec={panel.spec}
-        onClose={() => setPanelState(null)}
-        onSaved={(p) => { setBuilderDirty(false); setPanelState({ kind: 'view', id: p.id }); toast.show(`Provider "${p.name}" created`) }}
+        onClose={() => showPanel(null)}
+        onSaved={(p) => { setBuilderDirty(false); showPanel({ kind: 'view', id: p.id }); toast.show(`Provider "${p.name}" created`) }}
         onDirtyChange={onDirtyChange}
       />
     )
@@ -177,7 +203,7 @@ export default function ProvidersSection() {
           message="The provider you are editing has unsaved changes. A draft is kept in this browser, but leaving now discards what is on screen."
           confirmLabel="Leave"
           onCancel={() => setBlockedPanel(undefined)}
-          onConfirm={() => { setBuilderDirty(false); setPanelState(blockedPanel); setBlockedPanel(undefined) }}
+          onConfirm={() => { setBuilderDirty(false); showPanel(blockedPanel); setBlockedPanel(undefined) }}
         />
       )}
       {pendingDelete && (

@@ -15,6 +15,7 @@ import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
+import { useDocumentTitle } from '../hooks/useUrlState'
 import { setSettingsOrigin } from '../utils/settingsOrigin'
 import { bytesShort, compact, formatRpm } from '../utils/format'
 import { ProjectForm } from './ProjectForm'
@@ -98,6 +99,7 @@ export default function ProjectSelection() {
   const [editValid, setEditValid] = useState(true)
   const [view, setView] = useProjectsView()
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
+  useDocumentTitle('Projects')
 
   const { data, isLoading, error } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects, refetchInterval: 30000 })
   const { data: loadData, isPlaceholderData: loadReloading } = useQuery({
@@ -135,7 +137,7 @@ export default function ProjectSelection() {
     navigate(`/projects/${project.id}/overview`)
   }
   const openAdmin = () => {
-    setSettingsOrigin(location.pathname)
+    setSettingsOrigin(location.pathname + location.search)
     navigate('/admin')
   }
   const newProject = () => {
@@ -313,7 +315,7 @@ function ProjectTable({ projects, activeId, panelOpen, canMutate, onOpen, onEdit
       cell: ({ row }) => (
         <span className="flex items-center gap-2 min-w-0">
           <span className="font-medium truncate" title={row.original.name}>{row.original.name}</span>
-          <ProblemCount count={row.original.problems} />
+          <ProblemCount count={row.original.problems} projectId={row.original.id} />
           {row.original.pending_deletion && <DeletingBadge />}
         </span>
       ),
@@ -480,7 +482,7 @@ function ProjectCard({ project, range, active, canMutate, onOpen, onEdit, onDele
         <div className="min-w-0">
           <div className="flex items-center gap-2 min-w-0">
             <h3 className="text-[15px] font-semibold text-fg truncate" title={project.name}>{project.name}</h3>
-            <ProblemCount count={project.problems} />
+            <ProblemCount count={project.problems} projectId={project.id} />
             {project.pending_deletion && <DeletingBadge />}
           </div>
           <p className="text-xs text-fg-muted mt-0.5 line-clamp-2 h-8 leading-4" title={project.description || undefined}>

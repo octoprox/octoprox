@@ -125,6 +125,13 @@ async def put_install_retention(
     return after.install_alert_retention()
 
 
+# After /alerts/install/retention, so it is never read as an alert's id.
+@router.get("/alerts/install/{alert_id}", response_model=AlertEntry)
+async def get_install_alert(request: Request, _admin: RequireAdminDep, alert_id: str) -> AlertEntry:
+    """One of the install's alerts (admin)."""
+    return await alert_history_of(request).one(None, alert_id)
+
+
 def _filters(
     status: _Status, severity: Severity | None, kind: str | None, q: str | None, since: datetime | None
 ) -> AlertFilters:

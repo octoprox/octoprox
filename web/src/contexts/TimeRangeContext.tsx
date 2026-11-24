@@ -10,9 +10,15 @@
  * Views differ in what they can show (claim statistics are daily, system
  * trends have no 6h bucket, project history stops at 30d), so each view
  * narrows the shared range to its own options with `useTimeRange(options)`.
+ *
+ * A view that shows the range also keeps it in the address (`?range=`), so a
+ * shared link carries it. A link's range holds in the browser tab it opened
+ * until a range is picked; it never changes the range saved in the browser.
  */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from 'react'
+import { useLocation } from 'react-router'
+import { useSetUrlParams } from '../hooks/useUrlState'
 
 export const TIME_RANGES = ['1h', '6h', '24h', '7d', '30d', '90d'] as const
 export type TimeRange = (typeof TIME_RANGES)[number]
@@ -100,18 +106,30 @@ interface TimeRangeContextType {
 
 const TimeRangeContext = createContext<TimeRangeContextType | undefined>(undefined)
 
-export function TimeRangeProvider({ children }: { children: ReactNode }) {
-  const [range, setRangeState] = useState<TimeRange>(readStored)
+/** The range a link opened this browser tab with: read once, so Back to an older address never brings its range back. */
+function readLinked(): TimeRange | null {
+  const linked = new URLSearchParams(window.location.search).get('range')
+  return isTimeRange(linked) ? linked : null
+}
 
+export function TimeRangeProvider({ children }: { children: ReactNode }) {
+  const [stored, setStored] = useState<TimeRange>(readStored)
+  const [linked, setLinked] = useState<TimeRange | null>(readLinked)
+  const range = linked ?? stored
+
+  // Picking a range ends a link's and saves the pick, as before.
   const setRange = useCallback((next: TimeRange) => {
-    setRangeState(next)
+    setLinked(null)
+    setStored(next)
     try { localStorage.setItem(STORAGE_KEY, next) } catch { /* ignore */ }
   }, [])
 
-  // Another tab changing the range changes it here too.
+  // Another tab picking a range picks it here too.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY && isTimeRange(e.newValue)) setRangeState(e.newValue)
+      if (e.key !== STORAGE_KEY || !isTimeRange(e.newValue)) return
+      setLinked(null)
+      setStored(e.newValue)
     }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
@@ -130,5 +148,10 @@ export function useTimeRange<T extends TimeRange>(options: readonly T[]): [T, (r
   const context = useContext(TimeRangeContext)
   if (context === undefined) throw new Error('useTimeRange must be used within a TimeRangeProvider')
   const resolved = useMemo(() => resolveTimeRange(context.range, options), [context.range, options])
+  // The address carries the shared range, not this view's narrowed one, so a link opens every view as it was. It is
+  // written again when a navigation on the same page (its sidebar entry) leaves the address without it.
+  const setUrl = useSetUrlParams()
+  const inAddress = new URLSearchParams(useLocation().search).get('range')
+  useEffect(() => { setUrl({ range: context.range }) }, [context.range, inAddress, setUrl])
   return [resolved, context.setRange]
 }

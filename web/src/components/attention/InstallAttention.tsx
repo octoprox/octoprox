@@ -47,7 +47,7 @@ export function InstallAttention() {
                     <span className="flex-none text-fg-muted whitespace-nowrap">since {formatClock(line.since)}</span>
                   )}
                   {isAdmin && (
-                    <Link to={page.path} onClick={() => setSettingsOrigin(location.pathname)} className="self-start flex-none inline-flex items-center font-medium text-primary hover:brightness-110 whitespace-nowrap pointer-coarse:min-h-11">
+                    <Link to={page.path} onClick={() => setSettingsOrigin(location.pathname + location.search)} className="self-start flex-none inline-flex items-center font-medium text-primary hover:brightness-110 whitespace-nowrap pointer-coarse:min-h-11">
                       Open {page.name}
                     </Link>
                   )}

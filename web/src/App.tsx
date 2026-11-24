@@ -42,6 +42,7 @@ import { ToastProvider } from './contexts/ToastContext'
 import { NavigationGuardProvider } from './contexts/NavigationGuardContext'
 import { useTheme } from './contexts/ThemeContext'
 import { checkAuthStatus, login, logout, AuthStatus } from './api/client'
+import { takeSignInReturn } from './utils/signInReturn'
 
 function App() {
   return (
@@ -101,6 +102,8 @@ function AuthenticatedApp() {
     setLoginError(null)
     try {
       await login(username, password)
+      // Signed in on the page itself: a provider's sign-in started earlier has nothing left to return to.
+      takeSignInReturn()
       const status = await checkAuthStatus()
       setAuthStatus(status)
       if (status.authenticated) {

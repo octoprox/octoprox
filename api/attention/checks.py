@@ -244,15 +244,18 @@ class PoolCheck(AttentionCheck):
             return _pool_finding(
                 "Every proxy",
                 " is quarantined by its rate limit, so clients are told to retry later.",
-                link="proxies",
+                link="proxies?status=quarantined",
                 action="Proxies",
                 suppresses=suppresses | {_refusal_key(FailureKind.ALL_PROXIES_QUARANTINED)},
             )
         resting = f", {quarantined} quarantined by rate limits" if quarantined else ""
+        # The Proxies status filter matches one status exactly, so it narrows the list only when every row is unhealthy.
+        statuses = {status for status, count in counted.items() if count and not status.retiring}
+        only_unhealthy = statuses == {ProxyStatus.UNHEALTHY} and not quarantined
         return _pool_finding(
             "No proxy can take requests",
             f": {unhealthy} unhealthy{resting}. Requests fail until one recovers.",
-            link="proxies",
+            link="proxies?status=unhealthy" if only_unhealthy else "proxies",
             action="Proxies",
             suppresses=suppresses,
         )
@@ -288,7 +291,7 @@ class PoolCheck(AttentionCheck):
             lead="",
             subject=f"{unhealthy} of {rows} proxies",
             text=f" keep failing health checks and get no requests, most on {names[most]}.",
-            link="proxies",
+            link="proxies?status=unhealthy",
             action="Proxies",
         )
 
@@ -524,7 +527,7 @@ class RefusalCheck(RequestWindowCheck):
                     lead="",
                     subject=f"{n} requests ({round(share * 100)}%)",
                     text=text,
-                    link="failures",
+                    link=f"failures?kind={kind}",
                     action="Failures",
                     when=self._when(rows),
                     # By kind, never by count, so a changing count never moves a row.
@@ -697,7 +700,12 @@ class TrafficCheck(ConnectorCheck):
             return []
         return [
             _connector_finding(
-                kind, connector, Severity.WARNING, text, when=AttentionWhen(kind="resets", at=usage.period_end)
+                kind,
+                connector,
+                Severity.WARNING,
+                text,
+                when=AttentionWhen(kind="resets", at=usage.period_end),
+                link=f"connectors?open={connector.id}&config=traffic",
             )
         ]
 
@@ -728,6 +736,8 @@ class ExitLocationCheck(ConnectorCheck):
                     Severity.WARNING,
                     f": {len(outside)} of {len(rows)} proxies are in countries the connector does not list, so they "
                     "take no requests.",
+                    link=f"locations?tab=accuracy&open={connector.id}",
+                    action="Exit locations",
                 )
             )
         rule = data.project.location_contradicted
@@ -754,6 +764,8 @@ class ExitLocationCheck(ConnectorCheck):
                     connector,
                     Severity.WARNING,
                     f": {n} of {len(judged)} checked proxies are not in the country the vendor says, {effect}.",
+                    link=f"locations?tab=accuracy&open={connector.id}",
+                    action="Exit locations",
                 )
             )
         return found
@@ -925,8 +937,10 @@ def _connector_finding(
     *,
     detail: str | None = None,
     when: AttentionWhen | None = None,
+    link: str | None = None,
+    action: str = "Open connector",
 ) -> Finding:
-    """A line about one connector, led by its name and opening it."""
+    """A line about one connector, led by its name and opening it, or the page ``link`` names."""
     return Finding(
         key=f"{kind.value}:{connector.id}",
         kind=kind,
@@ -934,8 +948,8 @@ def _connector_finding(
         lead="",
         subject=connector.name,
         text=text,
-        link=f"connectors?open={connector.id}",
-        action="Open connector",
+        link=link or f"connectors?open={connector.id}",
+        action=action,
         detail=detail,
         when=when,
         sort_name=connector.name,

@@ -35,7 +35,7 @@ export function LicenseBanner() {
               className="font-medium underline whitespace-nowrap"
               onClick={(e) => {
                 // Back on the System page returns here, and a form with unsaved changes asks first.
-                setSettingsOrigin(location.pathname)
+                setSettingsOrigin(location.pathname + location.search)
                 if (!guard.blocked) return
                 e.preventDefault()
                 guard.request(() => navigate(LICENSE_PAGE))

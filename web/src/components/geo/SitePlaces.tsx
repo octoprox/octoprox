@@ -30,14 +30,9 @@ export const placesQuery = (projectId: string, site: string) => queryOptions({
   refetchInterval: 60_000,
 })
 
-/** A place open in the inspector: the site as asked (the query's key), the site it resolved to, and the place. */
-export interface InspectedPlace {
-  key: string
-  site: string
-  place: string
-}
-
-type Preset = 'all' | 'lowered' | 'not_judged'
+/** Which places the table shows: every one, or only the lowered or the not judged ones. */
+export const PLACE_PRESETS = ['all', 'lowered', 'not_judged'] as const
+export type Preset = (typeof PLACE_PRESETS)[number]
 
 const PRESETS: { value: Preset; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -392,12 +387,13 @@ function SiteBody({ data, site, sitePicker, preset, onPreset, inspecting, onInsp
     setMore(shown)
     setHighlight(place)
   }
+  // Again once a dropped preset lands: it comes through the address, after the row was marked.
   useEffect(() => {
     if (!highlight) return
     rows.current.get(highlight)?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' })
     const timer = setTimeout(() => setHighlight(null), 2000)
     return () => clearTimeout(timer)
-  }, [highlight])
+  }, [highlight, preset])
 
   const pickPreset = (next: Preset) => {
     onPreset(next)
@@ -623,18 +619,19 @@ function PlaceRow({ line, nested, connectors, site, labelOf, rule, active, highl
  * One site across every place its records name: pick a site (the busiest with places by default), narrow the places
  * to the lowered or not judged ones, or jump to one. A place opens in the place inspector.
  */
-export function SitePlacesCard({ query, site, onSite, inspecting, onInspect, onExitIps }: {
+export function SitePlacesCard({ query, site, onSite, preset, onPreset, inspecting, onInspect, onExitIps }: {
   query: UseQueryResult<SitePlacesView>
   /** The site asked for; '' is the default one. */
   site: string
   onSite: (site: string) => void
+  preset: Preset
+  onPreset: (preset: Preset) => void
   /** The place open in the inspector, for the site shown. */
   inspecting: string | null
-  onInspect: (place: InspectedPlace) => void
+  onInspect: (place: string) => void
   /** Brings the Exit IPs table into view, for a site with no place data. */
   onExitIps: () => void
 }) {
-  const [preset, setPreset] = useState<Preset>('all')
   const data = query.data
   const shown = data?.site ?? ''
   const sites = data?.sites ?? []
@@ -682,10 +679,10 @@ export function SitePlacesCard({ query, site, onSite, inspecting, onInspect, onE
             site={shown}
             sitePicker={sitePicker}
             preset={preset}
-            onPreset={setPreset}
+            onPreset={onPreset}
             inspecting={inspecting}
             // A row of the last site, up while the picked one loads, opens nothing.
-            onInspect={(place) => { if (!query.isPlaceholderData) onInspect({ key: site, site: shown, place }) }}
+            onInspect={(place) => { if (!query.isPlaceholderData) onInspect(place) }}
             onExitIps={onExitIps}
           />
         </Reloading>
@@ -734,19 +731,17 @@ function PlaceConnector({ connector, index, cell, row, site, tree, labelOf, rule
 
 /**
  * A place of a site in the side panel: the configured and effective split of its requests, and every connector by
- * where it stands, with the reason in words. It reads the card's answer, so it follows the poll, and closes when the
- * place drops out of it or the site shown changes.
+ * where it stands, with the reason in words. It reads the card's answer for the site as asked ('' the default one),
+ * so it follows the poll; the page closes it when the place drops out of that answer.
  */
-export function PlaceInspector({ projectId, inspected, onClose }: { projectId: string; inspected: InspectedPlace; onClose: () => void }) {
-  const query = useQuery(placesQuery(projectId, inspected.key))
+export function PlaceInspector({ projectId, site, place, onClose }: { projectId: string; site: string; place: string; onClose: () => void }) {
+  const query = useQuery(placesQuery(projectId, site))
   const data = query.data
-  const row = data?.site === inspected.site ? data.places.find((p) => p.place === inspected.place) : undefined
-  const gone = data !== undefined && !row
-  useEffect(() => { if (gone) onClose() }, [gone])
+  const row = data?.places.find((p) => p.place === place)
   const tree = useMemo(() => new PlaceTree(data?.places ?? [], new Map()), [data?.places])
   if (!data || !row) {
     return (
-      <Inspector title="Place" subtitle={inspected.site} onClose={onClose}>
+      <Inspector title="Place" subtitle={data?.site ?? site} onClose={onClose}>
         {loadFailed(query) ? <LoadError what="the place" query={query} /> : <LogoLoader className="py-10" />}
       </Inspector>
     )

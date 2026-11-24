@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { KeyRound, Plus, Trash2 } from 'lucide-react'
@@ -12,20 +12,24 @@ import {
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
+import { useDropGone, useUrlParam, useUrlTab } from '../hooks/useUrlState'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page } from '../components/layout/Page'
 import { AdminLink } from '../components/AdminLink'
 import { CredentialForm, NewCredentialPanel, TypeCard } from '../components/CredentialForm'
+import { ConnectorLink } from '../components/RouteList'
 import { EntityHistory } from '../components/audit/EntityHistory'
 import { useProviders } from '../hooks/useProviders'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { formatDate, formatDateTime } from '../utils/format'
 import { Button, Inspector, ConfirmDialog, KeyValue, InspectorSection, LogoLoader, QueryContent, Tabs } from '../components/ui'
 
-type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
-
 /** What an open credential shows: its settings, or its History in their place. */
 type CredentialView = 'settings' | 'history'
+const CREDENTIAL_VIEWS: readonly CredentialView[] = ['settings', 'history']
+
+/** A connector using a credential. */
+type CredentialUser = { id: string; name: string }
 
 export default function CredentialsPage() {
   const queryClient = useQueryClient()
@@ -33,8 +37,15 @@ export default function CredentialsPage() {
   const { canMutate, isAdmin } = useAuth()
   const { labelFor } = useProviders()
   const toast = useToast()
-  const [panel, setPanel] = useState<PanelState>(null)
+  // The open credential and its tab are in the address, so a link opens them; the new credential form is not.
+  const [openId, setOpenId] = useUrlParam('open')
+  const [view, setView, viewReveal] = useUrlTab(CREDENTIAL_VIEWS, 'settings', 'view')
+  const [adding, setAdding] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<Credential | null>(null)
+  const openPanel = (id: string | null) => setOpenId(id, { view: null })
+  const openNew = () => { setAdding(true); openPanel(null) }
+  // A credential opened by a link replaces a new credential form left open.
+  useEffect(() => { if (openId) setAdding(false) }, [openId])
 
   const credentialsQuery = useQuery({
     queryKey: ['credentials', selectedProjectId],
@@ -49,17 +60,19 @@ export default function CredentialsPage() {
     refetchInterval: false,
   })
   const usedBy = useMemo(() => {
-    const map: Record<string, string[]> = {}
-    for (const c of connectorsData?.connectors ?? []) (map[c.credential_id] ||= []).push(c.name)
+    const map: Record<string, CredentialUser[]> = {}
+    for (const c of connectorsData?.connectors ?? []) (map[c.credential_id] ||= []).push({ id: c.id, name: c.name })
     return map
   }, [connectorsData])
+  const listed = !!openId && !!data?.credentials.some((c) => c.id === openId)
+  useDropGone(['open', 'view'], !!openId && !!data && !credentialsQuery.isFetching && !listed, 'That credential no longer exists.')
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteProjectCredential(selectedProjectId!, id),
     onSuccess: (_r, id) => {
       queryClient.invalidateQueries({ queryKey: ['credentials', selectedProjectId] })
       queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
-      if (panel?.kind === 'edit' && panel.id === id) setPanel(null)
+      if (openId === id) openPanel(null)
       setPendingDelete(null)
       toast.show('Credential deleted')
     },
@@ -90,7 +103,7 @@ export default function CredentialsPage() {
       id: 'used_by',
       header: 'Used by',
       enableSorting: false,
-      accessorFn: (row: Credential) => (usedBy[row.id] ?? []).join(', '),
+      accessorFn: (row: Credential) => (usedBy[row.id] ?? []).map((c) => c.name).join(', '),
       cell: ({ getValue }) => <span className="text-fg-muted truncate block">{getValue<string>() || '-'}</span>,
     },
     {
@@ -115,23 +128,27 @@ export default function CredentialsPage() {
   ], [canMutate, labelFor, usedBy])
 
   let panelNode: React.ReactNode = null
-  if (panel?.kind === 'edit') {
+  // A linked credential shows once the list holds it, or the link is dropped; meanwhile no new credential form shows.
+  if (openId && listed) {
     panelNode = (
       <EditCredentialPanel
-        key={panel.id}
-        credentialId={panel.id}
-        usedBy={usedBy[panel.id] ?? []}
+        key={openId}
+        credentialId={openId}
+        usedBy={usedBy[openId] ?? []}
         canMutate={canMutate}
-        onClose={() => setPanel(null)}
-        onDelete={() => { const c = data?.credentials.find((x) => x.id === panel.id); if (c) setPendingDelete(c) }}
-        onSaved={() => { setPanel(null); toast.show('Credential saved') }}
+        view={view}
+        onViewChange={setView}
+        viewReveal={viewReveal}
+        onClose={() => openPanel(null)}
+        onDelete={() => { const c = data?.credentials.find((x) => x.id === openId); if (c) setPendingDelete(c) }}
+        onSaved={() => { openPanel(null); toast.show('Credential saved') }}
       />
     )
-  } else if (panel?.kind === 'new') {
+  } else if (!openId && adding) {
     panelNode = (
       <NewCredentialPanel
-        onClose={() => setPanel(null)}
-        onCreated={(c) => { setPanel(null); toast.show(`Credential "${c.name}" created`) }}
+        onClose={() => setAdding(false)}
+        onCreated={(c) => { setAdding(false); toast.show(`Credential "${c.name}" created`) }}
       />
     )
   }
@@ -143,20 +160,20 @@ export default function CredentialsPage() {
       title="Credentials"
       count={data?.total}
       subtitle={<>Provider and cloud accounts this project can provision proxies from{isAdmin && <>. The providers themselves are in <AdminLink page="providers">Providers</AdminLink>, for every project.</>}</>}
-      actions={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add credential</Button> : undefined}
+      actions={canMutate ? <Button size="sm" onClick={openNew}><Plus className="w-3.5 h-3.5" /> Add credential</Button> : undefined}
       panel={panelNode}
     >
       <QueryContent query={credentialsQuery} what="the credentials">
         {credentials.length === 0 ? (
-          <EmptyCredentials canMutate={canMutate} onAdd={() => setPanel({ kind: 'new' })} />
+          <EmptyCredentials canMutate={canMutate} onAdd={openNew} />
         ) : (
           <DataTable
             columns={columns}
             data={credentials}
             getRowId={(row) => row.id}
-            onRowClick={(row) => setPanel({ kind: 'edit', id: row.id })}
-            activeRowId={panel?.kind === 'edit' ? panel.id : null}
-            columnVisibility={panel ? { created_at: false, actions: false } : {}}
+            onRowClick={(row) => openPanel(row.id)}
+            activeRowId={openId}
+            columnVisibility={panelNode ? { created_at: false, actions: false } : {}}
           />
         )}
       </QueryContent>
@@ -165,7 +182,7 @@ export default function CredentialsPage() {
           title="Delete credential?"
           message={
             (usedBy[pendingDelete.id] ?? []).length > 0
-              ? <><b className="text-fg">{pendingDelete.name}</b> is used by {usedBy[pendingDelete.id].join(', ')}. Those connectors will stop provisioning until they get another credential.</>
+              ? <><b className="text-fg">{pendingDelete.name}</b> is used by {usedBy[pendingDelete.id].map((c) => c.name).join(', ')}. Those connectors will stop provisioning until they get another credential.</>
               : <>Remove <b className="text-fg">{pendingDelete.name}</b>. This cannot be undone.</>
           }
           onCancel={() => setPendingDelete(null)}
@@ -188,10 +205,13 @@ function EmptyCredentials({ canMutate, onAdd }: { canMutate: boolean; onAdd: () 
   )
 }
 
-function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelete, onSaved }: {
+function EditCredentialPanel({ credentialId, usedBy, canMutate, view, onViewChange, viewReveal, onClose, onDelete, onSaved }: {
   credentialId: string
-  usedBy: string[]
+  usedBy: CredentialUser[]
   canMutate: boolean
+  view: CredentialView
+  onViewChange: (view: CredentialView) => void
+  viewReveal: object | null
   onClose: () => void
   onDelete: () => void
   onSaved: (c: CredentialDetail) => void
@@ -206,7 +226,6 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
   const { data: detail } = credentialQuery
   const { labelFor } = useProviders()
   const typeLabel = detail ? labelFor(detail.type) : ''
-  const [view, setView] = useState<CredentialView>('settings')
 
   return (
     <Inspector
@@ -228,7 +247,8 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
             <Tabs<CredentialView>
               tabs={[{ id: 'settings', label: 'Settings' }, { id: 'history', label: 'History' }]}
               active={view}
-              onChange={setView}
+              onChange={onViewChange}
+              reveal={viewReveal}
               className="pointer-coarse:*:min-h-11"
             />
             {/* Hidden rather than unmounted while History shows: the form holds the edits not saved yet. */}
@@ -236,7 +256,13 @@ function EditCredentialPanel({ credentialId, usedBy, canMutate, onClose, onDelet
               <TypeCard type={detail.type} />
               <CredentialForm key={detail.id} type={detail.type} credential={detail} onSaved={onSaved} formId="credential-form" />
               <InspectorSection title="Usage">
-                <KeyValue label="Used by" value={usedBy.length ? usedBy.join(', ') : 'no connectors yet'} />
+                <KeyValue
+                  label="Used by"
+                  value={usedBy.length && selectedProjectId
+                    // The value clips its overflow, so the 44 px touch target grows the row here, as the Failures panel's do.
+                    ? usedBy.map((c, i) => <Fragment key={c.id}>{i > 0 && ', '}<ConnectorLink projectId={selectedProjectId} connectorId={c.id} className="pointer-coarse:my-0">{c.name}</ConnectorLink></Fragment>)
+                    : 'no connectors yet'}
+                />
                 <KeyValue label="Created" value={formatDateTime(detail.created_at)} />
                 <KeyValue label="Updated" value={formatDateTime(detail.updated_at)} />
               </InspectorSection>

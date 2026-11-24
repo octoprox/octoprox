@@ -68,6 +68,11 @@ export function requestIdOf(error: unknown): string | null {
   return typeof fromRequest === 'string' && fromRequest ? fromRequest : null
 }
 
+/** Whether a call failed because what it named does not exist (404): a deleted or expired thing, not an outage. */
+export function isNotFound(error: unknown): boolean {
+  return axios.isAxiosError(error) && error.response?.status === 404
+}
+
 // Every response names the server's release, so an open UI notices a new one.
 api.interceptors.response.use(
   (response) => {
@@ -2016,6 +2021,9 @@ export const updateAlertSettings = async (projectId: string, overrides: AlertSet
 /** A page of the install's alerts (admins). */
 export const fetchInstallAlerts = async (filters: AlertFilters, before?: string): Promise<AlertPage> =>
   (await api.get('/alerts/install', { params: { ...filters, before } })).data
+/** One of the install's alerts (admins). */
+export const fetchInstallAlert = async (alertId: string): Promise<AlertEntry> =>
+  (await api.get(`/alerts/install/${encodeURIComponent(alertId)}`)).data
 export const fetchInstallAlertRetention = async (): Promise<InstallAlertRetention> => (await api.get('/alerts/install/retention')).data
 export const updateInstallAlertRetention = async (days: number): Promise<InstallAlertRetention> =>
   (await api.put('/alerts/install/retention', { days })).data
@@ -2607,6 +2615,10 @@ export const fetchFailures = async (
   const response = await api.get(`/projects/${projectId}/failures`, { params })
   return response.data
 }
+
+/** One example by its id; a 404 once the log no longer keeps it. */
+export const fetchFailure = async (projectId: string, failureId: string): Promise<FailureRecord> =>
+  (await api.get(`/projects/${projectId}/failures/${encodeURIComponent(failureId)}`)).data
 
 export const fetchFailureHead = async (projectId: string, since: number, kind?: string | null): Promise<FailureLogHead> => {
   const params: Record<string, string | number> = { since }

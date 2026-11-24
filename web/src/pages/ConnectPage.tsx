@@ -1,13 +1,14 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Download, Eye, EyeOff, RefreshCw } from 'lucide-react'
 import { downloadCaCertificate, fetchConnectInfo, type ConnectInfo, type ConnectParams } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useToast } from '../contexts/ToastContext'
 import { useDebounced } from '../hooks/useDebounced'
+import { useUrlParams } from '../hooks/useUrlState'
 import { Page } from '../components/layout/Page'
 import { RouteList } from '../components/RouteList'
 import { Alert, Button, Card, CardHeader, CopyButton, InfoTip, Input, Label, Segmented, Select, Tabs } from '../components/ui'
@@ -23,6 +24,37 @@ const CONTROL = 'px-3 text-[13px]'
 
 const STRATEGY_LABELS: Record<string, string> = {
   round_robin: 'Round Robin', least_used: 'Least Used', random: 'Random', sticky: 'Sticky', health_based: 'Health Based',
+}
+
+/** The address keys the form is kept in, so a link opens the same place, session and example. Never the password. */
+const LINK_KEYS = ['country', 'state', 'city', 'session', 'sessid', 'snippet'] as const
+type LinkedForm = Record<(typeof LINK_KEYS)[number], string>
+const formKey = (get: (key: keyof LinkedForm) => string | null) => LINK_KEYS.map((key) => get(key) ?? '').join('\n')
+
+/** The viewer's own choice of example, or curl. */
+function savedSnippet(): SnippetKind {
+  try {
+    const saved = localStorage.getItem(SNIPPET_KEY)
+    if (SNIPPETS.some((s) => s.id === saved)) return saved as SnippetKind
+  } catch { /* storage unavailable */ }
+  return 'curl'
+}
+
+/** The form a link asks for. State and city need a country, and a session ID makes the session sticky. */
+function fromLink(params: URLSearchParams) {
+  const code = (params.get('country') ?? '').toUpperCase()
+  const country = code === 'UK' ? 'GB' : COUNTRY_CODES.includes(code) ? code : ''
+  const state = country ? params.get('state') ?? '' : ''
+  const sessid = params.get('sessid') ?? ''
+  return {
+    country,
+    // The US picker holds upper-case codes.
+    state: country === 'US' ? state.toUpperCase() : state,
+    city: country ? params.get('city') ?? '' : '',
+    sticky: params.get('session') === 'sticky' || !!sessid,
+    sessid: sessid || randomSessionId(),
+    snippet: SNIPPETS.find((s) => s.id === params.get('snippet'))?.id ?? null,
+  }
 }
 
 /**
@@ -63,22 +95,22 @@ const plainSlug = (text: string) => text.trim().toLowerCase().replace(/[\s-]+/g,
 export default function ConnectPage() {
   const { selectedProjectId, selectedProject } = useProject()
   const toast = useToast()
-  const [country, setCountry] = useState('')
-  const [state, setState] = useState('')
-  const [city, setCity] = useState('')
-  const [sticky, setSticky] = useState(false)
-  const [sessid, setSessid] = useState(() => randomSessionId())
+  const [linkParams, setUrl] = useUrlParams()
+  // Straight from a link, not through changeCountry, which would clear the state and city.
+  const [seed] = useState(() => fromLink(linkParams))
+  const [country, setCountry] = useState(seed.country)
+  const [state, setState] = useState(seed.state)
+  const [city, setCity] = useState(seed.city)
+  const [sticky, setSticky] = useState(seed.sticky)
+  const [sessid, setSessid] = useState(seed.sessid)
   // The endpoint as typed over the default, or null while it is the default.
   const [endpointText, setEndpointText] = useState<string | null>(null)
   const [showPassword, setShowPassword] = useState(false)
   const [target, setTarget] = useState(DEFAULT_TARGET)
-  const [kind, setKind] = useState<SnippetKind>(() => {
-    try {
-      const saved = localStorage.getItem(SNIPPET_KEY)
-      if (SNIPPETS.some((s) => s.id === saved)) return saved as SnippetKind
-    } catch { /* storage unavailable */ }
-    return 'curl'
-  })
+  // A link's example holds for the visit; the viewer's saved choice changes only when they pick one.
+  const [kind, setKind] = useState<SnippetKind>(() => seed.snippet ?? savedSnippet())
+  // Its tab is scrolled into the strip on a phone; the strip alone, since it sits below the fold.
+  const [snippetReveal] = useState<object | null>(() => (seed.snippet ? {} : null))
   const chooseKind = (next: SnippetKind) => {
     setKind(next)
     try { localStorage.setItem(SNIPPET_KEY, next) } catch { /* storage unavailable */ }
@@ -90,6 +122,34 @@ export default function ConnectPage() {
     city: country && city.trim() ? city.trim() : undefined,
     sessid: sticky && sessid.trim() ? sessid.trim() : undefined,
   }), [country, state, city, sticky, sessid]), 250)
+
+  // The form as the address holds it, and as this page last saw and wrote it there.
+  const linked = formKey((key) => linkParams.get(key))
+  const seen = useRef(linked)
+  const written = useRef(linked)
+  // Something else changing the address (the sidebar entry, a link) starts the form again from it.
+  useEffect(() => {
+    if (linked === seen.current) return
+    seen.current = linked
+    if (linked === written.current) return
+    const next = fromLink(linkParams)
+    setCountry(next.country)
+    setState(next.state)
+    setCity(next.city)
+    setSticky(next.sticky)
+    setSessid(next.sessid)
+    setKind(next.snippet ?? savedSnippet())
+  }, [linked])
+  // The form goes in the address once the typing pauses, so the address is a link to what is shown. The example is
+  // always written, or the colleague's own saved choice would stand in for it.
+  useEffect(() => {
+    const form: LinkedForm = {
+      country: params.country ?? '', state: params.state ?? '', city: params.city ?? '',
+      session: sticky ? 'sticky' : '', sessid: sticky ? params.sessid ?? '' : '', snippet: kind,
+    }
+    written.current = formKey((key) => form[key])
+    setUrl(form)
+  }, [params, sticky, kind, setUrl])
 
   const { data: info, isPlaceholderData, isError } = useQuery({
     queryKey: ['connect', selectedProjectId, params],
@@ -319,7 +379,7 @@ export default function ConnectPage() {
                 <Input value={target} onChange={(e) => setTarget(e.target.value)} className="h-8 text-xs font-mono" aria-label="Test URL" />
               </label>
             </div>
-            <Tabs<SnippetKind> tabs={SNIPPETS} active={kind} onChange={chooseKind} size="sm" className="px-3 mt-2" />
+            <Tabs<SnippetKind> tabs={SNIPPETS} active={kind} onChange={chooseKind} size="sm" reveal={snippetReveal} sideways className="px-3 mt-2" />
             {mitm && (
               <div className="px-4 pt-3">
                 <Alert variant="info" className="text-xs flex items-center gap-2 flex-wrap">

@@ -123,6 +123,10 @@ interface DataTableProps<TData extends RowData> {
   manualPagination?: ManualPagination
   /** When set, the header filters report to the caller and the table does no filtering of its own. Implies enableColumnFilters. */
   manualFiltering?: ManualFiltering
+  /** Column filters the table starts with, such as a link's. Read once: key the table to start it again. */
+  initialColumnFilters?: ColumnFiltersState
+  /** Told the table's own column filters after each change, such as to keep them in the address. */
+  onColumnFiltersChange?: (filters: ColumnFiltersState) => void
   defaultPageSize?: number
   emptyMessage?: string
   /** The rows are still on their way: an empty table shows the loader instead of `emptyMessage`. */
@@ -150,6 +154,8 @@ export function DataTable<TData extends RowData>({
   data,
   manualPagination,
   manualFiltering,
+  initialColumnFilters,
+  onColumnFiltersChange,
   defaultPageSize = 20,
   emptyMessage = 'No data available.',
   loading = false,
@@ -167,13 +173,16 @@ export function DataTable<TData extends RowData>({
 }: DataTableProps<TData>) {
   const [sorting, setSorting] = useState<SortingState>([])
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
-  const [ownColumnFilters, setOwnColumnFilters] = useState<ColumnFiltersState>([])
+  const [ownColumnFilters, setOwnColumnFilters] = useState<ColumnFiltersState>(initialColumnFilters ?? [])
   const [expanded, setExpanded] = useState<ExpandedState>({})
   const columnFilters = manualFiltering ? manualFiltering.columnFilters : ownColumnFilters
   const setColumnFilters = (updater: ColumnFiltersState | ((old: ColumnFiltersState) => ColumnFiltersState)) => {
     const next = typeof updater === 'function' ? updater(columnFilters) : updater
     if (manualFiltering) manualFiltering.onColumnFiltersChange(next)
-    else setOwnColumnFilters(next)
+    else {
+      setOwnColumnFilters(next)
+      onColumnFiltersChange?.(next)
+    }
   }
   const showColumnFilters = enableColumnFilters || !!manualFiltering
 

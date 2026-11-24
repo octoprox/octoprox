@@ -9,6 +9,7 @@ import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
 import { useTheme } from '../contexts/ThemeContext'
 import { Alert } from './ui'
 import { exchangeSsoCode } from '../api/client'
+import { takeSignInReturn } from '../utils/signInReturn'
 
 /**
  * Where the browser lands after signing in with a provider. The URL carries
@@ -32,9 +33,10 @@ export default function SsoComplete() {
       setError('This link is missing its sign-in code.')
       return
     }
-    // The app shell mounts fresh at / and reads the stored token itself.
+    // The app shell mounts fresh at the page the sign-in started from (a shared link), or at /, and reads the stored
+    // token itself.
     exchangeSsoCode(code)
-      .then(() => navigate('/', { replace: true }))
+      .then(() => navigate(takeSignInReturn() ?? '/', { replace: true }))
       .catch((err: any) => setError(err.message || 'The sign-in could not be completed.'))
   }, [params, navigate])
 

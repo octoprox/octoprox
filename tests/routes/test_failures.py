@@ -11,6 +11,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 from starlette.testclient import TestClient
 
@@ -216,6 +217,35 @@ class TestHead:
 
     def test_unknown_project(self, authenticated_client: TestClient) -> None:
         assert authenticated_client.get("/api/v1/projects/nope/failures/head").status_code == 404
+
+
+class TestOneExample:
+    async def test_by_its_id_as_the_list_gives_it(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], redis_client: RedisClient
+    ) -> None:
+        project_id = created_project["id"]
+        await _append(redis_client, project_id, [_entry(0), _entry(1, kind="upstream_timeout", upstream_status=None)])
+        url = f"/api/v1/projects/{project_id}/failures"
+
+        for record in authenticated_client.get(url).json()["records"]:
+            # As a link sends it, the colon encoded.
+            response = authenticated_client.get(f"{url}/{quote(record['id'], safe='')}")
+            assert (response.status_code, response.json()) == (200, record)
+
+    async def test_one_no_longer_kept_is_not_found(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], redis_client: RedisClient
+    ) -> None:
+        project_id = created_project["id"]
+        await _append(redis_client, project_id, [_entry()])
+        url = f"/api/v1/projects/{project_id}/failures"
+        record_id = authenticated_client.get(url).json()["records"][0]["id"]
+        authenticated_client.delete(url)
+
+        assert authenticated_client.get(f"{url}/{record_id}").status_code == 404
+        assert authenticated_client.get(f"{url}/upstream_timeout:ab12").status_code == 404
+        assert authenticated_client.get(f"{url}/nonsense:ab12").status_code == 404
+        assert authenticated_client.get(f"{url}/ab12").status_code == 422
+        assert authenticated_client.get(f"/api/v1/projects/nope/failures/{record_id}").status_code == 404
 
 
 class TestSummary:

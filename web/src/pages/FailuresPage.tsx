@@ -10,6 +10,9 @@
  *   per kind, which every gateway adds to. It does not refresh under the
  *   reader: new or recurring examples are announced and loaded on request,
  *   and an opened example stays open whatever arrives.
+ *
+ * The kind shown and the open example are in the address (kind=, open=), so a
+ * link opens the same examples.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -18,26 +21,30 @@ import { ColumnDef } from '@tanstack/react-table'
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { AlertTriangle, ArrowUp, Trash2, X } from 'lucide-react'
 import {
-  clearFailures, fetchFailureHead, fetchFailures, fetchFailureSummary,
-  FailureRecord, FailureSummary, HISTORY_RANGES,
+  clearFailures, fetchFailure, fetchFailureHead, fetchFailures, fetchFailureSummary,
+  FailureRecord, FailureSummary, HISTORY_RANGES, isNotFound,
 } from '../api/client'
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { formatRangeTick, rangeDomain, rangeTicks, useTimeRange } from '../contexts/TimeRangeContext'
+import { useDropGone, useUrlChoice, useUrlParam } from '../hooks/useUrlState'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { StatusCodeBadge } from '../components/mitm/RequestDetail'
 import {
-  FailurePanel, GROUP_INFO, GROUP_ORDER, KindBadge, REFUSED_GROUP_NOTE, formatWhen, kindInfo, type FailureGroup,
+  FailurePanel, GROUP_INFO, GROUP_ORDER, KIND_INFO, KindBadge, REFUSED_GROUP_NOTE, formatWhen, kindInfo, type FailureGroup,
 } from '../components/failures/FailureDetail'
-import { Alert, Button, Card, ConfirmDialog, InfoTip, LogoLoader, Reloading, Segmented } from '../components/ui'
+import { Alert, Button, Card, ConfirmDialog, InfoTip, Inspector, LogoLoader, QueryStatus, Reloading, Segmented } from '../components/ui'
 import { compact, formatDateTime, parseApiDate, plural } from '../utils/format'
 import { cn } from '../utils/cn'
 
 /** Examples per request; older ones load on demand. */
 const PAGE_SIZE = 200
+
+/** The kinds a link may ask for, '' for every kind; another is dropped, as the API would refuse it. */
+const KIND_CHOICES = ['', ...Object.keys(KIND_INFO)]
 
 function retentionLabel(hours: number): string {
   return hours % 24 === 0 ? `${hours / 24} ${plural(hours / 24, 'day', 'days')}` : `${hours} ${plural(hours, 'hour', 'hours')}`
@@ -62,12 +69,11 @@ export default function FailuresPage() {
   const toast = useToast()
   const { isDark } = useTheme()
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
-  // The example itself, not its id: it stays open even once newer ones push it off the loaded pages.
-  const [open, setOpen] = useState<FailureRecord | null>(null)
-  const [kindFilter, setKindFilter] = useState<string | null>(null)
+  const [kind, setKind] = useUrlChoice('kind', KIND_CHOICES, '')
+  const kindFilter = kind || null
+  const [open, setOpen] = useUrlParam('open')
+  const openId = open || null
   const [confirmClear, setConfirmClear] = useState(false)
-  // Held as a record, it would otherwise stay open over another project's page (back/forward between projects).
-  useEffect(() => { setOpen(null) }, [selectedProjectId])
 
   const summaryQuery = useQuery({
     queryKey: ['failure-summary', selectedProjectId, range],
@@ -94,7 +100,23 @@ export default function FailuresPage() {
   })
   const records = useMemo(() => examples.data?.pages.flatMap((p) => p.records) ?? [], [examples.data])
   // An example keeps its id while it recurs: once reloaded, the open one shows its latest count and times.
-  const shown = useMemo(() => (open ? (records.find((r) => r.id === open.id) ?? open) : null), [open, records])
+  const loaded = useMemo(() => (openId ? records.find((r) => r.id === openId) : undefined), [openId, records])
+  // One the loaded pages do not hold is read on its own: a link's, or a clicked one newer examples pushed off the
+  // pages. A click puts the row in this query's cache, so that one stays open without a read.
+  const single = useQuery({
+    queryKey: ['failure', selectedProjectId, openId],
+    queryFn: () => fetchFailure(selectedProjectId!, openId!),
+    enabled: !!selectedProjectId && !!openId && !loaded && !examples.isPending,
+    staleTime: Infinity,
+    retry: (count, error) => !isNotFound(error) && count < 3,
+  })
+  useDropGone('open', isNotFound(single.error), 'That failure example is no longer kept.')
+  const shown = loaded ?? single.data ?? null
+  const openRow = (row: FailureRecord) => {
+    queryClient.setQueryData(['failure', selectedProjectId, row.id], row)
+    setOpen(row.id)
+  }
+  const close = () => setOpen(null)
   const meta = examples.data?.pages[0]
   // Keyed by the load it is set against, and only polled once that load is
   // in: a head fetched for an earlier load is never shown against this one.
@@ -121,8 +143,9 @@ export default function FailuresPage() {
     mutationFn: () => clearFailures(selectedProjectId!),
     onSuccess: () => {
       queryClient.resetQueries({ queryKey: ['failures', selectedProjectId] })
+      queryClient.removeQueries({ queryKey: ['failure', selectedProjectId] })
       resetHeads()
-      setOpen(null)
+      close()
       setConfirmClear(false)
       toast.show('Failure examples cleared')
     },
@@ -246,7 +269,13 @@ export default function FailuresPage() {
       actions={nothingAtAll ? (
         <Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
       ) : undefined}
-      panel={shown ? <FailurePanel key={shown.id} record={shown} onClose={() => setOpen(null)} /> : null}
+      panel={!openId ? null : shown ? (
+        <FailurePanel key={shown.id} record={shown} onClose={close} />
+      ) : (
+        <Inspector title="Failure example" onClose={close} width={520}>
+          <QueryStatus query={single} what="the failure example" loader={<LogoLoader className="py-6" />} />
+        </Inspector>
+      )}
     >
       {meta && !meta.enabled && (
         <Alert variant="warning">
@@ -278,7 +307,7 @@ export default function FailuresPage() {
             onRange={setRange}
             isDark={isDark}
             kindFilter={kindFilter}
-            onKind={(kind) => setKindFilter((current) => (current === kind ? null : kind))}
+            onKind={(clicked) => setKind(clicked === kind ? '' : clicked)}
           />
 
           <section className="flex flex-col gap-2">
@@ -288,7 +317,7 @@ export default function FailuresPage() {
                 {kindFilter ? (
                   <button
                     type="button"
-                    onClick={() => setKindFilter(null)}
+                    onClick={() => setKind('')}
                     className="inline-flex items-center gap-1 rounded-full bg-primary-soft text-primary-soft-fg px-2 py-0.5 text-xs font-medium min-w-0 truncate"
                     title="Show every kind"
                   >
@@ -311,9 +340,9 @@ export default function FailuresPage() {
               defaultPageSize={50}
               enableColumnFilters
               getRowId={(row) => row.id}
-              onRowClick={(row) => setOpen(row)}
-              activeRowId={open?.id ?? null}
-              columnVisibility={open ? { message: false, connector: false } : {}}
+              onRowClick={openRow}
+              activeRowId={openId}
+              columnVisibility={openId ? { message: false, connector: false } : {}}
               loading={examples.isLoading}
               reloading={examples.isPlaceholderData || examples.isRefetching}
               emptyMessage={kindFilter ? `No examples of ${kindInfo(kindFilter).label.toLowerCase()} are kept right now.` : 'No examples kept right now.'}

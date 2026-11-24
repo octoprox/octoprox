@@ -43,7 +43,7 @@ export function UserMenu({ placement, collapsed = false, onSignOut }: UserMenuPr
   const go = (to: string) => {
     menu.close()
     guard.request(() => {
-      setSettingsOrigin(location.pathname)
+      setSettingsOrigin(location.pathname + location.search)
       routerNavigate(to)
     })
   }

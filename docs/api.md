@@ -1266,6 +1266,14 @@ GET /api/v1/projects/{project_id}/failures/head?since=1760526004211&kind=upstrea
 { "changed": 3, "total": 1000 }
 ```
 
+#### One example
+
+```bash
+GET /api/v1/projects/{project_id}/failures/upstream_rejected:686f7374302e6578616d706c653a343433
+```
+
+One example as the list shows it, by its `id`, also when it is not on a page already read, for a link to it. `404` once the log no longer keeps it (trimmed, cleared or never seen) and for an unknown project; `422` for an ID that is not `<kind>:<hex>`.
+
 #### Clearing
 
 ```bash
@@ -1455,6 +1463,7 @@ Every line of a [Needs attention](#needs-attention) card, a project's or the ins
 | GET | `/projects/{project_id}/alert-settings` | anyone signed in | The project's alert settings in force, and the defaults |
 | PUT | `/projects/{project_id}/alert-settings` | editor or admin | Replace the project's alert settings |
 | GET | `/alerts/install` | admin | A page of the install's alerts, newest first |
+| GET | `/alerts/install/{alert_id}` | admin | One of the install's alerts |
 | GET | `/alerts/install/retention` | admin | How many days the install's resolved alerts are kept |
 | PUT | `/alerts/install/retention` | admin | Set how many days they are kept |
 
@@ -1612,6 +1621,12 @@ GET /api/v1/alerts/install?status=resolved&since=2026-11-11T00:00:00
 ```
 
 The parameters and the answer are a project list's, without `q`; `kind` is one of `no_gateway_serving`, `store_unreachable`, `changes_not_applied`, `background_behind` and `ip_databases`. An install alert has an empty `lead`, `subject` and `action`, `link` set to the admin page (`system` or `geo`), and no `mute`; a `text` holding `{time}` has `when` set, of kind `at`, to show in the reader's time.
+
+```bash
+GET /api/v1/alerts/install/{alert_id}
+```
+
+One install alert as the list shows it, for a link to it. `404` for an ID that is not one of the install's alerts.
 
 ```bash
 GET /api/v1/alerts/install/retention

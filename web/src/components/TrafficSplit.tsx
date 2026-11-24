@@ -1,20 +1,21 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router'
 import {
   ConnectorTrafficShare, HISTORY_RANGES, TrafficSplitResponse, fetchProjectTrafficSplit,
   type ExitReputationMode, type ReputationPlace,
 } from '../api/client'
 import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useProject } from '../contexts/ProjectContext'
+import { useUrlParams } from '../hooks/useUrlState'
 import { compact, formatBytesDecimal, formatMoney, plural } from '../utils/format'
 import { cn } from '../utils/cn'
 import { ProviderLogo } from './ProviderLogo'
 import { ReputationFactor, lowered, placeLabel, reputationReason, reputationTitle, strengthNote, weightText, wouldBe, type StrengthRule } from './ConnectorReputation'
 import { RichSelect } from './RichSelect'
+import { GuardedLink } from './RouteList'
 import { Card, CardHeader, InfoTip, LogoLoader, Reloading, Segmented } from './ui'
 
 // One hue per connector position, cycling, so the bar and the rows agree: the chart palette the latency chart
@@ -73,21 +74,41 @@ export function describeShare(c: ConnectorTrafficShare, split: TrafficSplitRespo
   return `${c.name} takes ${share} of requests (${weights}), spread across ${c.eligible_proxies} healthy ${c.eligible_proxies === 1 ? 'proxy' : 'proxies'}, about ${formatShare(per)} each.`
 }
 
+/** `place=` for requests naming no location; an absent place is settled on the site's busiest. */
+const NO_PLACE = '-'
+
+/** A connector's inspector on the Connectors page, carrying the split's site and place from `params` when it has them. */
+export function connectorSplitLink(projectId: string, connectorId: string, params: URLSearchParams): string {
+  const query = new URLSearchParams({ open: connectorId })
+  const site = params.get('site')
+  const place = params.get('place')
+  if (site) query.set('site', site)
+  if (site && place) query.set('place', place)
+  return `/projects/${projectId}/connectors?${query}`
+}
+
 interface TrafficSplitPanelProps {
   projectId: string
+  /** Opens a connector in place, on the Connectors page. */
   onOpenConnector?: (connectorId: string) => void
+  /** Each connector row links to its inspector on the Connectors page, with the split's site and place. */
+  linkConnectors?: boolean
   className?: string
 }
 
-export function TrafficSplitPanel({ projectId, onOpenConnector, className }: TrafficSplitPanelProps) {
+export function TrafficSplitPanel({ projectId, onOpenConnector, linkConnectors, className }: TrafficSplitPanelProps) {
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
-  // The site, and the place its requests name (a LocationTarget key), the effective weights are shown for: none
-  // shows the configured split alone.
-  const [site, setSite] = useState('')
-  const [place, setPlace] = useState('')
-  // A picked site's place is settled once its answer lists the site's places: the place asked for stays if listed,
-  // else the busiest. Until then the place asked for is the last site's, so a place both sites list is one fetch.
-  const [settling, setSettling] = useState(false)
+  // The site, and the place its requests name (a LocationTarget key), the effective weights are shown for, both in the
+  // address: none shows the configured split alone. A site without a place settles once its answer lists the site's
+  // places, on the busiest; a link's place, No location included, stays as it is.
+  const [params, setUrl] = useUrlParams()
+  const site = params.get('site') ?? ''
+  const placeParam = site ? params.get('place') : null
+  const settling = placeParam === null && !!site
+  // While a site picked here settles, the place asked for is the last site's: it stays if the new site lists it, so a
+  // place both sites list is one fetch.
+  const [carried, setCarried] = useState('')
+  const place = settling ? carried : placeParam === NO_PLACE ? '' : placeParam ?? ''
   const { selectedProject } = useProject()
   const mode = selectedProject?.id === projectId ? selectedProject.exit_reputation : undefined
   const { data: split, isPlaceholderData, isError, error } = useQuery({
@@ -101,26 +122,29 @@ export function TrafficSplitPanel({ projectId, onOpenConnector, className }: Tra
     placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === projectId ? previous : undefined),
   })
 
+  // On the answer for the site asked for, not the last one still shown meanwhile; the answer names the site as the API
+  // reads it, which a hand-written link need not match.
   useEffect(() => {
-    if (!settling || !split || split.site !== site || (split.place ?? '') !== place) return
+    if (!settling || !split || isPlaceholderData) return
     const places = split.reputation_places ?? []
-    if (!place || !places.some((p) => p.place === place)) setPlace(places[0]?.place ?? '')
-    setSettling(false)
-  }, [settling, split, site, place])
+    const settled = place && places.some((p) => p.place === place) ? place : places[0]?.place ?? ''
+    setUrl({ place: settled || NO_PLACE })
+    setCarried('')
+  }, [settling, split, isPlaceholderData, place, setUrl])
 
   const pickSite = (value: string) => {
-    setSite(value)
-    if (!value) setPlace('')
-    setSettling(!!value)
+    setCarried(place)
+    setUrl({ site: value || null, place: null })
   }
   // "No location" picked here stays: only a site switch settles the place again.
   const pickPlace = (value: string) => {
-    setPlace(value)
-    setSettling(false)
+    setCarried('')
+    setUrl({ place: value || NO_PLACE })
   }
-  const picker = split && <SitePicker projectId={projectId} split={split} site={site} place={place} onSite={pickSite} onPlace={pickPlace} />
+  const open: RowOpen = { linkOf: linkConnectors ? (connectorId) => connectorSplitLink(projectId, connectorId, params) : undefined, onOpenConnector }
+  const picker = split && <SitePicker projectId={projectId} split={split} site={site} place={place} placeParam={placeParam} onSite={pickSite} onPlace={pickPlace} />
   const body = split
-    ? <Reloading active={isPlaceholderData}><TrafficSplitBody split={split} mode={mode} onOpenConnector={onOpenConnector} /></Reloading>
+    ? <Reloading active={isPlaceholderData}><TrafficSplitBody split={split} mode={mode} open={open} /></Reloading>
     : isError
       ? <p className="text-xs text-danger py-3">Could not load the traffic split{error instanceof Error && error.message ? `: ${error.message}` : ''}.</p>
       : <LogoLoader size="sm" className="py-3" />
@@ -157,11 +181,13 @@ const placeLevel = (place: string) => {
  * the place its requests name, every one searchable. Shown only while the project has such sites, so the card is as
  * it always was without.
  */
-function SitePicker({ projectId, split, site, place, onSite, onPlace }: {
+function SitePicker({ projectId, split, site, place, placeParam, onSite, onPlace }: {
   projectId: string
   split: TrafficSplitResponse
   site: string
   place: string
+  /** The place as the address holds it, for the Reputation tab: null while it settles. */
+  placeParam: string | null
   onSite: (site: string) => void
   onPlace: (place: string) => void
 }) {
@@ -175,6 +201,9 @@ function SitePicker({ projectId, split, site, place, onSite, onPlace }: {
   ]
   // The places are the picked site's once its answer is in; meanwhile the last site's are not offered.
   const places: ReputationPlace[] = split.site === site ? split.reputation_places ?? [] : []
+  // The place goes along only when the site lists it, as the Reputation tab opens that row; No location seldom is one.
+  const placeListed = placeParam !== null && places.some((p) => p.place === place)
+  const everyPlace = new URLSearchParams({ tab: 'reputation', site, ...(placeListed ? { place: placeParam } : {}) })
   const placeOptions = [
     { value: '', label: 'No location' },
     ...(!place || places.some((p) => p.place === place) ? [] : [{ value: place, label: placeLabel(place), badge: placeLevel(place) }]),
@@ -194,12 +223,12 @@ function SitePicker({ projectId, split, site, place, onSite, onPlace }: {
         </span>
       )}
       {site && (
-        <Link
-          to={`/projects/${projectId}/locations?tab=reputation&site=${encodeURIComponent(site)}`}
+        <GuardedLink
+          to={`/projects/${projectId}/locations?${everyPlace}`}
           className="ml-auto inline-flex items-center font-medium text-primary hover:brightness-110 whitespace-nowrap pointer-coarse:min-h-11"
         >
           Every place for this site →
-        </Link>
+        </GuardedLink>
       )}
     </div>
   )
@@ -247,9 +276,21 @@ function ConnectorName({ c, off }: { c: ConnectorTrafficShare; off: boolean }) {
   )
 }
 
-function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSplitResponse; mode?: ExitReputationMode; onOpenConnector?: (id: string) => void }) {
+/** How a connector's row opens it: a link to its inspector on another page, or in place on this one. */
+type RowOpen = { linkOf?: (connectorId: string) => string; onOpenConnector?: (connectorId: string) => void }
+
+/** A connector's row: a link where the split links its connectors, a button where it opens them in place, else plain. */
+function ConnectorRow({ id, open, className, title, children }: { id: string; open: RowOpen; className: string; title: string; children: ReactNode }) {
+  const { linkOf, onOpenConnector } = open
+  const hover = 'hover:bg-surface-raised transition-colors'
+  if (linkOf) return <GuardedLink to={linkOf(id)} title={title} className={cn(className, hover)}>{children}</GuardedLink>
+  if (onOpenConnector) return <button type="button" onClick={() => onOpenConnector(id)} title={title} className={cn(className, hover)}>{children}</button>
+  return <div title={title} className={className}>{children}</div>
+}
+
+function TrafficSplitBody({ split, mode, open }: { split: TrafficSplitResponse; mode?: ExitReputationMode; open: RowOpen }) {
   if (split.connectors.length === 0) return <p className="text-xs text-fg-muted py-3">No connectors yet.</p>
-  if (split.site) return <SiteSplitBody split={split} site={split.site} mode={mode} onOpenConnector={onOpenConnector} />
+  if (split.site) return <SiteSplitBody split={split} site={split.site} mode={mode} open={open} />
   const active = split.connectors.filter((c) => !c.excluded_reason)
   const priced = split.connectors.some((c) => c.cost != null)
   // Wide containers lay each connector out as one row of six columns, the band, the header and every row on one
@@ -291,12 +332,12 @@ function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSpli
           </div>
           {split.connectors.map((c, i) => {
             const off = !!c.excluded_reason
-            const Row = onOpenConnector ? 'button' : 'div'
             return (
-              <Row
+              <ConnectorRow
                 key={c.connector_id}
-                {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
-                className={`w-full grid grid-cols-[auto_minmax(0,1fr)_auto] @md:grid-cols-subgrid @md:col-span-full items-center gap-x-3 gap-y-0.5 py-1.5 @md:py-0 @md:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
+                id={c.connector_id}
+                open={open}
+                className="w-full grid grid-cols-[auto_minmax(0,1fr)_auto] @md:grid-cols-subgrid @md:col-span-full items-center gap-x-3 gap-y-0.5 py-1.5 @md:py-0 @md:h-[32px] px-1.5 rounded-md text-[12.5px] text-left"
                 title={describeShare(c, split)}
               >
                 <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
@@ -322,7 +363,7 @@ function TrafficSplitBody({ split, mode, onOpenConnector }: { split: TrafficSpli
                     {c.cost != null && c.currency ? formatMoney(c.cost, c.currency) : '-'}
                   </span>
                 )}
-              </Row>
+              </ConnectorRow>
             )
           })}
         </div>
@@ -344,11 +385,11 @@ const MODE_NAMES: Record<ExitReputationMode, string> = { off: 'Off', record: 'Re
  * weight that makes and the share of the site's requests it gets, the configured split faint above that one. While the
  * project does not avoid, the numbers are what Avoid would do, and say so.
  */
-function SiteSplitBody({ split, site, mode, onOpenConnector }: {
+function SiteSplitBody({ split, site, mode, open }: {
   split: TrafficSplitResponse
   site: string
   mode?: ExitReputationMode
-  onOpenConnector?: (id: string) => void
+  open: RowOpen
 }) {
   const place = split.place ?? ''
   const places = split.reputation_places ?? []
@@ -427,16 +468,16 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
           {split.connectors.map((c, i) => {
             const off = !takes(c)
             const { weight: effectiveWeight, share: effectiveShare } = effective.get(c.connector_id) ?? { weight: 0, share: 0 }
-            const Row = onOpenConnector ? 'button' : 'div'
             // A connector off every request says why; one kept off this site's requests from the place, what can.
             const offTitle = c.excluded_reason === 'disabled' || c.excluded_reason === 'traffic_limit'
               ? describeShare(c, split)
               : `${c.name} takes none of the requests to ${site}${from}: no healthy row of it serves them, or its domain filter or a country another connector reserves keeps it off.`
             return (
-              <Row
+              <ConnectorRow
                 key={c.connector_id}
-                {...(onOpenConnector ? { type: 'button' as const, onClick: () => onOpenConnector(c.connector_id) } : {})}
-                className={`w-full grid grid-cols-[auto_minmax(0,1fr)] @lg:grid-cols-subgrid @lg:col-span-full items-center gap-x-3 gap-y-0.5 py-1.5 @lg:py-0 @lg:h-[32px] px-1.5 rounded-md text-[12.5px] text-left ${onOpenConnector ? 'hover:bg-surface-raised transition-colors' : ''}`}
+                id={c.connector_id}
+                open={open}
+                className="w-full grid grid-cols-[auto_minmax(0,1fr)] @lg:grid-cols-subgrid @lg:col-span-full items-center gap-x-3 gap-y-0.5 py-1.5 @lg:py-0 @lg:h-[32px] px-1.5 rounded-md text-[12.5px] text-left"
                 title={off ? offTitle : reputationTitle(c.name, c, site, place, places, compared(c))}
               >
                 <span className={`w-2 h-2 rounded-full ${off ? 'bg-fg-subtle' : swatch(i)}`} />
@@ -467,7 +508,7 @@ function SiteSplitBody({ split, site, mode, onOpenConnector }: {
                     {formatShare(c.observed_share)}
                   </span>
                 </span>
-              </Row>
+              </ConnectorRow>
             )
           })}
         </div>

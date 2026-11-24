@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { Check, Loader, Power, AlertTriangle } from 'lucide-react'
@@ -23,12 +22,14 @@ import { Page } from '../components/layout/Page'
 import { LatencyChart } from '../components/charts/LatencyChart'
 import { Sparkline } from '../components/charts/Sparkline'
 import { ProjectLocations, LocationSummary } from '../components/ProjectLocations'
-import { TrafficSplitPanel, totalSpend } from '../components/TrafficSplit'
+import { TrafficSplitPanel, connectorSplitLink, totalSpend } from '../components/TrafficSplit'
 import { PERIOD_LABEL, TrafficUsageBar, describeUsage } from '../components/ConnectorTraffic'
 import { Badge, Card, CardHeader, KeyValue, Legend, LogoLoader, Segmented } from '../components/ui'
 import { AttentionCard } from '../components/attention/AttentionCard'
 import { AttentionPanel } from '../components/attention/AttentionPanel'
+import { GuardedLink } from '../components/RouteList'
 import { invalidateAttention, useProjectAttention } from '../hooks/useProjectAttention'
+import { useUrlChoice, useUrlParams } from '../hooks/useUrlState'
 import { cn } from '../utils/cn'
 
 type ChartPoint = {
@@ -104,9 +105,11 @@ const C = { requests: '#2563eb', successes: '#16a34a', failures: '#dc2626', sent
 const REQUEST_SERIES = ['request_count', 'success_count', 'failure_count']
 const TRAFFIC_SERIES = ['bytes_sent', 'bytes_received']
 
+/** The side panel in `open=`: the full Needs attention list, or none. */
+const PANELS = ['', 'attention'] as const
+
 export default function Overview() {
   const queryClient = useQueryClient()
-  const navigate = useNavigate()
   const { selectedProjectId, selectedProject, refreshProject } = useProject()
   const { canMutate } = useAuth()
   const { isDark } = useTheme()
@@ -114,7 +117,8 @@ export default function Overview() {
   const [range, setRange] = useTimeRange(HISTORY_RANGES)
   const [routingOpen, setRoutingOpen] = useState(false)
   const [locations, setLocations] = useState<LocationSummary | null>(null)
-  const [attentionOpen, setAttentionOpen] = useState(false)
+  const [panel, setPanel] = useUrlChoice('open', PANELS, '')
+  const [params] = useUrlParams()
 
   const { data: metrics } = useQuery({
     queryKey: ['metrics', selectedProjectId],
@@ -186,6 +190,8 @@ export default function Overview() {
 
   const connectors = connectorsData?.connectors ?? []
   const base = `/projects/${selectedProjectId}`
+  // A connector opens on the Connectors page with the traffic split's site and place, where the split shows.
+  const connectorLink = (id: string) => (connectors.length > 1 ? connectorSplitLink(selectedProjectId!, id, params) : `${base}/connectors?open=${id}`)
   // Spend this period across the connectors that carry a price, when they agree on a currency.
   const spend = useMemo(() => {
     const usages = connectors.map((c) => c.traffic_usage).filter((u): u is NonNullable<typeof u> => !!u && u.cost != null)
@@ -200,11 +206,11 @@ export default function Overview() {
       title="Overview"
       subtitle={selectedProject ? `Pool health and traffic for ${selectedProject.name}` : undefined}
       actions={<Segmented options={HISTORY_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} />}
-      panel={attentionOpen && selectedProjectId ? (
-        <AttentionPanel projectId={selectedProjectId} projectName={selectedProject?.name ?? ''} attention={attention} canMutate={canMutate} onClose={() => setAttentionOpen(false)} />
+      panel={panel === 'attention' && selectedProjectId ? (
+        <AttentionPanel projectId={selectedProjectId} projectName={selectedProject?.name ?? ''} attention={attention} canMutate={canMutate} onClose={() => setPanel('')} />
       ) : null}
     >
-      {selectedProjectId && <AttentionCard projectId={selectedProjectId} onShowAll={() => setAttentionOpen(true)} />}
+      {selectedProjectId && <AttentionCard projectId={selectedProjectId} onShowAll={() => setPanel('attention')} />}
 
       {/* Hero: success rate + pool health */}
       <Card className="grid grid-cols-1 @xl:grid-cols-[240px_minmax(0,1fr)] overflow-hidden">
@@ -248,7 +254,7 @@ export default function Overview() {
             {scaling && scaling.terminating_instances > 0 && (
               <span className="inline-flex items-center gap-1.5"><Power className="w-3 h-3 text-purple-500" /> {scaling.terminating_instances} terminating</span>
             )}
-            <button onClick={() => navigate(`${base}/proxies`)} className="text-primary font-medium hover:brightness-110">View proxies →</button>
+            <GuardedLink to={`${base}/proxies`} className="inline-flex items-center text-primary font-medium hover:brightness-110 pointer-coarse:min-h-11 pointer-coarse:-my-3">View proxies →</GuardedLink>
           </div>
         </div>
       </Card>
@@ -257,7 +263,7 @@ export default function Overview() {
       <Card className={`grid grid-cols-2 @lg:grid-cols-3 ${spend ? '@5xl:grid-cols-7' : '@5xl:grid-cols-6'} gap-px bg-line overflow-hidden *:bg-surface`}>
         <Kpi label="Requests" value={compact(totals.requests)} spark={sparks.requests} color={C.requests} />
         <Kpi label="Successes" value={compact(totals.successes)} spark={sparks.successes} color={C.successes} />
-        <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} sub={totals.failures > 0 ? 'See why →' : undefined} onClick={() => navigate(`${base}/failures`)} />
+        <Kpi label="Failures" value={compact(totals.failures)} spark={sparks.failures} color={C.failures} sub={totals.failures > 0 ? 'See why →' : undefined} to={`${base}/failures`} />
         <Kpi label="Bytes sent" value={bytesShort(totals.bytesSent)} spark={sparks.sent} color={C.sent} />
         <Kpi label="Bytes received" value={bytesShort(totals.bytesReceived)} spark={sparks.received} color={C.received} />
         <Kpi label="Requests / min" value={scaling ? formatRpm(scaling.requests_per_minute) : '-'} sub={scaling ? `${scaling.rate_per_proxy.toFixed(1)} per proxy` : undefined} />
@@ -342,7 +348,7 @@ export default function Overview() {
       {/* How traffic divides between connectors, full width under the charts:
           the table has up to six columns and needs the room. */}
       {connectors.length > 1 && selectedProjectId && (
-        <TrafficSplitPanel projectId={selectedProjectId} onOpenConnector={(id) => navigate(`${base}/connectors?open=${id}`)} />
+        <TrafficSplitPanel projectId={selectedProjectId} linkConnectors />
       )}
 
       {/* Connectors, routing, auto-scaling: one card per column. */}
@@ -350,20 +356,20 @@ export default function Overview() {
         <Card className="px-4 py-3">
           <CardHeader
             title="Connectors"
-            action={<button onClick={() => navigate(`${base}/connectors`)} className="text-xs text-primary hover:brightness-110">All {connectors.length} →</button>}
+            action={<GuardedLink to={`${base}/connectors`} className="inline-flex items-center text-xs text-primary hover:brightness-110 pointer-coarse:min-h-11 pointer-coarse:-my-3">All {connectors.length} →</GuardedLink>}
             className="mb-1"
           />
           {connectors.length === 0 ? (
-            <p className="text-xs text-fg-muted py-3">No connectors yet. <button onClick={() => navigate(`${base}/connectors`)} className="text-primary">Add one →</button></p>
+            <p className="text-xs text-fg-muted py-3">No connectors yet. <GuardedLink to={`${base}/connectors`} className="text-primary">Add one →</GuardedLink></p>
           ) : (
             <div className="-mx-1.5">
               {connectors.map((c) => {
                 const max = targetTotal(c)
                 return (
-                  <button
+                  <GuardedLink
                     key={c.id}
-                    onClick={() => navigate(`${base}/connectors?open=${c.id}`)}
-                    className="w-full flex items-center gap-2.5 h-[34px] px-1.5 rounded-md text-[12.5px] hover:bg-surface-raised transition-colors text-left"
+                    to={connectorLink(c.id)}
+                    className="w-full flex items-center gap-2.5 h-[34px] pointer-coarse:h-11 px-1.5 rounded-md text-[12.5px] hover:bg-surface-raised transition-colors text-left"
                   >
                     <ProviderLogo type={c.credential_type} className="w-4 h-4 text-[16px] flex-none" />
                     <span className={cnTrunc(!c.enabled)}>{c.name}</span>
@@ -371,7 +377,7 @@ export default function Overview() {
                     {c.traffic_usage && c.traffic_usage.limit_bytes != null && <TrafficUsageBar usage={c.traffic_usage} compact className="text-xs text-fg-muted flex-none" />}
                     <span className="text-fg-muted tabular-nums flex-none" title={describeTarget(c)}>{c.proxy_count}{isDynamic(c) ? <span className="text-fg-subtle"> dyn</span> : max != null && <span className="text-fg-subtle">/{max}</span>}</span>
                     <span className={`w-2 h-2 rounded-full flex-none ${!c.enabled ? 'bg-fg-subtle' : hasError(c) ? 'bg-danger' : c.traffic_usage?.blocked ? 'bg-orange-500' : 'bg-success'}`} title={c.traffic_usage?.blocked ? describeUsage(c.traffic_usage) : undefined} />
-                  </button>
+                  </GuardedLink>
                 )
               })}
             </div>
@@ -450,13 +456,10 @@ function ChartLegend({ items, small }: { items: [string, string][]; small?: bool
   )
 }
 
-function Kpi({ label, value, sub, spark, color, onClick, className }: { label: string; value: string; sub?: string; spark?: number[]; color?: string; onClick?: () => void; className?: string }) {
-  const Tile = onClick ? 'button' : 'div'
-  return (
-    <Tile
-      {...(onClick ? { type: 'button' as const, onClick } : {})}
-      className={cn('px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0 text-left', onClick && 'hover:bg-surface-raised! transition-colors', className)}
-    >
+/** A tile of the KPI row; `to` makes it a link to the page that explains it. */
+function Kpi({ label, value, sub, spark, color, to, className }: { label: string; value: string; sub?: string; spark?: number[]; color?: string; to?: string; className?: string }) {
+  const body = (
+    <>
       <div className="text-xs text-fg-muted truncate">{label}</div>
       {/* Wrapping drops the sparkline under the value when both do not fit, so a tight tile never truncates the number */}
       <div className="flex items-end justify-between flex-wrap gap-x-2 gap-y-1">
@@ -466,8 +469,10 @@ function Kpi({ label, value, sub, spark, color, onClick, className }: { label: s
         </div>
         {spark && spark.length > 1 && color && <Sparkline values={spark} color={color} width={40} height={24} />}
       </div>
-    </Tile>
+    </>
   )
+  const classes = cn('px-3 py-2.5 @lg:px-4 @lg:py-3 flex flex-col gap-1 min-w-0 text-left', to && 'hover:bg-surface-raised! transition-colors', className)
+  return to ? <GuardedLink to={to} className={classes}>{body}</GuardedLink> : <div className={classes}>{body}</div>
 }
 
 const DEMAND_COLORS: Record<string, 'green' | 'yellow' | 'red'> = { LOW: 'green', MEDIUM: 'yellow', HIGH: 'red' }

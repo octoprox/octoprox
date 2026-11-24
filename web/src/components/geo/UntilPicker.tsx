@@ -60,13 +60,16 @@ function fieldsToMoment(date: string, time: string): number | null {
  * picker and a plain time box (typing "1430" beats stepping through the
  * segments of a native date-time control), and nothing reloads while they are
  * edited: Apply, or Enter in either, sets them. `onChange` hears the applied
- * moment as an ISO time, undefined for now.
+ * moment as an ISO time, undefined for now. `initial`, an ISO time a link
+ * carries, opens it on that moment as Custom; it is read once.
  */
-export function UntilPicker({ onChange }: { onChange: (until: string | undefined) => void }) {
-  const [choice, setChoice] = useState<Choice>('now')
-  const [applied, setApplied] = useState<number | null>(null)
-  const [date, setDate] = useState('')
-  const [time, setTime] = useState('')
+export function UntilPicker({ initial, onChange }: { initial?: string; onChange: (until: string | undefined) => void }) {
+  const start = initial ? Date.parse(initial) : NaN
+  const linked = Number.isNaN(start) ? null : start
+  const [choice, setChoice] = useState<Choice>(linked === null ? 'now' : 'custom')
+  const [applied, setApplied] = useState<number | null>(linked)
+  const [date, setDate] = useState(() => (linked === null ? '' : toFields(linked).date))
+  const [time, setTime] = useState(() => (linked === null ? '' : toFields(linked).time))
 
   const apply = (at: number | null) => {
     setApplied(at)

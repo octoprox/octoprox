@@ -1,8 +1,10 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useQuery } from '@tanstack/react-query'
+import { queryOptions, useQuery } from '@tanstack/react-query'
+import { Link, useLocation, useNavigate } from 'react-router'
 import { fetchExitIpReputation, type ExitIpReputation, type ExitReputationRecord } from '../../api/client'
+import { useNavigationGuardContext } from '../../contexts/NavigationGuardContext'
 import { useProject } from '../../contexts/ProjectContext'
 import { Badge, Inspector, InspectorSection, KeyValue, LogoLoader, QueryContent } from '../ui'
 import { formatDateTime, parseApiDate, relativeTime, timeUntil } from '../../utils/format'
@@ -133,12 +135,42 @@ function ServedBy({ reputation }: { reputation: ExitIpReputation }) {
   )
 }
 
-/** Where the rest are when an IP has more sites than one answer lists (a wide crawl's exit): the Reputation tab. */
-function MoreSites({ reputation }: { reputation: ExitIpReputation }) {
+/** One exit IP's records over every site and the connectors that served it, for the inspectors and the page's link check. */
+export const ipReputationQuery = (projectId: string, ip: string) => queryOptions({
+  queryKey: ['exit-reputation-ip', projectId, ip],
+  queryFn: () => fetchExitIpReputation(projectId, ip),
+  refetchInterval: 60_000,
+})
+
+/** Where the rest are when an IP has more sites than one answer lists (a wide crawl's exit): its records on the Reputation tab. */
+function MoreSites({ projectId, reputation }: { projectId: string; reputation: ExitIpReputation }) {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const guard = useNavigationGuardContext()
   if (reputation.records.length >= reputation.sites) return null
+  const page = `/projects/${projectId}/locations`
+  // On that page already, the records filter changes in place and this panel closes, so the table shows.
+  const here = location.pathname === page
+  const query = new URLSearchParams(here ? location.search : '')
+  for (const key of ['open', 'place', 'records_site', 'records_status']) query.delete(key)
+  query.set('tab', 'reputation')
+  query.set('records_ip', reputation.ip)
+  const to = `${page}?${query}`
   return (
     <p className="text-xs text-fg-muted">
-      Showing {reputation.records.length} of {reputation.sites.toLocaleString()} sites, those in force first, then the latest seen. The Reputation tab of Exit locations lists every one: filter it by this IP.
+      Showing {reputation.records.length} of {reputation.sites.toLocaleString()} sites, those in force first, then the latest seen.{' '}
+      <Link
+        to={to}
+        replace={here}
+        onClick={(e) => {
+          if (!guard.blocked) return
+          e.preventDefault()
+          guard.request(() => navigate(to, { replace: here }))
+        }}
+        className="inline-flex items-center text-primary hover:brightness-110 pointer-coarse:min-h-11"
+      >
+        Every one on the Reputation tab →
+      </Link>
     </p>
   )
 }
@@ -154,11 +186,7 @@ function useRecordOnly(projectId: string): boolean {
 
 /** Every site's record of one exit IP, with its numbers and ends, and the connectors that served it. */
 export function ExitIpReputationInspector({ projectId, ip, onClose }: { projectId: string; ip: string; onClose: () => void }) {
-  const query = useQuery({
-    queryKey: ['exit-reputation-ip', projectId, ip],
-    queryFn: () => fetchExitIpReputation(projectId, ip),
-    refetchInterval: 60_000,
-  })
+  const query = useQuery(ipReputationQuery(projectId, ip))
   const recordOnly = useRecordOnly(projectId)
   const sites = query.data?.sites ?? 0
   const avoided = query.data?.avoided_sites ?? 0
@@ -174,7 +202,7 @@ export function ExitIpReputationInspector({ projectId, ip, onClose }: { projectI
             <InspectorSection title="Sites">
               {reputation.records.length === 0
                 ? <p className="text-xs text-fg-subtle">Nothing recorded for this IP.</p>
-                : <div className="space-y-2"><MoreSites reputation={reputation} />{reputation.records.map((r) => <SiteRecord key={r.site} record={r} />)}</div>}
+                : <div className="space-y-2"><MoreSites projectId={projectId} reputation={reputation} />{reputation.records.map((r) => <SiteRecord key={r.site} record={r} />)}</div>}
               <p className="text-xs text-fg-muted">Counts are for the record's life; recent ones fade by the project's Remember for and decide the avoid. Bad reports avoid the exit for the site wherever it serves.{recordOnly && RECORD_MODE_NOTE}</p>
             </InspectorSection>
             <InspectorSection title="Seen behind">
@@ -189,11 +217,7 @@ export function ExitIpReputationInspector({ projectId, ip, onClose }: { projectI
 
 /** A static row's exit reputation in the proxy inspector: each site of its exit IP with its status and ends. */
 export function ProxyReputationSection({ projectId, ip }: { projectId: string; ip: string }) {
-  const query = useQuery({
-    queryKey: ['exit-reputation-ip', projectId, ip],
-    queryFn: () => fetchExitIpReputation(projectId, ip),
-    refetchInterval: 60_000,
-  })
+  const query = useQuery(ipReputationQuery(projectId, ip))
   const recordOnly = useRecordOnly(projectId)
   return (
     <InspectorSection title="Exit reputation">
@@ -205,7 +229,7 @@ export function ProxyReputationSection({ projectId, ip }: { projectId: string; i
             <p className="text-xs text-fg-muted">
               By its exit <span className="font-mono">{ip}</span>, per site.{recordOnly && RECORD_MODE_NOTE}
             </p>
-            <MoreSites reputation={reputation} />
+            <MoreSites projectId={projectId} reputation={reputation} />
             {reputation.records.map((r) => <SiteRecord key={r.site} record={r} compact />)}
           </div>
         )}

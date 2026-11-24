@@ -3,7 +3,7 @@
 
 import { useState, useRef, useMemo, useCallback, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ColumnDef, ColumnVisibilityState } from '@tanstack/react-table'
+import { ColumnDef, ColumnFiltersState, ColumnVisibilityState } from '@tanstack/react-table'
 import { Plus, Trash2, Upload, Lock, ShieldOff, MapPin, AlertTriangle, HelpCircle } from 'lucide-react'
 import {
   fetchProjectProxies, fetchProjectConnectors, createProjectProxy, updateProjectProxy, deleteProjectProxy,
@@ -12,9 +12,11 @@ import {
 import { useProject } from '../contexts/ProjectContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
+import { useDropGone, useUrlChoice, useUrlParams, useUrlTab } from '../hooks/useUrlState'
 import { DataTable, createSelectionColumn, type DataTableFeatures } from '../components/DataTable'
 import { Page } from '../components/layout/Page'
-import { ProxyStatusDot, ProxyStatusBadge, formatQuarantineRemaining } from '../components/ProxyStatus'
+import { PROXY_STATUSES, ProxyStatusDot, ProxyStatusBadge, displayStatus, formatQuarantineRemaining } from '../components/ProxyStatus'
+import { ConnectorLink } from '../components/RouteList'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { useProviders } from '../hooks/useProviders'
 import { EntityHistory } from '../components/audit/EntityHistory'
@@ -23,24 +25,36 @@ import { ProxyReputationSection } from '../components/geo/ExitIpReputation'
 import { formatBytes, formatDate, formatDateTime } from '../utils/format'
 import { Button, Input, Select, Label, Alert, Inspector, InspectorSection, StatGrid, KeyValue, ConfirmDialog, CopyButton, QueryContent, Tabs } from '../components/ui'
 
-type PanelState =
-  | { kind: 'proxy'; id: string }
-  | { kind: 'new' }
-  | { kind: 'upload' }
-  | null
+/** The panels that stay out of the address: forms to fill, not things to point a colleague at. */
+type LocalPanel = 'new' | 'upload' | null
 
 const PROTOCOLS = ['http', 'https', 'socks4', 'socks5']
 
 /** What an open proxy shows: its details, or its History in their place. */
 type ProxyView = 'details' | 'history'
+const PROXY_VIEWS: readonly ProxyView[] = ['details', 'history']
+const STATUS_CHOICES = ['', ...PROXY_STATUSES]
+
+/** One key for the Status and Connector filters, to tell the table's own changes from the address's. */
+const filtersKey = (status: string, connector: string) => `${status}|${connector}`
 
 export default function ProxiesPage() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
   const { canMutate } = useAuth()
   const toast = useToast()
-  const [panel, setPanel] = useState<PanelState>(null)
+  // The open proxy, its tab and the Status and Connector filters are in the address, so a link opens them.
+  const [params, setUrl] = useUrlParams()
+  const openId = params.get('open')
+  const [view, setView, viewReveal] = useUrlTab(PROXY_VIEWS, 'details', 'view')
+  const [statusFilter] = useUrlChoice('status', STATUS_CHOICES, '')
+  const connectorFilter = params.get('connector') ?? ''
+  const [local, setLocal] = useState<LocalPanel>(null)
   const [pendingDelete, setPendingDelete] = useState<Proxy[] | null>(null)
+  const openPanel = (id: string | null) => setUrl({ open: id, view: null })
+  const openLocal = (panel: LocalPanel) => { setLocal(panel); openPanel(null) }
+  // A proxy opened by a link replaces an add or upload panel left open.
+  useEffect(() => { if (openId) setLocal(null) }, [openId])
 
   const proxiesQuery = useQuery({
     queryKey: ['proxies', selectedProjectId],
@@ -49,12 +63,13 @@ export default function ProxiesPage() {
     refetchInterval: 10000, // statuses and counters move
   })
   const { data } = proxiesQuery
-  const { data: connectorsData } = useQuery({
+  const connectorsQuery = useQuery({
     queryKey: ['connectors', selectedProjectId],
     queryFn: () => fetchProjectConnectors(selectedProjectId!),
     enabled: !!selectedProjectId,
     refetchInterval: false,
   })
+  const { data: connectorsData } = connectorsQuery
   const staticConnectors = useMemo(
     () => connectorsData?.connectors.filter((c) => c.credential_type === 'static_proxy_provider') || [],
     [connectorsData]
@@ -79,20 +94,58 @@ export default function ProxiesPage() {
     },
     onSuccess: (n, proxies) => {
       invalidate()
-      if (panel?.kind === 'proxy' && proxies.some((p) => p.id === panel.id)) setPanel(null)
+      if (openId && proxies.some((p) => p.id === openId)) openPanel(null)
       setPendingDelete(null)
       toast.show(n === 1 ? 'Proxy deleted' : `${n} proxies deleted`)
     },
     onError: (e: Error) => { setPendingDelete(null); toast.show(e.message || 'Delete failed', 'error') },
   })
 
-  const proxies = data?.proxies ?? []
-  const openProxy = panel?.kind === 'proxy' ? proxies.find((p) => p.id === panel.id) ?? null : null
+  const proxies = useMemo(() => data?.proxies ?? [], [data])
+  const openProxy = openId ? proxies.find((p) => p.id === openId) ?? null : null
 
-  // If the open proxy disappears (deleted elsewhere), close the panel.
+  // Cloud proxies and session slots are replaced as they rotate, so a link to one goes stale. Judged on a list fetched
+  // for this visit: a cached one can predate a proxy the link names.
+  useDropGone(['open', 'view'], !!openId && !!data && !proxiesQuery.isFetching && !openProxy, 'That proxy no longer exists.')
+  useDropGone(
+    'connector',
+    !!connectorFilter && !!connectorsData && !connectorsQuery.isFetching && !connectorsData.connectors.some((c) => c.id === connectorFilter),
+    'That connector no longer exists.',
+  )
+
+  // The table owns its filters, starting from the address's, and reports each change back to it. When something
+  // else changes them there (the sidebar entry, a link), the table starts again from the address.
+  const initialFilters = useMemo<ColumnFiltersState>(() => [
+    ...(statusFilter ? [{ id: 'status', value: statusFilter }] : []),
+    ...(connectorFilter ? [{ id: 'connector', value: connectorFilter }] : []),
+  ], [statusFilter, connectorFilter])
+  const tableFilters = useRef(filtersKey(statusFilter, connectorFilter))
+  const [tableKey, setTableKey] = useState(0)
   useEffect(() => {
-    if (panel?.kind === 'proxy' && data && !proxies.some((p) => p.id === panel.id)) setPanel(null)
-  }, [data])
+    const linked = filtersKey(statusFilter, connectorFilter)
+    if (linked === tableFilters.current) return
+    tableFilters.current = linked
+    setTableKey((k) => k + 1)
+  }, [statusFilter, connectorFilter])
+  const onFiltersChange = useCallback((filters: ColumnFiltersState) => {
+    const value = (id: string) => String(filters.find((f) => f.id === id)?.value ?? '')
+    tableFilters.current = filtersKey(value('status'), value('connector'))
+    setUrl({ status: value('status'), connector: value('connector') })
+  }, [setUrl])
+
+  // The statuses and connectors in the rows, plus a link's when none of its rows is left, so the select names it.
+  const statusOptions = useMemo(() => {
+    const present = new Set(proxies.map(displayStatus))
+    if (statusFilter) present.add(statusFilter)
+    return [...present].sort().map((s) => ({ value: s, label: s }))
+  }, [proxies, statusFilter])
+  const connectorOptions = useMemo(() => {
+    const names = new Map(proxies.map((p) => [p.connector_id, p.connector_name || p.connector_id]))
+    if (connectorFilter && !names.has(connectorFilter)) {
+      names.set(connectorFilter, connectorsData?.connectors.find((c) => c.id === connectorFilter)?.name ?? connectorFilter)
+    }
+    return [...names].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label))
+  }, [proxies, connectorFilter, connectorsData])
 
   const columns: ColumnDef<DataTableFeatures, Proxy>[] = useMemo(() => [
     ...(canMutate ? [createSelectionColumn<Proxy>()] : []),
@@ -112,15 +165,20 @@ export default function ProxiesPage() {
       accessorKey: 'protocol',
       header: 'Proto',
       size: 80,
+      // Exact: 'http' must not also show 'https'.
+      filterFn: 'equalsString',
       meta: { filterVariant: 'select' as const },
       cell: ({ getValue }) => <span className="uppercase text-[11px] font-semibold text-fg-subtle">{getValue<string>()}</span>,
     },
     {
-      accessorKey: 'connector_name',
+      // Filtered by id, which a link carries and a rename does not change; shown by name.
+      id: 'connector',
+      accessorFn: (row: Proxy) => row.connector_id,
       header: 'Connector',
       enableSorting: false,
-      meta: { filterVariant: 'select' as const },
-      cell: ({ getValue }) => <span className="text-fg-muted truncate block">{getValue<string>() || '-'}</span>,
+      filterFn: 'equalsString',
+      meta: { filterVariant: 'select' as const, filterOptions: connectorOptions },
+      cell: ({ row }) => <span className="text-fg-muted truncate block">{row.original.connector_name || '-'}</span>,
     },
     {
       id: 'country',
@@ -142,10 +200,12 @@ export default function ProxiesPage() {
     },
     {
       id: 'status',
-      accessorFn: (row: Proxy) => (row.quarantined ? 'quarantined' : !row.connector_enabled ? 'disabled' : row.status),
+      accessorFn: (row: Proxy) => displayStatus(row),
       header: 'Status',
       size: 160,
-      meta: { filterVariant: 'select' as const },
+      // Exact: 'healthy' must not also show 'unhealthy'.
+      filterFn: 'equalsString',
+      meta: { filterVariant: 'select' as const, filterOptions: statusOptions },
       cell: ({ row }) => <ProxyStatusDot proxy={row.original} />,
     },
     { accessorKey: 'request_count', header: 'Reqs', size: 80, meta: { align: 'right' as const }, cell: ({ getValue }) => getValue<number>().toLocaleString() },
@@ -205,15 +265,18 @@ export default function ProxiesPage() {
         </div>
       ),
     }] as ColumnDef<DataTableFeatures, Proxy>[] : []),
-  ], [canMutate, unquarantineMutation])
+  ], [canMutate, unquarantineMutation, statusOptions, connectorOptions])
 
+  // A linked proxy shows once the list holds it, or the link is dropped; meanwhile no add or upload panel shows.
+  const shownLocal = openId ? null : local
+  const panelOpen = !!openProxy || !!shownLocal
   // With the panel open there is less room. Connector and traffic are shown in the
   // panel itself, so the table keeps host, status and the per-proxy numbers.
   const columnVisibility = useMemo<ColumnVisibilityState>(
-    () => (panel
-      ? { protocol: false, connector_name: false, traffic: false, actions: false }
-      : { protocol: true, connector_name: true, traffic: true, actions: true }),
-    [panel]
+    () => (panelOpen
+      ? { protocol: false, connector: false, traffic: false, actions: false }
+      : { protocol: true, connector: true, traffic: true, actions: true }),
+    [panelOpen]
   )
 
   const bulkActions = useCallback((selected: Proxy[], clear: () => void) => (
@@ -229,32 +292,35 @@ export default function ProxiesPage() {
   ), [])
 
   let panelNode: React.ReactNode = null
-  if (panel?.kind === 'proxy' && openProxy) {
+  if (openProxy) {
     panelNode = (
       <ProxyPanel
         key={openProxy.id}
         proxy={openProxy}
         connectorType={connectorsData?.connectors.find((c) => c.id === openProxy.connector_id)?.credential_type ?? null}
         canMutate={canMutate}
-        onClose={() => setPanel(null)}
+        view={view}
+        onViewChange={setView}
+        viewReveal={viewReveal}
+        onClose={() => openPanel(null)}
         onRelease={() => unquarantineMutation.mutate(openProxy.id)}
         onDelete={() => setPendingDelete([openProxy])}
         onSaved={() => { invalidate(); toast.show('Proxy saved') }}
       />
     )
-  } else if (panel?.kind === 'new') {
+  } else if (shownLocal === 'new') {
     panelNode = (
       <NewProxyPanel
         connectors={staticConnectors}
-        onClose={() => setPanel(null)}
-        onCreated={() => { invalidate(); setPanel(null); toast.show('Proxy added - health check queued') }}
+        onClose={() => setLocal(null)}
+        onCreated={() => { invalidate(); setLocal(null); toast.show('Proxy added - health check queued') }}
       />
     )
-  } else if (panel?.kind === 'upload') {
+  } else if (shownLocal === 'upload') {
     panelNode = (
       <UploadPanel
         connectors={staticConnectors}
-        onClose={() => setPanel(null)}
+        onClose={() => setLocal(null)}
         onUploaded={() => invalidate()}
       />
     )
@@ -269,13 +335,13 @@ export default function ProxiesPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setPanel({ kind: 'upload' })}
+            onClick={() => openLocal('upload')}
             disabled={staticConnectors.length === 0}
             title={staticConnectors.length === 0 ? 'Create a Static Proxy Provider connector first' : 'Upload proxies from CSV'}
           >
             <Upload className="w-3.5 h-3.5" /> Upload CSV
           </Button>
-          <Button size="sm" onClick={() => setPanel({ kind: 'new' })} disabled={staticConnectors.length === 0} title={staticConnectors.length === 0 ? 'Create a Static Proxy Provider connector first' : undefined}>
+          <Button size="sm" onClick={() => openLocal('new')} disabled={staticConnectors.length === 0} title={staticConnectors.length === 0 ? 'Create a Static Proxy Provider connector first' : undefined}>
             <Plus className="w-3.5 h-3.5" /> Add proxy
           </Button>
         </>
@@ -284,15 +350,20 @@ export default function ProxiesPage() {
     >
       <QueryContent query={proxiesQuery} what="the proxies">
         <DataTable
+          key={tableKey}
           columns={columns}
           data={proxies}
           defaultPageSize={20}
-          emptyMessage="No proxies yet. Connectors provision cloud and provider proxies automatically; static proxies can be added or uploaded here."
+          emptyMessage={statusFilter || connectorFilter
+            ? 'No proxies match these filters.'
+            : 'No proxies yet. Connectors provision cloud and provider proxies automatically; static proxies can be added or uploaded here.'}
           enableRowSelection={canMutate}
           enableColumnFilters
+          initialColumnFilters={initialFilters}
+          onColumnFiltersChange={onFiltersChange}
           getRowId={(row) => row.id}
-          onRowClick={(row) => setPanel({ kind: 'proxy', id: row.id })}
-          activeRowId={panel?.kind === 'proxy' ? panel.id : null}
+          onRowClick={(row) => openPanel(row.id)}
+          activeRowId={openId}
           columnVisibility={columnVisibility}
           bulkActions={canMutate ? bulkActions : undefined}
         />
@@ -316,10 +387,13 @@ export default function ProxiesPage() {
 // ---------------------------------------------------------------------------
 // Panels
 
-function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDelete, onSaved }: {
+function ProxyPanel({ proxy, connectorType, canMutate, view, onViewChange, viewReveal, onClose, onRelease, onDelete, onSaved }: {
   proxy: Proxy
   connectorType: CredentialType | null
   canMutate: boolean
+  view: ProxyView
+  onViewChange: (view: ProxyView) => void
+  viewReveal: object | null
   onClose: () => void
   onRelease: () => void
   onDelete: () => void
@@ -332,7 +406,6 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
   const pinnedState = proxy.state_source === 'manual' ? proxy.state_code || '' : ''
   const pinnedCity = proxy.city_source === 'manual' ? proxy.city || '' : ''
   const [form, setForm] = useState({ host: proxy.host, port: String(proxy.port), protocol: proxy.protocol, username: proxy.username || '', password: proxy.password || '', country: proxy.country || '', state: pinnedState, city: pinnedCity })
-  const [view, setView] = useState<ProxyView>('details')
   const dirty = form.host !== proxy.host || form.port !== String(proxy.port) || form.protocol !== proxy.protocol || form.username !== (proxy.username || '') || form.password !== (proxy.password || '') || form.country !== (proxy.country || '') || form.state !== pinnedState || form.city !== pinnedCity
 
   const updateMutation = useMutation({
@@ -370,7 +443,8 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
       <Tabs<ProxyView>
         tabs={[{ id: 'details', label: 'Details' }, { id: 'history', label: 'History' }]}
         active={view}
-        onChange={setView}
+        onChange={onViewChange}
+        reveal={viewReveal}
         className="pointer-coarse:*:min-h-11"
       />
       {/* Hidden rather than unmounted while History shows, so an edit not saved yet is still there afterwards. */}
@@ -408,9 +482,13 @@ function ProxyPanel({ proxy, connectorType, canMutate, onClose, onRelease, onDel
         <form id="proxy-form" onSubmit={(e) => { e.preventDefault(); updateMutation.mutate({ host: form.host, port: parseInt(form.port), protocol: form.protocol, username: form.username || undefined, password: form.password || undefined, ...(isStatic && form.country !== (proxy.country || '') ? { country: form.country } : {}), ...(isStatic && form.state !== pinnedState ? { state: form.state } : {}), ...(isStatic && form.city !== pinnedCity ? { city: form.city } : {}) }) }} className="space-y-3">
           <div>
             <Label className="text-xs">Connector</Label>
-            <div className="h-9 px-3 rounded-lg bg-surface-raised text-fg-muted text-sm flex items-center gap-2">
+            <div className="min-h-9 px-3 rounded-lg bg-surface-raised text-fg-muted text-sm flex items-center gap-2">
               {connectorType && <ProviderLogo type={connectorType} className="w-4 h-4 text-[16px]" />}
-              <span className="truncate flex-1">{proxy.connector_name || '-'}</span>
+              {proxy.connector_name && selectedProjectId ? (
+                <ConnectorLink projectId={selectedProjectId} connectorId={proxy.connector_id} className="flex-1 font-normal">{proxy.connector_name}</ConnectorLink>
+              ) : (
+                <span className="truncate flex-1">{proxy.connector_name || '-'}</span>
+              )}
               <Lock className="w-3.5 h-3.5 text-fg-subtle" />
             </div>
           </div>

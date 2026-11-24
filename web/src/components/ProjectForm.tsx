@@ -67,7 +67,9 @@ const mitmModeInfo: Record<string, { color: string; icon: typeof Info; text: str
 
 /** A tab a link elsewhere can open the project settings on. */
 export type ProjectSettingsTab = 'general' | 'tls' | 'location' | 'reputation' | 'alerts'
-type SettingsTab = ProjectSettingsTab | 'history'
+export type SettingsTab = ProjectSettingsTab | 'history'
+/** Every tab of an edit, in order. */
+export const PROJECT_SETTINGS_TABS: readonly SettingsTab[] = ['general', 'tls', 'location', 'reputation', 'alerts', 'history']
 
 const contradictedOptions: RichSelectOption[] = [
   { value: 'evidence', label: 'Route on the evidence', description: 'Route the proxy on where the databases or the echo put the exit; the vendor\'s claim is shown as contradicted' },
@@ -125,15 +127,16 @@ interface ProjectFormProps {
   formId: string
   /** Told whether the History tab is showing, so the panel can hide its Save and Delete meanwhile. */
   onHistoryChange?: (showing: boolean) => void
-  /** A tab a link asked for: shown at once, and again for each new request (a new object). */
-  tabRequest?: { tab: ProjectSettingsTab } | null
+  /** The tab to show, for a parent that keeps it (in the address); without it the form keeps its own. */
+  tab?: SettingsTab
+  onTabChange?: (tab: SettingsTab) => void
 }
 
 /**
  * Project settings form body. Rendered inside the docked Inspector opened from
  * the project switcher and on the project selection page (create and edit).
  */
-export function ProjectForm({ project, onSave, onValidityChange, error, formId, onHistoryChange, tabRequest }: ProjectFormProps) {
+export function ProjectForm({ project, onSave, onValidityChange, error, formId, onHistoryChange, tab, onTabChange }: ProjectFormProps) {
   const isEdit = !!project
   const toast = useToast()
   // The install default the Location tab inherits, for the worked example; the form works without it.
@@ -142,7 +145,10 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
   const { data: databases } = useQuery({ queryKey: ['geo-databases'], queryFn: fetchGeoDatabases, staleTime: 60_000, retry: false })
   // The thresholds an edit's Alert settings tab shows, read once the tab is, and what was typed there; null until
   // something is.
-  const [activeTab, setActiveTab] = useState<SettingsTab>(tabRequest?.tab ?? 'general')
+  const [ownTab, setOwnTab] = useState<SettingsTab>('general')
+  const activeTab = tab ?? ownTab
+  // A link that opened the form on a tab: a phone's tab strip scrolls to it.
+  const [revealTab] = useState<object | null>(() => (tab && tab !== 'general' ? {} : null))
   const alertQuery = useQuery({
     queryKey: ['alert-settings', project?.id],
     queryFn: () => fetchAlertSettings(project!.id),
@@ -185,12 +191,8 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
   }))
   const [formData, setFormData] = useState<ProjectCreate>(loaded)
   const [showPassword, setShowPassword] = useState(false)
-  const changeTab = (tab: SettingsTab) => {
-    setActiveTab(tab)
-    onHistoryChange?.(tab === 'history')
-  }
-  // A link asking again while the form is open switches it there, keeping what was typed.
-  useEffect(() => { if (tabRequest) changeTab(tabRequest.tab) }, [tabRequest])
+  const changeTab = onTabChange ?? setOwnTab
+  useEffect(() => { onHistoryChange?.(activeTab === 'history') }, [activeTab])
   // A refused save says why at the top of the form: bring it into view from however far down the form was scrolled.
   const errorRef = useRef<HTMLDivElement>(null)
   useEffect(() => { if (error) errorRef.current?.scrollIntoView({ block: 'nearest' }) }, [error])
@@ -251,7 +253,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
         ]}
         active={activeTab}
         onChange={changeTab}
-        reveal={tabRequest}
+        reveal={revealTab}
         className="pointer-coarse:*:min-h-11"
       />
 
@@ -306,7 +308,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
                   setFormData({ ...formData, observation_retention_days: value as ProjectCreate['observation_retention_days'] })
                 }}
               />
-              <p className="text-xs text-fg-subtle mt-1">Empty follows the install default in <AdminLink page="geo" newTab>IP attribution</AdminLink>; 0 = keep forever</p>
+              <p className="text-xs text-fg-subtle mt-1">Empty follows the install default in <AdminLink page="geo" query="tab=policy" newTab>IP attribution</AdminLink>; 0 = keep forever</p>
             </div>
           </div>
 
@@ -432,7 +434,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
                 setFormData({ ...formData, location_city_radius_km: value as ProjectCreate['location_city_radius_km'] })
               }}
             />
-            <p className="text-xs text-fg-subtle mt-1">Empty follows the install default in <AdminLink page="geo" newTab>IP attribution</AdminLink>; a smaller radius is stricter.</p>
+            <p className="text-xs text-fg-subtle mt-1">Empty follows the install default in <AdminLink page="geo" query="tab=policy" newTab>IP attribution</AdminLink>; a smaller radius is stricter.</p>
           </div>
           {(() => {
             const defaults = geo?.settings
@@ -792,10 +794,8 @@ function StrengthPreview({ projectId, strength, floor, saved }: { projectId: str
   )
 }
 
-/** Settings of the open project in a docked panel; the shell shows it beside any project page. */
-export function ProjectPanel({ project, onClose, tabRequest }: { project: ProjectSummary; onClose: () => void; tabRequest?: { tab: ProjectSettingsTab } | null }) {
-  // Which project's History is showing: the form starts on General again for another project.
-  const [historyOf, setHistoryOf] = useState<string | null>(null)
+/** Settings of the open project in a docked panel; the shell shows it beside any project page, on the tab it keeps. */
+export function ProjectPanel({ project, tab, onTabChange, onClose }: { project: ProjectSummary; tab: SettingsTab; onTabChange: (tab: SettingsTab) => void; onClose: () => void }) {
   const [valid, setValid] = useState(true)
   const save = useProjectSettingsSave(project, { onSaved: onClose })
   return (
@@ -803,7 +803,7 @@ export function ProjectPanel({ project, onClose, tabRequest }: { project: Projec
       title="Project settings"
       subtitle={`${project.name} · only this project`}
       onClose={onClose}
-      footer={historyOf === project.id ? undefined : (
+      footer={tab === 'history' ? undefined : (
         <>
           <span className="flex-1" />
           <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
@@ -818,8 +818,8 @@ export function ProjectPanel({ project, onClose, tabRequest }: { project: Projec
         onValidityChange={setValid}
         error={save.error?.message}
         formId="project-form"
-        onHistoryChange={(showing) => setHistoryOf(showing ? project.id : null)}
-        tabRequest={tabRequest}
+        tab={tab}
+        onTabChange={onTabChange}
       />
     </Inspector>
   )

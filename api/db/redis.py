@@ -781,6 +781,27 @@ class FailureLogRow:
     last_ms: int
     latency_ms: float | None
 
+    @staticmethod
+    def fields_of(fingerprint: str) -> list[str]:
+        """An example's fields in its kind's hash, as :meth:`read` takes their values: its description, then its tallies."""
+        fp = fingerprint
+        return [fp, f"{fp}:count", f"{fp}:first", f"{fp}:last", f"{fp}:latency", f"{fp}:timed"]
+
+    @classmethod
+    def read(cls, cursor: FailureCursor, values: Sequence[Any]) -> "FailureLogRow | None":
+        """The example from its fields' values; None when it has none, trimmed since its index was read."""
+        description, n, first, last, latency, timed = values
+        if description is None:
+            return None
+        return cls(
+            cursor=cursor,
+            fields=json.loads(description),
+            count=int(n or 0),
+            first_ms=int(first or 0),
+            last_ms=int(last or 0),
+            latency_ms=round(float(latency) / int(timed), 1) if latency and timed and int(timed) else None,
+        )
+
 
 class StreamId(NamedTuple):
     """A stream entry ID, ``<milliseconds>-<sequence>``, as numbers that order as Redis orders IDs."""
@@ -1628,24 +1649,23 @@ class RedisClient:
         ranked = sorted(ranked, reverse=True)[:count]
         pipe = self.client.pipeline(transaction=False)
         for cursor in ranked:
-            fp = cursor.fingerprint
             pipe.hmget(
                 FAILURE_LOG_DATA_KEY.format(project_id=project_id, kind=cursor.kind),
-                [fp, f"{fp}:count", f"{fp}:first", f"{fp}:last", f"{fp}:latency", f"{fp}:timed"],
+                FailureLogRow.fields_of(cursor.fingerprint),
             )
-        rows = []
-        for cursor, (description, n, first, last, latency, timed) in zip(ranked, await pipe.execute(), strict=True):
-            # None: trimmed between the two reads.
-            if description is not None:
-                rows.append(FailureLogRow(
-                    cursor=cursor,
-                    fields=json.loads(description),
-                    count=int(n or 0),
-                    first_ms=int(first or 0),
-                    last_ms=int(last or 0),
-                    latency_ms=round(float(latency) / int(timed), 1) if latency and timed and int(timed) else None,
-                ))
-        return rows
+        rows = [FailureLogRow.read(cursor, values) for cursor, values in zip(ranked, await pipe.execute(), strict=True)]
+        # None: trimmed between the two reads.
+        return [row for row in rows if row is not None]
+
+    async def get_failure(self, project_id: str, kind: str, fingerprint: str) -> FailureLogRow | None:
+        """One example, as a page reads it; None when the log does not keep it (trimmed, cleared or never seen)."""
+        pipe = self.client.pipeline(transaction=False)
+        pipe.zscore(FAILURE_LOG_KEY.format(project_id=project_id, kind=kind), fingerprint)
+        pipe.hmget(FAILURE_LOG_DATA_KEY.format(project_id=project_id, kind=kind), FailureLogRow.fields_of(fingerprint))
+        rank, values = await pipe.execute()
+        if rank is None:
+            return None
+        return FailureLogRow.read(FailureCursor(int(rank), kind, fingerprint), values)
 
     async def count_failures(self, project_id: str, kinds: list[str]) -> int:
         """How many examples the kinds hold."""

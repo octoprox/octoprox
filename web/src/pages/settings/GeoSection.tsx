@@ -1,22 +1,23 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useRef, useState } from 'react'
+import { startTransition, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Database, Globe, KeyRound, Pause, Play, RefreshCw, Search, Trash2, Upload } from 'lucide-react'
 import {
-  addGeoDatabaseFromUrl, deleteGeoDatabase, fetchGeoDatabases, fetchGeoSettings, fetchGeoStatus, lookupGeoIp,
+  addGeoDatabaseFromUrl, deleteGeoDatabase, fetchGeoDatabases, fetchGeoSettings, fetchGeoStatus, fetchProjects, lookupGeoIp,
   reattributeProxies, refreshGeoDatabase, updateGeoDatabase, updateGeoSettings, uploadGeoDatabase,
   GatewayGeoStatus, GeoDatabase, GeoLookupResponse, GeoSettingsDoc, GeoSourceKind, GeoStatus,
 } from '../../api/client'
 import { useToast } from '../../contexts/ToastContext'
+import { useDropGone, useUrlParams, useUrlTab } from '../../hooks/useUrlState'
+import { useAccuracyRows, useOpenConnector } from '../../hooks/useAccuracyRows'
 import { DataTable, type DataTableFeatures } from '../../components/DataTable'
 import { Page, EmptyState } from '../../components/layout/Page'
-import { AccuracyRow, ProviderAccuracyPanel, accuracyDays, useAccuracyRange } from '../../components/geo/ProviderAccuracyPanel'
-import { AccuracyDetailsInspector } from '../../components/geo/AccuracyDetails'
-import { ObservationsPanel } from '../../components/geo/ObservationsPanel'
-import { ExitIpsPanel } from '../../components/geo/ExitIpsPanel'
+import { AccuracyInspector, ProviderAccuracyPanel, accuracyDays, useAccuracyRange } from '../../components/geo/ProviderAccuracyPanel'
+import { OBSERVATION_FILTERS, ObservationsPanel } from '../../components/geo/ObservationsPanel'
+import { EXIT_IP_FILTERS, ExitIpsPanel } from '../../components/geo/ExitIpsPanel'
 import { HistoryButton } from '../../components/audit/HistoryButton'
 import { formatBytes, formatDateTime, parseApiDate, plural, relativeTime, timeUntil } from '../../utils/format'
 import { isInUse } from '../../utils/geo'
@@ -24,6 +25,9 @@ import { Alert, Badge, Button, Card, ConfirmDialog, Input, Label, QueryStatus, S
 import { cn } from '../../utils/cn'
 
 type Tab = 'databases' | 'policy' | 'accuracy' | 'exits' | 'observations'
+const TABS: Tab[] = ['databases', 'policy', 'accuracy', 'exits', 'observations']
+// What belongs to one tab: a tab change drops it.
+const TAB_PARAMS = ['open', ...EXIT_IP_FILTERS, ...OBSERVATION_FILTERS]
 
 const SOURCE_LABELS: Record<GeoSourceKind, string> = {
   database: 'Local IP databases',
@@ -51,21 +55,44 @@ const KIND_LABELS: Record<string, string> = {
 /**
  * Admin page for IP attribution: the local IP databases proxies are attributed
  * with, the source policy that combines databases, vendor claims and the echo
- * endpoint, and what the observations say about each provider's honesty.
+ * endpoint, and what the observations say about each provider's honesty. The
+ * tab, the connector open and the filters applied are in the address.
  */
 export default function GeoSection() {
-  const [tab, setTab] = useState<Tab>('databases')
+  const [tab, setTab, reveal] = useUrlTab(TABS, 'databases')
+  const [params, set] = useUrlParams()
   const { data: status } = useQuery({ queryKey: ['geo-status'], queryFn: fetchGeoStatus, refetchInterval: 30_000 })
   const [range] = useAccuracyRange()
-  const [inspecting, setInspecting] = useState<AccuracyRow | null>(null)
   const days = accuracyDays(range)
+  // The accuracy table's project ('' for all), kept here so the connector open reads the table's own rows. Another
+  // tab starts it over; reset as the tab changes, so the table never reads every project on the way out.
+  const [projectFilter, setProjectFilter] = useState('')
+  if (tab !== 'accuracy' && projectFilter) setProjectFilter('')
+  const openConnector = tab === 'accuracy' ? params.get('open') : null
+  const accuracy = useAccuracyRows(projectFilter || undefined, days, { named: true, enabled: !!openConnector })
+  const openRow = openConnector ? accuracy.rows.find((r) => r.connector_id === openConnector) : undefined
+  // Without exits in the window it stays open, so a wider window brings it back; a deleted one is dropped.
+  const noRow = !!openConnector && accuracy.settled && !openRow
+  const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects, enabled: noRow })
+  const linkedConnector = useOpenConnector(openConnector, projects?.projects.map((p) => p.id), noRow)
+  useDropGone('open', linkedConnector.gone, 'That connector no longer exists.')
+
+  const pickTab = (next: Tab) => setTab(next, Object.fromEntries(TAB_PARAMS.map((key) => [key, null])))
+  // A connector not in the project picked is closed. Both land in the router's transition, so the inspector never
+  // reads the new project's rows while it is still open.
+  const pickProject = (id: string) => startTransition(() => {
+    setProjectFilter(id)
+    if (id && openConnector && openRow?.project_id !== id) set({ open: null })
+  })
+  // The filters a link opened Exit IPs or the Observation log with; each panel reads its own once.
+  const linked = Object.fromEntries(params)
 
   return (
     <Page
       title="IP attribution"
       subtitle="Where exit IPs really are: local IP databases, the vendor's word, and an echo endpoint, combined under one policy."
-      panel={inspecting && tab === 'accuracy' ? (
-        <AccuracyDetailsInspector row={inspecting} exits={inspecting.exit_stats} days={days} projectName={inspecting.project_name} onClose={() => setInspecting(null)} />
+      panel={openConnector ? (
+        <AccuracyInspector row={openRow} loading={!accuracy.settled} name={linkedConnector.name} days={days} projectName={openRow?.project_name} onClose={() => set({ open: null })} />
       ) : undefined}
       toolbar={status && <StatusStrip status={status} />}
     >
@@ -78,13 +105,21 @@ export default function GeoSection() {
           { id: 'observations', label: 'Observation log' },
         ]}
         active={tab}
-        onChange={setTab}
+        onChange={pickTab}
+        reveal={reveal}
       />
       {tab === 'databases' && <DatabasesTab />}
       {tab === 'policy' && <PolicyTab />}
-      {tab === 'accuracy' && <ProviderAccuracyPanel onInspect={setInspecting} inspecting={inspecting?.connector_id ?? null} />}
-      {tab === 'exits' && <ExitIpsPanel />}
-      {tab === 'observations' && <ObservationsPanel />}
+      {tab === 'accuracy' && (
+        <ProviderAccuracyPanel
+          projectFilter={projectFilter}
+          onProjectFilter={pickProject}
+          onInspect={(row) => set({ open: row.connector_id })}
+          inspecting={openConnector}
+        />
+      )}
+      {tab === 'exits' && <ExitIpsPanel initialFilters={linked} onFilters={set} />}
+      {tab === 'observations' && <ObservationsPanel initialFilters={linked} onFilters={set} />}
     </Page>
   )
 }

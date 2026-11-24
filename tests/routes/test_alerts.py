@@ -287,6 +287,22 @@ class TestInstallAlerts:
         ]
         assert authenticated_client.get("/api/v1/alerts/install", headers=editor_auth_headers).status_code == 403
 
+    def test_one_by_its_id_for_admins(
+        self, authenticated_client: TestClient, editor_auth_headers: dict[str, str], history: tuple[str, datetime]
+    ) -> None:
+        _store(authenticated_client, utc_now(), [FoundAlert("", _finding("ip_databases"))], [""])
+        listed = authenticated_client.get("/api/v1/alerts/install").json()["alerts"][0]
+
+        one = authenticated_client.get(f"/api/v1/alerts/install/{listed['id']}")
+
+        assert (one.status_code, one.json()) == (200, listed)
+        assert authenticated_client.get(f"/api/v1/alerts/install/{listed['id']}", headers=editor_auth_headers).status_code == 403
+        assert authenticated_client.get("/api/v1/alerts/install/nope").status_code == 404
+        # A project's alert is not the install's.
+        project_id, _start = history
+        project_alert = authenticated_client.get(_url(project_id, "/alerts")).json()["alerts"][0]
+        assert authenticated_client.get(f"/api/v1/alerts/install/{project_alert['id']}").status_code == 404
+
     def test_the_retention_is_admins_to_set_and_recorded(
         self, authenticated_client: TestClient, editor_auth_headers: dict[str, str]
     ) -> None:

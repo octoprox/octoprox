@@ -1,20 +1,54 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useInfiniteQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query'
 import {
   ALERT_RANGES, fetchInstallAlerts, fetchProjectAlerts,
-  type AlertEntry, type AlertFilters, type AlertPage, type AlertRange,
+  type AlertEntry, type AlertFilters, type AlertPage, type AlertRange, type AttentionSeverity,
 } from '../api/client'
 import { TIME_RANGE_MS, useTimeRange } from '../contexts/TimeRangeContext'
 import { parseApiDate } from '../utils/format'
+import { useSetUrlParams, useUrlChoice, useUrlParam } from './useUrlState'
 
 /** How often an open Alerts page reads its rows again: their statuses and last seen change in place. */
 const ALERTS_POLL_MS = 60_000
 
 /** What an Alerts page filters by; the window comes from the shared time range and the load's first answer. */
 export type AlertListFilters = Omit<AlertFilters, 'since' | 'until'>
+
+const STATUSES = ['open', 'resolved', 'all'] as const
+// '' is any severity or kind: left out of the address.
+const SEVERITIES = ['', 'problem', 'warning'] as const
+
+/**
+ * An Alerts page's filters, kept in the address so a link opens the same list: status=, severity=, kind= (one of
+ * `kinds`, anything else is dropped) and q= when the page has the subject search. Defaults are left out.
+ */
+export function useAlertFilters(kinds: readonly string[], search: boolean): [AlertListFilters, (filters: AlertListFilters) => void] {
+  const kindChoices = useMemo(() => ['', ...kinds], [kinds])
+  const [status] = useUrlChoice('status', STATUSES, 'all')
+  const [severity] = useUrlChoice<'' | AttentionSeverity>('severity', SEVERITIES, '')
+  const [kind] = useUrlChoice('kind', kindChoices, '')
+  const [q, setQ] = useUrlParam('q')
+  const subject = search ? q || undefined : undefined
+  // A page without the subject search drops a q= it would ignore.
+  useEffect(() => {
+    if (!search && q !== null) setQ(null)
+  }, [search, q, setQ])
+  const filters = useMemo<AlertListFilters>(
+    () => ({ status, severity: severity || undefined, kind: kind || undefined, q: subject }),
+    [status, severity, kind, subject],
+  )
+  const set = useSetUrlParams()
+  const setFilters = useCallback((next: AlertListFilters) => set({
+    status: next.status === 'all' ? null : next.status,
+    severity: next.severity,
+    kind: next.kind,
+    q: next.q,
+  }), [set])
+  return [filters, setFilters]
+}
 
 /** Where a page after the first starts: below the last alert of the page before, in the window its load fixed. */
 interface PageCursor {

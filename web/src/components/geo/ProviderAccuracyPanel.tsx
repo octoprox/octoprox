@@ -1,21 +1,20 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { CheckCircle2, PanelRightOpen } from 'lucide-react'
-import { fetchGeoAccuracy, fetchGeoExits, fetchProjects, ConnectorAccuracy, ConnectorExits, LevelAccuracy } from '../../api/client'
+import { fetchProjects } from '../../api/client'
 import { useTimeRange } from '../../contexts/TimeRangeContext'
+import { useAccuracyRows, type AccuracyRow } from '../../hooks/useAccuracyRows'
 import { DataTable, type DataTableFeatures } from '../DataTable'
 import { EmptyState } from '../layout/Page'
-import { Card, Segmented, Select } from '../ui'
+import { Card, Inspector, LogoLoader, Segmented, Select } from '../ui'
 import { cn } from '../../utils/cn'
 import { HeaderWithTip, TIPS } from './columns'
 import { coverageLabel } from './coverage'
-import { LEVELS, levelOf, rateClass, ratePercent, wrongAt } from './AccuracyDetails'
-
-export type AccuracyRow = ConnectorAccuracy & { exit_stats?: ConnectorExits; project_name?: string | null }
+import { AccuracyDetailsInspector, LEVELS, levelOf, rateClass, ratePercent, wrongAt } from './AccuracyDetails'
 
 // The same ranges as the graph pages; claim statistics are daily, so nothing below a day.
 export const ACCURACY_RANGES = [
@@ -36,8 +35,6 @@ export function accuracyDays(range: Range): number {
   return ACCURACY_RANGES.find((r) => r.value === range)?.days ?? 30
 }
 
-const EMPTY_LEVEL: LevelAccuracy = { claimed: 0, confirmed: 0, contradicted: 0, open: 0, accuracy: null }
-
 /**
  * Per-connector vendor location accuracy and distinct exit IPs.
  *
@@ -47,54 +44,20 @@ const EMPTY_LEVEL: LevelAccuracy = { claimed: 0, confirmed: 0, contradicted: 0, 
  * hosting it passes `onInspect` and shows the details in its panel slot; the
  * table itself keeps only what fits in a row.
  */
-export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
+export function ProviderAccuracyPanel({ projectId, projectFilter = '', onProjectFilter, onInspect, inspecting }: {
   projectId?: string
+  /** Across every project: the one the table is narrowed to ('' for all), kept by the page so its inspector reads the same rows. */
+  projectFilter?: string
+  onProjectFilter?: (projectId: string) => void
   onInspect?: (row: AccuracyRow) => void
   /** Connector id whose details are open, to mark its row. */
   inspecting?: string | null
 }) {
   const [range, setRange] = useAccuracyRange()
   const days = accuracyDays(range)
-  const [projectFilter, setProjectFilter] = useState('')
   const scope = projectId ?? (projectFilter || undefined)
-  // No timed refetch: each answer reads the connectors' whole exit history, and the numbers move by the day.
-  // Another window or project keeps the last answer on screen until its own arrives, so the table keeps its place.
-  const { data, isLoading: accuracyLoading, isPlaceholderData: accuracyReloading } = useQuery({
-    queryKey: ['geo-accuracy', scope ?? 'all', days],
-    queryFn: () => fetchGeoAccuracy({ days, project_id: scope }),
-    placeholderData: (previous) => previous,
-  })
-  const { data: exits, isLoading: exitsLoading, isPlaceholderData: exitsReloading } = useQuery({
-    queryKey: ['geo-exits', scope ?? 'all', days],
-    queryFn: () => fetchGeoExits({ days, project_id: scope }),
-    placeholderData: (previous) => previous,
-  })
-  // A row merges both answers, so the table waits for both: exits alone would read as "no claims".
-  const isLoading = accuracyLoading || exitsLoading
+  const { rows, isLoading, reloading } = useAccuracyRows(scope, days, { named: !projectId })
   const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: fetchProjects, enabled: !projectId })
-  const projectNames = useMemo(() => new Map((projects?.projects ?? []).map((p) => [p.id, p.name])), [projects])
-
-  const rows: AccuracyRow[] = useMemo(() => {
-    if (isLoading) return []
-    const byConnector = new Map((exits?.connectors ?? []).map((e) => [e.connector_id, e]))
-    const seen = new Set<string>()
-    const merged: AccuracyRow[] = (data?.connectors ?? []).map((c) => {
-      seen.add(c.connector_id)
-      return { ...c, exit_stats: byConnector.get(c.connector_id), project_name: c.project_id ? projectNames.get(c.project_id) ?? null : null }
-    })
-    // Connectors with exits but no vendor claims still deserve a row.
-    for (const e of exits?.connectors ?? []) {
-      if (!seen.has(e.connector_id)) {
-        merged.push({
-          connector_id: e.connector_id, connector_name: e.connector_name, project_id: e.project_id,
-          project_name: e.project_id ? projectNames.get(e.project_id) ?? null : null,
-          exits: e.unique_in_window, country: EMPTY_LEVEL, state: EMPTY_LEVEL, city: EMPTY_LEVEL,
-          breakdown: [], coverage: e.coverage, exit_stats: e,
-        })
-      }
-    }
-    return merged
-  }, [isLoading, data, exits, projectNames])
 
   const columns: ColumnDef<DataTableFeatures, AccuracyRow>[] = useMemo(() => [
     {
@@ -201,7 +164,7 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
         </p>
         <div className="flex items-center gap-2">
           {!projectId && (
-            <Select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)} className="w-44">
+            <Select value={projectFilter} onChange={(e) => onProjectFilter?.(e.target.value)} className="w-44">
               <option value="">All projects</option>
               {(projects?.projects ?? []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </Select>
@@ -211,11 +174,33 @@ export function ProviderAccuracyPanel({ projectId, onInspect, inspecting }: {
       </div>
       <Card className="p-0 overflow-hidden">
         {!isLoading && rows.length === 0 ? (
-          <EmptyState icon={<CheckCircle2 className="w-5 h-5" />} reloading={accuracyReloading || exitsReloading} title="Nothing to compare yet" description="Accuracy appears once proxies with a vendor-declared country have been attributed; unique exits once any exit IP has been seen." />
+          <EmptyState icon={<CheckCircle2 className="w-5 h-5" />} reloading={reloading} title="Nothing to compare yet" description="Accuracy appears once proxies with a vendor-declared country have been attributed; unique exits once any exit IP has been seen." />
         ) : (
-          <DataTable columns={columns} data={rows} getRowId={(c) => c.connector_id} enableColumnFilters defaultPageSize={25} loading={isLoading} reloading={accuracyReloading || exitsReloading} onRowClick={onInspect ? (row) => onInspect(row) : undefined} />
+          <DataTable columns={columns} data={rows} getRowId={(c) => c.connector_id} enableColumnFilters defaultPageSize={25} loading={isLoading} reloading={reloading} onRowClick={onInspect ? (row) => onInspect(row) : undefined} />
         )}
       </Card>
     </div>
+  )
+}
+
+/**
+ * The details of the connector a page has open by id, its row read through `useAccuracyRows` so they follow the window
+ * shown: a loader while that answer is out, and a note when the connector has no exits in the window, so a wider one
+ * can bring it back.
+ */
+export function AccuracyInspector({ row, loading, name, days, projectName, onClose }: {
+  row?: AccuracyRow
+  loading: boolean
+  /** The connector's name when it has no row. */
+  name?: string
+  days: number
+  projectName?: string | null
+  onClose: () => void
+}) {
+  if (row) return <AccuracyDetailsInspector key={row.connector_id} row={row} exits={row.exit_stats} days={days} projectName={projectName} onClose={onClose} />
+  return (
+    <Inspector title={name ?? 'Provider accuracy'} subtitle={`exit locations, last ${days} day${days === 1 ? '' : 's'}`} onClose={onClose}>
+      {loading ? <LogoLoader className="py-10" /> : <p className="text-sm text-fg-muted">No exits seen in this window. A longer one may have some.</p>}
+    </Inspector>
   )
 }

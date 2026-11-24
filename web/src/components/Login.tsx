@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useLocation, useNavigate } from 'react-router'
 import { Lock, User, AlertCircle } from 'lucide-react'
 import octoproxLogo from '../assets/logos/octoprox_horizontal.svg'
 import octoproxLogoDark from '../assets/logos/octoprox_horizontal_dark.svg'
@@ -11,20 +12,17 @@ import { Button, Input, Label, Alert } from './ui'
 import { fetchSsoProviders, ssoStartUrl, PublicSsoProvider } from '../api/client'
 import { ProviderMark } from './SignInProviderMark'
 import { useEdition } from '../hooks/useEdition'
+import { peekSignInReturn, saveSignInReturn } from '../utils/signInReturn'
+import { useDocumentTitle } from '../hooks/useUrlState'
 
 interface LoginProps {
   onLogin: (username: string, password: string) => Promise<void>
   error?: string | null
 }
 
-/** The reason a sign-in through a provider ended back here, if it did. Read once and cleared from the URL. */
-function takeSsoError(): string | null {
-  const url = new URL(window.location.href)
-  const message = url.searchParams.get('sso_error')
-  if (message === null) return null
-  url.searchParams.delete('sso_error')
-  window.history.replaceState(null, '', url.pathname + url.search + url.hash)
-  return message
+/** The reason a sign-in through a provider ended back here, if it did. Read once. */
+function readSsoError(): string | null {
+  return new URLSearchParams(window.location.search).get('sso_error')
 }
 
 export default function Login({ onLogin, error }: LoginProps) {
@@ -39,7 +37,20 @@ export default function Login({ onLogin, error }: LoginProps) {
   // Named while an Enterprise license is active or in its grace period.
   const { data: edition } = useEdition()
 
-  useEffect(() => { setSsoError(takeSsoError()) }, [])
+  const location = useLocation()
+  const navigate = useNavigate()
+  useDocumentTitle('Sign in')
+
+  // A refused sign-in through a provider ends at /?sso_error=: say why, and go back to the page it started from, so
+  // the retry or a password sign-in still lands on the shared link.
+  useEffect(() => {
+    const message = readSsoError()
+    if (message === null) return
+    setSsoError(message)
+    const url = new URL(window.location.href)
+    url.searchParams.delete('sso_error')
+    navigate(peekSignInReturn() ?? url.pathname + url.search + url.hash, { replace: true })
+  }, [])
   const shownError = error ?? ssoError
 
   const handleSubmit = async (e: React.SubmitEvent) => {
@@ -82,7 +93,8 @@ export default function Login({ onLogin, error }: LoginProps) {
                   <a
                     key={p.kind}
                     href={ssoStartUrl(p.kind)}
-                    className="flex items-center justify-center gap-3 w-full h-10 rounded-lg border border-line-strong bg-surface text-sm font-medium text-fg hover:bg-surface-raised transition-colors"
+                    onClick={() => saveSignInReturn(location.pathname + location.search + location.hash)}
+                    className="flex items-center justify-center gap-3 w-full h-10 pointer-coarse:h-11 rounded-lg border border-line-strong bg-surface text-sm font-medium text-fg hover:bg-surface-raised transition-colors"
                   >
                     <ProviderMark kind={p.kind} className="w-4 h-4" />
                     Continue with {p.label}

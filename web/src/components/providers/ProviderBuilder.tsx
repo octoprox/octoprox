@@ -6,7 +6,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, Trash2, Upload } from 'lucide-react'
 import {
   createProvider, updateProvider, validateProviderSpec, importProviderYaml, isHostConfirmationError,
-  ProviderDetail, ProviderSpec, ProviderValidateResponse,
+  ProviderDetail, ProviderListResponse, ProviderSpec, ProviderValidateResponse,
 } from '../../api/client'
 import { useProviders } from '../../hooks/useProviders'
 import { useNavigationGuard } from '../../contexts/NavigationGuardContext'
@@ -122,9 +122,11 @@ export function ProviderBuilder({ existing, initialSpec, onClose, onSaved, onDel
   const discardAndClose = () => { clearDraft(); setConfirmDiscard(false); onClose() }
 
   // A save answers with the provider as stored, the document GET /providers/{id} serves. It is cached as is, so
-  // the panel that opens next and the next edit start from what was saved; the catalog is listed again.
+  // the panel that opens next and the next edit start from what was saved. The catalog holds it at once too, so a new
+  // provider's panel opens without waiting for the catalog to be listed again.
   const remember = (p: ProviderDetail) => {
     queryClient.setQueryData(['provider', p.id], p)
+    queryClient.setQueryData<ProviderListResponse>(['providers'], (old) => old && { ...old, providers: [...old.providers.filter((x) => x.id !== p.id), p] })
     queryClient.invalidateQueries({ queryKey: ['providers'] })
   }
 

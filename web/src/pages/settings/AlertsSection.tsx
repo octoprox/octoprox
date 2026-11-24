@@ -1,16 +1,17 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from 'react'
-import { ALERT_RANGES, fetchInstallAlertRetention, updateInstallAlertRetention } from '../../api/client'
+import { useQuery } from '@tanstack/react-query'
+import { ALERT_RANGES, fetchInstallAlert, fetchInstallAlertRetention, isNotFound, updateInstallAlertRetention } from '../../api/client'
 import { AlertPanel } from '../../components/alerts/AlertPanel'
 import { AlertsTable } from '../../components/alerts/AlertsTable'
 import { INSTALL_KINDS } from '../../components/alerts/kinds'
 import { Page } from '../../components/layout/Page'
 import { RetentionCard } from '../../components/RetentionCard'
-import { Segmented } from '../../components/ui'
+import { Inspector, LogoLoader, QueryStatus, Segmented } from '../../components/ui'
 import { useTimeRange } from '../../contexts/TimeRangeContext'
-import { useInstallAlerts, type AlertListFilters } from '../../hooks/useAlerts'
+import { useAlertFilters, useInstallAlerts } from '../../hooks/useAlerts'
+import { useDropGone, useUrlParam } from '../../hooks/useUrlState'
 
 /**
  * Administration, Alerts: the install-wide lines of the Projects page over time (gateways, background work, IP
@@ -18,10 +19,21 @@ import { useInstallAlerts, type AlertListFilters } from '../../hooks/useAlerts'
  */
 export default function AlertsSection() {
   const [range, setRange] = useTimeRange(ALERT_RANGES)
-  const [filters, setFilters] = useState<AlertListFilters>({ status: 'all' })
-  const [openId, setOpenId] = useState<string | null>(null)
+  const [filters, setFilters] = useAlertFilters(INSTALL_KINDS, false)
+  const [open, setOpen] = useUrlParam('open')
+  const openId = open || null
   const list = useInstallAlerts(filters)
-  const shown = openId ? list.alerts.find((alert) => alert.id === openId) : undefined
+  const loaded = openId ? list.alerts.find((alert) => alert.id === openId) : undefined
+  // An alert the loaded rows do not hold (older, or under other filters) is read on its own.
+  const single = useQuery({
+    queryKey: ['install-alerts', 'one', openId],
+    queryFn: () => fetchInstallAlert(openId!),
+    enabled: !!openId && !loaded && !list.query.isPending,
+    retry: (count, error) => !isNotFound(error) && count < 3,
+  })
+  useDropGone('open', isNotFound(single.error), 'That alert is no longer kept.')
+  const shown = loaded ?? single.data
+  const close = () => setOpen(null)
 
   return (
     <Page
@@ -32,7 +44,13 @@ export default function AlertsSection() {
           <Segmented options={ALERT_RANGES.map((r) => ({ value: r, label: r }))} value={range} onChange={setRange} size="sm" />
         </div>
       )}
-      panel={shown ? <AlertPanel key={shown.id} alert={shown} projectId={null} onClose={() => setOpenId(null)} /> : null}
+      panel={openId === null ? null : shown ? (
+        <AlertPanel key={shown.id} alert={shown} projectId={null} onClose={close} />
+      ) : (
+        <Inspector title="Alert" onClose={close}>
+          <QueryStatus query={single} what="the alert" loader={<LogoLoader className="py-6" />} />
+        </Inspector>
+      )}
     >
       <InstallRetentionCard />
       <AlertsTable
@@ -40,8 +58,8 @@ export default function AlertsSection() {
         filters={filters}
         onFiltersChange={setFilters}
         kinds={INSTALL_KINDS}
-        activeId={shown ? shown.id : null}
-        onOpen={(alert) => setOpenId(alert.id)}
+        activeId={openId}
+        onOpen={(alert) => setOpen(alert.id)}
         emptyDescription="Each install-wide line of the Projects page is kept here from when it opened until it resolved: no gateway serving, changes not applied, background work behind, IP databases failing."
       />
     </Page>

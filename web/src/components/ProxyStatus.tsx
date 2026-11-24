@@ -18,6 +18,9 @@ const STATUS_COLORS: Record<string, BadgeColor> = {
   disabled: 'slate',
 }
 
+/** Every status a proxy row shows, quarantine and a disabled connector included, as `status=` in a link names it. */
+export const PROXY_STATUSES = Object.keys(STATUS_COLORS)
+
 // Dot colours are literal so they work on every theme (status colours are reserved).
 const DOT_CLASSES: Record<BadgeColor, string> = {
   green: 'bg-success',

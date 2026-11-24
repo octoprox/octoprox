@@ -18,7 +18,7 @@ import { DOCS_URL } from '../../utils/docs'
 import { formatDateTime, relativeTime } from '../../utils/format'
 import { HeaderWithTip } from './columns'
 import { ReputationPill } from './ExitIpReputation'
-import { SitePlacesCard, placesQuery, type InspectedPlace } from './SitePlaces'
+import { SitePlacesCard, placesQuery, type Preset } from './SitePlaces'
 
 const STATUS_OPTIONS: { value: ReputationStatusFilter; label: string }[] = [
   { value: 'any', label: 'Any status' },
@@ -145,22 +145,36 @@ function EmptyActions({ settings, docs, docsLabel }: { settings: string; docs: s
  * records' filters, order and paging run on the server, which counts no further than 10,000 rows past the page. A
  * place opens in the place inspector, a record every site of its IP.
  */
-export function ExitReputationPanel({ projectId, mode, inspecting, onInspect, site, onSite, inspectingPlace, onInspectPlace }: {
+export function ExitReputationPanel({ projectId, mode, inspecting, onInspect, site, onSite, preset, onPreset, inspectingPlace, onInspectPlace, records, onRecords }: {
   projectId: string
   mode: ExitReputationMode
-  /** The row open in the inspector. */
+  /** The exit IP open in the inspector. */
   inspecting: string | null
   onInspect: (record: ExitReputationRecord) => void
-  /** The site the places card shows, as asked; '' is the default one. */
+  /** The site the places card shows, as asked; '' is the default one, pinned through `onSite` once an answer names it. */
   site: string
   onSite: (site: string) => void
+  /** Which of the site's places the card shows. */
+  preset: Preset
+  onPreset: (preset: Preset) => void
   /** The place open in the place inspector. */
-  inspectingPlace: InspectedPlace | null
-  onInspectPlace: (place: InspectedPlace) => void
+  inspectingPlace: string | null
+  onInspectPlace: (place: string) => void
+  /** The records' IP, site and status filters as applied; the order stays here. */
+  records: ExitReputationFilters
+  onRecords: (records: ExitReputationFilters) => void
 }) {
-  const [applied, setApplied] = useState<ExitReputationFilters>({})
+  const [sort, setSort] = useState<ReputationSort | undefined>()
+  const applied: ExitReputationFilters = { ...records, sort }
   const [pageIndex, setPageIndex] = useState(0)
   const [pageSize, setPageSize] = useState(50)
+  // Other filters start from the first page, whether the form or a link changed them.
+  const recordsKey = [records.ip, records.site, records.status].join('|')
+  const [pagedFor, setPagedFor] = useState(recordsKey)
+  if (pagedFor !== recordsKey) {
+    setPagedFor(recordsKey)
+    setPageIndex(0)
+  }
   const query = useQuery({
     queryKey: ['exit-reputation', projectId, applied, pageIndex, pageSize],
     queryFn: () => fetchExitReputation(projectId, { ...applied, limit: pageSize, offset: pageIndex * pageSize }),
@@ -185,6 +199,15 @@ export function ExitReputationPanel({ projectId, mode, inspecting, onInspect, si
     onSite(resolved)
   }, [site, resolved, places.isPlaceholderData])
   const exitIps = useRef<HTMLDivElement>(null)
+  // New records filters bring the table into view: a link's (an IP's every site) would land on the places above it.
+  const shownFor = useRef(recordsKey)
+  useEffect(() => {
+    if (shownFor.current === recordsKey) return
+    shownFor.current = recordsKey
+    exitIps.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  }, [recordsKey])
+  // The row the inspector was opened from; a link names the IP alone, so then the first of its rows here.
+  const [clicked, setClicked] = useState<ExitReputationRecord | null>(null)
 
   const columns: ColumnDef<DataTableFeatures, ExitReputationRecord>[] = useMemo(() => [
     { id: 'ip', accessorKey: 'ip', header: 'Exit IP', size: 140, enableSorting: false, cell: ({ getValue }) => <span className="font-mono text-xs" title={getValue<string>()}>{getValue<string>()}</span> },
@@ -216,10 +239,12 @@ export function ExitReputationPanel({ projectId, mode, inspecting, onInspect, si
   ], [])
 
   const rows = data?.records ?? []
+  const inspectedRow = clicked?.ip === inspecting ? clicked : rows.find((r) => r.ip === inspecting)
   const filtering = Object.values(applied).some((value) => value !== undefined)
-  const apply = (filters: ExitReputationFilters) => {
-    setApplied(filters)
+  const apply = ({ sort: order, ...filters }: ExitReputationFilters) => {
+    setSort(order)
     setPageIndex(0)
+    onRecords(filters)
   }
   const hasRecords = rows.length > 0 || filtering
   // A site asked for keeps the card up even when nothing is kept for it.
@@ -263,7 +288,9 @@ export function ExitReputationPanel({ projectId, mode, inspecting, onInspect, si
               query={places}
               site={site}
               onSite={onSite}
-              inspecting={inspectingPlace && inspectingPlace.site === places.data?.site ? inspectingPlace.place : null}
+              preset={preset}
+              onPreset={onPreset}
+              inspecting={inspectingPlace}
               onInspect={onInspectPlace}
               onExitIps={() => exitIps.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })}
             />
@@ -272,8 +299,8 @@ export function ExitReputationPanel({ projectId, mode, inspecting, onInspect, si
             <h3 className="text-sm font-semibold text-fg">Exit IPs by site</h3>
             <p className="text-xs text-fg-muted">One row per exit IP and site of the connectors with IPs: what your clients reported, and where that leaves the IP now. Click a row for every site of its IP.</p>
           </div>
-          {/* Nothing to filter until a record exists. */}
-          {hasRecords && <ReputationFilters applied={applied} onApply={apply} />}
+          {/* Nothing to filter until a record exists. Keyed by the filters, so a link changing them refreshes the form. */}
+          {hasRecords && <ReputationFilters key={recordsKey} applied={applied} onApply={apply} />}
           <Card className="p-0 overflow-hidden">
             {loadFailed(query) ? (
               <LoadError what="the records" query={query} />
@@ -289,8 +316,8 @@ export function ExitReputationPanel({ projectId, mode, inspecting, onInspect, si
                 loading={isLoading}
                 reloading={isPlaceholderData}
                 emptyMessage="No records match the filters."
-                onRowClick={onInspect}
-                activeRowId={inspecting}
+                onRowClick={(record) => { setClicked(record); onInspect(record) }}
+                activeRowId={inspecting && inspectedRow ? recordId(inspectedRow) : null}
                 // Beside an open inspector the table keeps to the IP, the site and where it stands.
                 columnVisibility={{ last_report: !inspecting }}
                 manualPagination={{

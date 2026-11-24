@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Link } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import { Link2, Trash2, Plus, AlertTriangle } from 'lucide-react'
@@ -24,10 +24,12 @@ import { useTimeRange } from '../contexts/TimeRangeContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useToast } from '../contexts/ToastContext'
 import { useProviders } from '../hooks/useProviders'
+import { useDropGone, useUrlParams, useUrlTab } from '../hooks/useUrlState'
 import { invalidateAttention } from '../hooks/useProjectAttention'
 import { DataTable, type DataTableFeatures } from '../components/DataTable'
 import { Page, EmptyState } from '../components/layout/Page'
 import { NewCredentialPanel, TypePicker, TypeCard } from '../components/CredentialForm'
+import { GuardedLink } from '../components/RouteList'
 import { EntityHistory } from '../components/audit/EntityHistory'
 import { ProviderLogo } from '../components/ProviderLogo'
 import { SchemaForm, MultiCountryPicker, defaultValues, isCountryField, serializeValues, splitCountries } from '../components/SchemaForm'
@@ -42,6 +44,7 @@ type DomainFilterMode = 'none' | 'whitelist' | 'blacklist'
 type ConfigTab = string
 /** What an open connector shows: its settings, or its History in their place. */
 type EditorView = 'settings' | 'history'
+const EDITOR_VIEWS: readonly EditorView[] = ['settings', 'history']
 
 interface ConnectorFormData {
   name: string
@@ -99,16 +102,17 @@ const groupLabel = (group: string) => (group === 'general' ? 'General' : group.c
 // ---------------------------------------------------------------------------
 // Page
 
-type PanelState = { kind: 'edit'; id: string } | { kind: 'new' } | null
-
 export default function ConnectorsPage() {
   const queryClient = useQueryClient()
   const { selectedProjectId } = useProject()
   const { canMutate } = useAuth()
-  const { labelFor } = useProviders()
+  const { labelFor, isLoading: providersLoading } = useProviders()
   const toast = useToast()
-  const [searchParams, setSearchParams] = useSearchParams()
-  const [panel, setPanel] = useState<PanelState>(null)
+  // The open connector is in `open=`, its History in `view=` and its config tab in `config=`. Add connector stays
+  // here: a link never opens a create form.
+  const [params, setUrl] = useUrlParams()
+  const openId = params.get('open')
+  const [creating, setCreating] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<Connector | null>(null)
 
   const connectorsQuery = useQuery({
@@ -119,15 +123,19 @@ export default function ConnectorsPage() {
   })
   const { data: connectorsData } = connectorsQuery
 
-  // Deep link from the Overview connector list: ?open=<id>
-  useEffect(() => {
-    const open = searchParams.get('open')
-    if (open) {
-      setPanel({ kind: 'edit', id: open })
-      searchParams.delete('open')
-      setSearchParams(searchParams, { replace: true })
-    }
-  }, [searchParams])
+  // An opened connector, by a click here or a link, closes Add connector, so the two never both hold the panel.
+  useEffect(() => { if (openId) setCreating(false) }, [openId])
+  // The sub-tabs belong to the connector they were picked on.
+  const openPanel = (id: string) => { if (id !== openId) setUrl({ open: id, view: null, config: null }) }
+  const closePanel = () => setUrl({ open: null, view: null, config: null })
+  const startCreating = () => { closePanel(); setCreating(true) }
+  // A link to a connector deleted since, or in another project, is dropped once a fresh list says so: a list
+  // cached from an earlier visit may predate the connector.
+  useDropGone(
+    ['open', 'view', 'config'],
+    !!openId && !!connectorsData && !connectorsQuery.isFetching && !connectorsData.connectors.some((c) => c.id === openId),
+    'That connector no longer exists.',
+  )
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteProjectConnector(selectedProjectId!, id),
@@ -137,7 +145,7 @@ export default function ConnectorsPage() {
       queryClient.invalidateQueries({ queryKey: ['proxies', selectedProjectId] })
       queryClient.invalidateQueries({ queryKey: ['project', selectedProjectId] })
       invalidateAttention(queryClient, selectedProjectId)
-      if (panel?.kind === 'edit' && panel.id === id) setPanel(null)
+      if (id === openId) closePanel()
       setPendingDelete(null)
       toast.show('Connector deleted')
     },
@@ -157,7 +165,7 @@ export default function ConnectorsPage() {
     if (!trafficSplit) return null
     return new Map<string, ConnectorTrafficShare>(trafficSplit.connectors.map((c) => [c.connector_id, c]))
   }, [trafficSplit])
-  const openConnector = panel?.kind === 'edit' ? connectors.find((c) => c.id === panel.id) ?? null : null
+  const openConnector = openId ? connectors.find((c) => c.id === openId) ?? null : null
 
   const columns: ColumnDef<DataTableFeatures, Connector>[] = useMemo(() => [
     {
@@ -176,9 +184,21 @@ export default function ConnectorsPage() {
       accessorFn: (row: Connector) => row.credential_name || 'Unknown',
       header: 'Credential',
       meta: { filterVariant: 'text' as const },
+      // The name keeps its room and the type is cut first, as one truncated line did. On a touch screen the link is as
+      // tall as the row lets it be, without making the row taller.
       cell: ({ row }) => (
-        <span className="text-fg-muted truncate block">
-          {row.original.credential_name || 'Unknown'} <span className="text-fg-subtle">· {labelFor(row.original.credential_type)}</span>
+        <span className="flex items-center gap-1 min-w-0 text-fg-muted">
+          {row.original.credential_name && selectedProjectId ? (
+            <GuardedLink
+              to={`/projects/${selectedProjectId}/credentials?open=${row.original.credential_id}`}
+              className="inline-flex items-center flex-none max-w-full hover:text-primary hover:underline pointer-coarse:min-h-11 pointer-coarse:-my-3"
+            >
+              <span className="truncate">{row.original.credential_name}</span>
+            </GuardedLink>
+          ) : (
+            <span className="flex-none max-w-full truncate">{row.original.credential_name || 'Unknown'}</span>
+          )}
+          <span className="text-fg-subtle truncate">· {labelFor(row.original.credential_type)}</span>
         </span>
       ),
     },
@@ -279,29 +299,31 @@ export default function ConnectorsPage() {
         </div>
       ),
     }] as ColumnDef<DataTableFeatures, Connector>[] : []),
-  ], [canMutate, labelFor, shares])
+  ], [canMutate, labelFor, shares, selectedProjectId])
 
   let panelNode: React.ReactNode = null
-  if (panel?.kind === 'edit' && openConnector) {
+  // The editor waits for the providers: a descriptor connector's config tabs come from them, and `config=` is
+  // checked against those tabs.
+  if (openConnector && !providersLoading) {
     panelNode = (
       <ConnectorEditor
         key={openConnector.id}
         connector={openConnector}
         siblings={connectors}
         canMutate={canMutate}
-        onClose={() => setPanel(null)}
+        onClose={closePanel}
         onDelete={() => setPendingDelete(openConnector)}
         onSaved={() => toast.show('Connector saved')}
       />
     )
-  } else if (panel?.kind === 'new') {
+  } else if (creating && !openId) {
     panelNode = (
       <ConnectorEditor
         key="new"
         siblings={connectors}
         canMutate={canMutate}
-        onClose={() => setPanel(null)}
-        onSaved={(c) => { setPanel(null); toast.show(`Connector "${c.name}" created`) }}
+        onClose={() => setCreating(false)}
+        onSaved={(c) => { setCreating(false); toast.show(`Connector "${c.name}" created`) }}
       />
     )
   }
@@ -313,7 +335,7 @@ export default function ConnectorsPage() {
       title="Connectors"
       count={connectorsData?.total}
       subtitle={connectors.length > 0 ? `${connectors.reduce((a, c) => a + c.proxy_count, 0)} proxies provisioned` : 'Where this project\'s proxies come from'}
-      actions={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add connector</Button> : undefined}
+      actions={canMutate ? <Button size="sm" onClick={startCreating}><Plus className="w-3.5 h-3.5" /> Add connector</Button> : undefined}
       panel={panelNode}
     >
       <QueryContent query={connectorsQuery} what="the connectors">
@@ -322,20 +344,20 @@ export default function ConnectorsPage() {
             icon={<Link2 />}
             title="No connectors yet"
             description="A connector turns a credential into proxies: cloud instances, provider sessions or a static list you manage yourself."
-            action={canMutate ? <Button size="sm" onClick={() => setPanel({ kind: 'new' })}><Plus className="w-3.5 h-3.5" /> Add connector</Button> : undefined}
+            action={canMutate ? <Button size="sm" onClick={startCreating}><Plus className="w-3.5 h-3.5" /> Add connector</Button> : undefined}
           />
         ) : (
           <>
             {connectors.length > 1 && selectedProjectId && (
-              <TrafficSplitPanel projectId={selectedProjectId} onOpenConnector={(id) => setPanel({ kind: 'edit', id })} className="mb-4" />
+              <TrafficSplitPanel projectId={selectedProjectId} onOpenConnector={openPanel} className="mb-4" />
             )}
             <DataTable
               columns={columns}
               data={connectors}
               getRowId={(row) => row.id}
-              onRowClick={(row) => setPanel({ kind: 'edit', id: row.id })}
-              activeRowId={panel?.kind === 'edit' ? panel.id : null}
-              columnVisibility={panel ? { updated_at: false, actions: false, traffic: false } : {}}
+              onRowClick={(row) => openPanel(row.id)}
+              activeRowId={openConnector?.id ?? null}
+              columnVisibility={panelNode ? { updated_at: false, actions: false, traffic: false } : {}}
             />
             {errored.map((c) => (
               <Alert key={c.id} className="flex items-start gap-2.5 text-[12.5px]">
@@ -343,7 +365,7 @@ export default function ConnectorsPage() {
                 <span>
                   <b className="font-semibold">{c.name}</b> failed {c.consecutive_errors} {plural(c.consecutive_errors, 'time', 'times')} in a row:{' '}
                   <span className="font-mono text-xs">{c.last_error}</span>{' '}
-                  <button onClick={() => setPanel({ kind: 'edit', id: c.id })} className="underline font-medium">Open connector</button>
+                  <button onClick={() => openPanel(c.id)} className="underline font-medium">Open connector</button>
                 </span>
               </Alert>
             ))}
@@ -387,6 +409,17 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
   const isCloud = !!type && CLOUD_TYPES.has(type)
   const isDescriptor = provider?.kind === 'descriptor'
   const descriptorFields = provider?.connector_fields ?? []
+  const tabsFor = (t: CredentialType): { id: ConfigTab; label: string }[] => {
+    const common = [{ id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }, { id: 'traffic', label: 'Traffic' }]
+    if (t === 'static_proxy_provider') return [{ id: 'general', label: 'General' }, ...common]
+    if (isDescriptor) {
+      const groups: string[] = []
+      for (const f of descriptorFields) if (!groups.includes(f.group)) groups.push(f.group)
+      if (groups.length === 0) groups.push('general')
+      return [...groups.map((g) => ({ id: g, label: groupLabel(g) })), ...common]
+    }
+    return [{ id: 'infrastructure', label: 'Infrastructure' }, { id: 'scaling', label: 'Scaling' }, { id: 'advanced', label: 'Advanced' }, ...common]
+  }
   const [formData, setFormData] = useState<ConnectorFormData>(() => {
     if (!connector) return EMPTY_FORM
     const configForForm: Record<string, string> = {}
@@ -405,14 +438,16 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
     }
   })
   const [weightText, setWeightText] = useState<string>(() => String(connectorWeight(connector?.routing_config)))
-  const [activeTab, setActiveTab] = useState<ConfigTab>(() => {
-    if (connector?.credential_type === 'static_proxy_provider') return 'general'
-    if (connector?.credential_type && !CLOUD_TYPES.has(connector.credential_type)) return 'general'
-    return 'infrastructure'
-  })
+  // An open connector's config tab and Settings/History view are in the address; a new connector's stay here.
+  const configTabs = type ? tabsFor(type).map((t) => t.id) : []
+  const [linkedTab, setLinkedTab, tabReveal] = useUrlTab<ConfigTab>(configTabs, configTabs[0] ?? 'general', 'config')
+  const [newTab, setNewTab] = useState<ConfigTab>('general')
+  const activeTab = isEdit ? linkedTab : newTab
+  const setActiveTab = (tab: ConfigTab) => (isEdit ? setLinkedTab(tab) : setNewTab(tab))
+  const [linkedView, setView, viewReveal] = useUrlTab<EditorView>(EDITOR_VIEWS, 'settings', 'view')
+  const view: EditorView = isEdit ? linkedView : 'settings'
   const [error, setError] = useState<string | null>(null)
   const [creatingCredential, setCreatingCredential] = useState(false)
-  const [view, setView] = useState<EditorView>('settings')
   // Declared here with the other state: every hook must run on every render, including the
   // type-picker render before `type` is chosen, or React sees more hooks once a type is picked.
   const [limitText, setLimitText] = useState<string>(() => (connector?.traffic_config?.limit_bytes ? String(connector.traffic_config.limit_bytes / BYTES_PER_GB) : ''))
@@ -782,7 +817,8 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
 
   const renderTrafficTab = () => (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3">
+      {/* Stacked on a phone, where the period's three choices and the reset day do not fit side by side. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <Label className="text-xs">
             <span className="inline-flex items-center gap-1.5">
@@ -905,18 +941,6 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
       min_rotation_period_minutes: 'Min rotation (min)', max_rotation_period_minutes: 'Max rotation (min)',
     }
     return labels[key] || key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())
-  }
-
-  const tabsFor = (t: CredentialType): { id: ConfigTab; label: string }[] => {
-    const common = [{ id: 'routing', label: 'Routing' }, { id: 'rate_limiting', label: 'Rate limiting' }, { id: 'traffic', label: 'Traffic' }]
-    if (t === 'static_proxy_provider') return [{ id: 'general', label: 'General' }, ...common]
-    if (isDescriptor) {
-      const groups: string[] = []
-      for (const f of descriptorFields) if (!groups.includes(f.group)) groups.push(f.group)
-      if (groups.length === 0) groups.push('general')
-      return [...groups.map((g) => ({ id: g, label: groupLabel(g) })), ...common]
-    }
-    return [{ id: 'infrastructure', label: 'Infrastructure' }, { id: 'scaling', label: 'Scaling' }, { id: 'advanced', label: 'Advanced' }, ...common]
   }
 
   const renderDescriptorGroup = (group: string) => {
@@ -1065,6 +1089,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
           tabs={[{ id: 'settings', label: 'Settings' }, { id: 'history', label: 'History' }]}
           active={view}
           onChange={setView}
+          reveal={viewReveal}
           className="pointer-coarse:*:min-h-11"
         />
       )}
@@ -1108,7 +1133,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
           )}
         </div>
 
-        <Tabs<ConfigTab> tabs={tabsFor(type)} active={activeTab} onChange={setActiveTab} size="sm" />
+        <Tabs<ConfigTab> tabs={tabsFor(type)} active={activeTab} onChange={setActiveTab} size="sm" reveal={isEdit ? tabReveal : null} className="pointer-coarse:*:min-h-11" />
         <fieldset disabled={readOnly} className="min-h-[160px]">{renderTabContent()}</fieldset>
       </form>
 
@@ -1116,7 +1141,7 @@ function ConnectorEditor({ connector, siblings, canMutate, onClose, onDelete, on
 
       {isEdit && connector && selectedProjectId && <ConnectorLatencySection connector={connector} projectId={selectedProjectId} />}
 
-      {isEdit && connector && <ConnectorAccuracySection connectorId={connector.id} />}
+      {isEdit && connector && selectedProjectId && <ConnectorAccuracySection connectorId={connector.id} projectId={selectedProjectId} />}
 
       {isEdit && connector && (
         <InspectorSection title="Details">
@@ -1181,8 +1206,8 @@ function KeyValueTagsEditor({ value, onChange }: { value: string; onChange: (val
 
 
 
-/** Vendor location accuracy for one connector, from the attribution aggregates. */
-function ConnectorAccuracySection({ connectorId }: { connectorId: string }) {
+/** Vendor location accuracy for one connector, from the attribution aggregates; the details are on Exit locations. */
+function ConnectorAccuracySection({ connectorId, projectId }: { connectorId: string; projectId: string }) {
   const { data } = useQuery({
     queryKey: ['geo-accuracy', 'connector', connectorId],
     queryFn: () => fetchGeoAccuracy({ connector_id: connectorId, days: 30 }),
@@ -1199,7 +1224,14 @@ function ConnectorAccuracySection({ connectorId }: { connectorId: string }) {
   const pct = ratePercent(row?.country.accuracy)
   const rate = (value: number | null) => (value == null ? <span className="text-fg-subtle">open</span> : <span className={rateClass(value)}>{value}%</span>)
   return (
-    <InspectorSection title="Exit locations (30 days)">
+    <InspectorSection
+      title="Exit locations (30 days)"
+      action={
+        <GuardedLink to={`/projects/${projectId}/locations?tab=accuracy&open=${connectorId}`} className="inline-flex items-center text-xs text-primary hover:brightness-110 pointer-coarse:min-h-11">
+          Details →
+        </GuardedLink>
+      }
+    >
       {exits && <KeyValue label="Unique exit IPs" value={<span className="tabular-nums" title={coverageLabel(exits.coverage)?.title}>{exits.unique_in_window.toLocaleString()}<span className="text-fg-subtle font-normal"> / {exits.unique_total.toLocaleString()} ever</span>{coverageLabel(exits.coverage) && <span className="ml-1.5 text-[10px] uppercase tracking-wide text-warning">{coverageLabel(exits.coverage)?.text}</span>}</span>} />}
       {exits && exits.unique_total > 0 && <KeyValue label="Reused IPs" value={`${Math.round((exits.reused / exits.unique_total) * 1000) / 10}%`} />}
       {row && row.country.claimed > 0 && <KeyValue label="Exits with a vendor claim" value={row.country.claimed.toLocaleString()} />}

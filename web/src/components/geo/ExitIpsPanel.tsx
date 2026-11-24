@@ -14,6 +14,7 @@ import { Badge, Card, Select } from '../ui'
 import { formatDateTime, relativeTime } from '../../utils/format'
 import { HeaderWithTip, TIPS, VerdictCell, countryVerdict, placeLabel } from './columns'
 import { endLabel } from './ExitIpReputation'
+import { filterPatch, filterValues, linkedFilters, useDropGoneConnector, type FilterValues } from './headerFilters'
 import { AdminLink } from '../AdminLink'
 
 const VERDICT_OPTIONS: { value: ObservationVerdict; label: string }[] = [
@@ -23,19 +24,20 @@ const VERDICT_OPTIONS: { value: ObservationVerdict; label: string }[] = [
   { value: 'no_claim', label: 'no claim' },
 ]
 
-/** The header filters, keyed by column id, as the server's query parameters. */
-function toServerFilters(columnFilters: ColumnFiltersState): ExitIpFilters {
-  const value = (id: string) => {
-    const v = columnFilters.find((f) => f.id === id)?.value
-    return typeof v === 'string' && v.trim() ? v.trim() : undefined
-  }
+/** The header filters by column id, as a link carries them too. */
+export const EXIT_IP_FILTERS = ['connector', 'ip', 'claimed', 'resolved', 'verdict', 'proxy_id'] as const
+// A link's select filters hold only what their selects offer.
+const LINKED_CHOICES = { verdict: VERDICT_OPTIONS.map((o) => o.value) }
+
+/** The applied header filters, keyed by column id, as the server's query parameters. */
+function toServerFilters(values: FilterValues): ExitIpFilters {
   return {
-    connector_id: value('connector'),
-    ip: value('ip'),
-    claimed_country: value('claimed'),
-    country: value('resolved'),
-    verdict: value('verdict') as ObservationVerdict | undefined,
-    proxy_id: value('proxy_id'),
+    connector_id: values.connector,
+    ip: values.ip,
+    claimed_country: values.claimed,
+    country: values.resolved,
+    verdict: values.verdict as ObservationVerdict | undefined,
+    proxy_id: values.proxy_id,
   }
 }
 
@@ -49,21 +51,29 @@ function toServerFilters(columnFilters: ColumnFiltersState): ExitIpFilters {
  * Scoped to one project when `projectId` is given; across every project
  * otherwise.
  */
-export function ExitIpsPanel({ projectId }: { projectId?: string }) {
+export function ExitIpsPanel({ projectId, initialFilters, onFilters }: {
+  projectId?: string
+  /** The header filters a link opened the table with, by column id (EXIT_IP_FILTERS); read once. */
+  initialFilters?: Record<string, string>
+  /** Hears the header filters once applied, each of EXIT_IP_FILTERS set or null, not every keystroke. */
+  onFilters?: (applied: Record<string, string | null>) => void
+}) {
   const [projectFilter, setProjectFilter] = useState('')
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>(() => linkedFilters(initialFilters, EXIT_IP_FILTERS, LINKED_CHOICES))
   const [pageIndex, setPageIndex] = useState(0)
   const [pageSize, setPageSize] = useState(50)
   const scope = projectId ?? (projectFilter || undefined)
 
-  const [applied, setApplied] = useState<ExitIpFilters>({})
+  // A link's filters apply at once: through the debounce the table would load unfiltered first.
+  const [applied, setApplied] = useState<FilterValues>(() => filterValues(columnFilters))
   useEffect(() => {
-    const handle = setTimeout(() => setApplied(toServerFilters(columnFilters)), 300)
+    const handle = setTimeout(() => setApplied(filterValues(columnFilters)), 300)
     return () => clearTimeout(handle)
   }, [columnFilters])
   useEffect(() => { setPageIndex(0) }, [scope, applied, pageSize])
+  useEffect(() => { onFilters?.(filterPatch(applied, EXIT_IP_FILTERS)) }, [applied])
 
-  const filters: ExitIpFilters = { ...applied, project_id: scope }
+  const filters: ExitIpFilters = { ...toServerFilters(applied), project_id: scope }
   const { data, isLoading, isPlaceholderData } = useQuery({
     queryKey: ['geo-exit-ips', filters, pageIndex, pageSize],
     queryFn: () => fetchGeoExitIps({ ...filters, limit: pageSize, offset: pageIndex * pageSize }),
@@ -84,6 +94,12 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
     // Keyed on when each query last delivered data: the query objects change identity every render.
     [connectorQueries.map((q) => q.dataUpdatedAt).join()],
   )
+  const connectorsLoaded = (!!scope || !!projects) && connectorQueries.every((q) => q.isSuccess && !q.isFetching)
+  useDropGoneConnector(initialFilters?.connector?.trim(), connectorsLoaded ? connectorOptions : null, () => {
+    const next = columnFilters.filter((f) => f.id !== 'connector')
+    setColumnFilters(next)
+    setApplied(filterValues(next))
+  })
 
   // Exit reputation per IP, for a project that records it: read once the page is in, for the page's IPs.
   const { selectedProject } = useProject()
@@ -164,7 +180,7 @@ export function ExitIpsPanel({ projectId }: { projectId?: string }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <p className="text-xs text-fg-muted">Every distinct exit IP a connector has handed out, most recently seen first, with what the latest observation found. One row per IP however often it was seen; the observation log has every sighting. Kept for the exit IP retention window set in <AdminLink page="geo">IP attribution</AdminLink>. Country and IP filters match exactly.</p>
+        <p className="text-xs text-fg-muted">Every distinct exit IP a connector has handed out, most recently seen first, with what the latest observation found. One row per IP however often it was seen; the observation log has every sighting. Kept for the exit IP retention window set in <AdminLink page="geo" query="tab=policy">IP attribution</AdminLink>. Country and IP filters match exactly.</p>
         {!projectId && (
           <Select value={projectFilter} onChange={(e) => setProjectFilter(e.target.value)} className="w-44" aria-label="Project">
             <option value="">All projects</option>

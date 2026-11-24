@@ -1,7 +1,7 @@
 // Copyright 2026 Octoprox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import {
@@ -20,6 +20,7 @@ import { KIND_INFO } from '../../components/failures/FailureDetail'
 import { Page } from '../../components/layout/Page'
 import { LicenseCard } from '../../components/license/LicenseCard'
 import { useTheme } from '../../contexts/ThemeContext'
+import { useUrlParam, useUrlParams } from '../../hooks/useUrlState'
 import { formatRangeTick, rangeTicks, useTimeRange } from '../../contexts/TimeRangeContext'
 import { bytesShort, bytesTick, elideMiddle, formatBytes, formatDateTime, formatDuration, parseApiDate, plural, relativeTime } from '../../utils/format'
 import {
@@ -64,8 +65,18 @@ export default function SystemSection() {
 
   // Kept by id rather than as the object, so the panel follows the process
   // across refreshes and says so when it has left rather than showing another.
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // The id is open=, so a link opens it, and a link to a process gone since says so too.
+  const [selectedId, setSelectedId] = useUrlParam('open')
   const selected = cluster && selectedId ? allProcesses(cluster).find((i) => i.instance_id === selectedId) ?? null : null
+
+  // A reading kept from an earlier look would seed the rates and the backlog ages across the gap, so switching to
+  // the topology drops it, whether a click or the address switched.
+  const shownView = useRef(view)
+  const enterView = (next: ClusterView) => {
+    if (next === 'topology' && shownView.current !== 'topology') queryClient.resetQueries({ queryKey: ['system-topology'], exact: true })
+    shownView.current = next
+  }
+  useEffect(() => { enterView(view) }, [view])
 
   return (
     <Page
@@ -76,11 +87,8 @@ export default function SystemSection() {
           size="sm"
           options={[{ value: 'list', label: 'List' }, { value: 'topology', label: 'Topology' }]}
           value={view}
-          onChange={(next) => {
-            // A reading kept from an earlier visit would seed the rates and the backlog ages across the gap.
-            if (next === 'topology' && view !== 'topology') queryClient.resetQueries({ queryKey: ['system-topology'], exact: true })
-            setView(next)
-          }}
+          onChange={(next) => { enterView(next); setView(next) }}
+          className="pointer-coarse:*:min-h-11"
         />
       }
       actions={
@@ -164,16 +172,24 @@ type ClusterView = 'list' | 'topology'
 
 const VIEW_KEY = 'octoprox_system_view'
 
-/** Which view of the cluster the page shows, remembered in this browser. */
+/**
+ * Which view of the cluster the page shows, in tab=. A link's view holds for the visit without changing this
+ * browser's own, which a pick sets; the address always names the view, so a link shows what its sender saw.
+ */
 function useClusterView(): [ClusterView, (view: ClusterView) => void] {
-  const [view, setView] = useState<ClusterView>(() => {
-    try { return localStorage.getItem(VIEW_KEY) === 'topology' ? 'topology' : 'list' } catch { return 'list' }
-  })
+  const [params, setUrl] = useUrlParams()
+  const linked = params.get('tab')
+  const view: ClusterView = linked === 'list' || linked === 'topology' ? linked : savedClusterView()
+  useEffect(() => { if (linked !== view) setUrl({ tab: view }) }, [linked, view, setUrl])
   const choose = (next: ClusterView) => {
-    setView(next)
     try { localStorage.setItem(VIEW_KEY, next) } catch { /* ignore */ }
+    setUrl({ tab: next })
   }
   return [view, choose]
+}
+
+function savedClusterView(): ClusterView {
+  try { return localStorage.getItem(VIEW_KEY) === 'topology' ? 'topology' : 'list' } catch { return 'list' }
 }
 
 // --- roles and processes -----------------------------------------------------------------

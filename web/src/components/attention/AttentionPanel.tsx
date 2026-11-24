@@ -44,7 +44,7 @@ export function AttentionPanel({ projectId, projectName, attention, canMutate, o
       subtitle={`${projectName} · ${checked}`}
       actions={(
         <>
-          <Link to={`/projects/${projectId}/alerts`} className={HEADER_LINK}>Alert history</Link>
+          <Link to={`/projects/${projectId}/alerts?status=open`} className={HEADER_LINK}>Alert history</Link>
           {canMutate && openSettings && (
             <button type="button" onClick={() => openSettings('alerts')} className={HEADER_LINK}>Alert settings</button>
           )}

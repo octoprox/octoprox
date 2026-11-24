@@ -2,10 +2,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ReactNode } from 'react'
-import { useNavigate } from 'react-router'
+import { Link, useNavigate } from 'react-router'
 import type { ConnectRoute } from '../api/client'
 import { useNavigationGuardContext } from '../contexts/NavigationGuardContext'
 import { cn } from '../utils/cn'
+
+/**
+ * A link to another page's view. A plain click asks first while an editor has unsaved work; a modifier click opens a
+ * new browser tab and leaves this page as it is.
+ */
+export function GuardedLink({ to, className, title, children }: { to: string; className?: string; title?: string; children: ReactNode }) {
+  const navigate = useNavigate()
+  const guard = useNavigationGuardContext()
+  return (
+    <Link
+      to={to}
+      title={title}
+      onClick={(e) => {
+        if (!guard.blocked || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+        e.preventDefault()
+        guard.request(() => navigate(to))
+      }}
+      className={className}
+    >
+      {children}
+    </Link>
+  )
+}
 
 /** A connector's name that opens it on the Connectors page, asking first while an editor has unsaved work. */
 export function ConnectorLink({ projectId, connectorId, className, children }: {
@@ -14,16 +37,14 @@ export function ConnectorLink({ projectId, connectorId, className, children }: {
   className?: string
   children: ReactNode
 }) {
-  const navigate = useNavigate()
-  const guard = useNavigationGuardContext()
   return (
-    <button
-      type="button"
-      onClick={() => guard.request(() => navigate(`/projects/${projectId}/connectors?open=${connectorId}`))}
-      className={cn('font-medium text-fg hover:text-primary truncate text-left min-w-0', className)}
+    // 44 px to tap on a touch screen without making the row it sits in any taller.
+    <GuardedLink
+      to={`/projects/${projectId}/connectors?open=${connectorId}`}
+      className={cn('inline-flex items-center min-w-0 max-w-full font-medium text-fg hover:text-primary pointer-coarse:min-h-11 pointer-coarse:-my-3', className)}
     >
-      {children}
-    </button>
+      <span className="truncate">{children}</span>
+    </GuardedLink>
   )
 }
 
