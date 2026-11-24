@@ -10,6 +10,21 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.9.4
+  date: 2026-11-24
+  title: Shareable links to every view and panel
+  changes:
+    - text: "Links now open the view you were looking at. The address bar keeps the tab, the open panel, the filters and the time range, so a colleague who opens your link sees the same thing."
+    - text: "A link button in the top bar copies a link to the current view. On a phone it opens the share sheet."
+    - text: "A time range in a link applies only to the browser tab it opens in. It does not change your saved range, and picking another range ends it."
+    - text: "A link to something that no longer exists, such as a deleted connector, opens the page without it and shows a message saying so."
+    - text: "Signing in with a provider now brings you back to the link you opened, not the project list."
+      docs: sso#sign-in-with-a-provider
+    - text: "Needs attention lines now open the exact view they describe, such as Proxies filtered to unhealthy ones, Failures filtered to the refusal kind, a connector's traffic settings, or its exit location accuracy. The problem count next to a project name opens that project's Needs attention panel."
+    - text: "Browser tabs, history and bookmarks now show the page's name."
+    - text: "The API can now return a single failure example or a single install alert by its ID, so links to them work even when they are not on the first page."
+      docs: api#one-example
+
 - version: 6.9.3
   date: 2026-11-23
   title: Exit reputation strength and lowest factor
