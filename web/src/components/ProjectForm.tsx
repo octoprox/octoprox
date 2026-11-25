@@ -188,6 +188,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
     exit_reputation_bad_share: project?.exit_reputation_bad_share ?? 50,
     exit_reputation_strength: project?.exit_reputation_strength ?? 1,
     exit_reputation_floor: project?.exit_reputation_floor ?? 10,
+    exit_reputation_retention_days: project?.exit_reputation_retention_days ?? 30,
   }))
   const [formData, setFormData] = useState<ProjectCreate>(loaded)
   const [showPassword, setShowPassword] = useState(false)
@@ -599,8 +600,8 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
               />
             </div>
           </div>
-          {/* The two memories side by side, stacked on a phone, where Connector memory's label would take two lines. */}
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(12rem,1fr))] gap-3">
+          {/* The two memories and how long data is kept: three across from sm up, stacked on a phone; the inputs line up under the tallest label. */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 items-end gap-3">
             <div>
               <Label className="text-xs">
                 <span className="inline-flex items-center gap-1.5">
@@ -629,6 +630,20 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
                 // Raised to 20 only on leaving the field, so 100 can be typed digit by digit.
                 onChange={(e) => setFormData({ ...formData, exit_reputation_connector_half_life_requests: boundedInt(e.target.value, 1, 10000) })}
                 onBlur={(e) => setFormData({ ...formData, exit_reputation_connector_half_life_requests: boundedInt(e.target.value, 20, 10000) })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Keep data for (days)</span>
+                  <InfoTip label="About Keep data for">How many days this project's exit reputation data is kept after it was last used: the Over time chart's history, and each site's reports, avoids and factors. 0 keeps it forever.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={0} max={365} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_retention_days ?? ''}
+                onChange={(e) => setFormData({ ...formData, exit_reputation_retention_days: boundedInt(e.target.value, 0, 365) })}
               />
             </div>
           </div>

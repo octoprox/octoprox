@@ -163,8 +163,8 @@ class ProjectModel(Base):
     observation_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Exit reputation: what exit reports do (api.models.project.ExitReputationMode), how many minutes a first avoid
     # lasts, an exit IP record's half-life in hours, a connector record's in requests, the fresh bad reports that avoid
-    # an exit for a site, the least bad share in percent, the strength dynamic connectors are compared at, and the lowest
-    # factor in percent.
+    # an exit for a site, the least bad share in percent, the strength dynamic connectors are compared at, the lowest
+    # factor in percent, and the days the project's records and Over time history are kept after last use (0 forever).
     exit_reputation: Mapped[str] = mapped_column(String(16), nullable=False, default="off", server_default="off")
     exit_reputation_avoid_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60, server_default="60")
     exit_reputation_half_life_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24, server_default="24")
@@ -175,6 +175,7 @@ class ProjectModel(Base):
     exit_reputation_bad_share: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50")
     exit_reputation_strength: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     exit_reputation_floor: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default="10")
+    exit_reputation_retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30, server_default="30")
     # Set by a delete; the project goes once no connector holds it (its cloud instances terminated).
     pending_deletion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     # Needs attention lines muted by the project's editors, by line key (api.attention.mutes); never read into the
@@ -1008,3 +1009,57 @@ class ConnectorSiteReputationModel(Base):
         Index("ix_connector_site_reputation_connector_id", "connector_id"),
         {"postgresql_with": {"fillfactor": 80}},
     )
+
+
+class ConnectorFactorMoveModel(Base):
+    """One move of a dynamic connector's stored factor on one site and level of the requested place, as the metrics
+    flush decided it, with the record's lifetime counts once it did; the Over time chart draws them.
+
+    No foreign key to the connector: a deleted connector's moves age out with the history setting, and reads keep the
+    project's current connectors alone. A project's go with it.
+    """
+
+    __tablename__ = "connector_factor_moves"
+
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    site: Mapped[str] = mapped_column(String(253), primary_key=True)
+    # The record's level of the requested place, as connector_site_reputation keeps it; "" for none.
+    place: Mapped[str] = mapped_column(String(128), primary_key=True)
+    connector_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # The flush's decision time (naive UTC).
+    at: Mapped[datetime] = mapped_column(DateTime, primary_key=True)
+    # None while not judged.
+    old_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    new_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    requests: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    blocked_reports: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Rows are only inserted and deleted; the index on (project_id, at) serves the retention sweep and a project's
+    # first move's time.
+    # See migration 064 for why.
+    __table_args__ = (Index("ix_connector_factor_moves_project_at", "project_id", "at"),)
+
+
+class ExitIpAvoidMoveModel(Base):
+    """One change of an exit IP's avoid on one site, as a batch of reports applied it: the avoid's end before and after
+    (null for none); the Over time chart draws the connectors with IPs from them.
+
+    No foreign key to the exit IP's record: the retention sweep deletes records whose avoid has passed, and their moves
+    age out with the history setting. A project's go with it.
+    """
+
+    __tablename__ = "exit_ip_avoid_moves"
+
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    site: Mapped[str] = mapped_column(String(253), primary_key=True)
+    # Canonical text, as exit_ip_reputation keeps it.
+    ip: Mapped[str] = mapped_column(String(45), primary_key=True)
+    # When the batch was applied (naive UTC).
+    at: Mapped[datetime] = mapped_column(DateTime, primary_key=True)
+    old_avoid_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    new_avoid_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Rows are only inserted and deleted; the index on (project_id, at) serves the retention sweep and a project's
+    # first move's time.
+    # See migration 064 for why.
+    __table_args__ = (Index("ix_exit_ip_avoid_moves_project_at", "project_id", "at"),)

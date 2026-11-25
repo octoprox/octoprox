@@ -69,15 +69,17 @@ export function Tabs<T extends string>({ tabs, active, onChange, size = 'md', cl
 }
 
 /** Segmented control (pill group) for small option sets like time ranges. */
-export function Segmented<T extends string>({ options, value, onChange, size = 'md', className }: {
+export function Segmented<T extends string>({ options, value, onChange, size = 'md', className, label }: {
   options: { value: T; label: string }[]
   value: T
   onChange: (v: T) => void
   size?: 'sm' | 'md'
   className?: string
+  /** The group's accessible name. */
+  label?: string
 }) {
   return (
-    <div className={cn('inline-flex bg-surface-raised rounded-lg p-0.5', className)} role="radiogroup">
+    <div className={cn('inline-flex bg-surface-raised rounded-lg p-0.5', className)} role="radiogroup" aria-label={label}>
       {options.map((o) => (
         <button
           key={o.value}

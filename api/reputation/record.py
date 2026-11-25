@@ -42,6 +42,9 @@ FACTOR_STEPS = 20
 # How far short of a whole step a block rate may fall and still move a stored factor: in floating point 1 - 17 / 20 is
 # a hair over 0.15.
 _STEP_TOLERANCE = 1e-9
+# How far after the record's last batch an avoid move of a batch stamped earlier is put: two ingest workers can apply
+# their batches in the other order than they took their times, and the history reads an IP's moves by time.
+_AFTER = timedelta(microseconds=1)
 # The time floor of a connector record's memory: its evidence counts half every hour besides every "Connector memory"
 # requests, so a quiet record's block rate stays recent.
 CONNECTOR_HALF_LIFE_TIME = timedelta(hours=1)
@@ -202,11 +205,15 @@ class IpChange(NamedTuple):
 
 
 class ConnectorChange(NamedTuple):
-    """What a flush did to a connector's stored factor: before and after."""
+    """What a flush deciding at ``at`` did to a connector's stored factor: before and after, with the record's lifetime
+    requests and blocked reports once it decided."""
 
     key: ConnectorSiteKey
+    at: datetime
     old_factor: float | None
     new_factor: float | None
+    requests: int
+    blocked_reports: int
 
     @property
     def moved(self) -> bool:
@@ -361,10 +368,11 @@ class ExitIpReputation(ReputationRecord):
             self.weighted_avoids += 1
 
     def apply(self, counts: ReportCounts, now: datetime, policy: ReputationPolicy) -> IpChange:
-        """Add a batch's reports for this record as of ``now``; what that did to its avoid."""
-        before = self.avoid_until
+        """Add a batch's reports for this record as of ``now``; what that did to its avoid, stamped after any later
+        batch the record took first, so the IP's avoid moves keep the order they were applied in."""
+        before, seen = self.avoid_until, self.last_seen_at
         self.add_reports(counts.good, counts.bad, now, counts.reason, policy)
-        return IpChange(self.key, now, before, self.avoid_until)
+        return IpChange(self.key, now if now >= seen else seen + _AFTER, before, self.avoid_until)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -430,7 +438,7 @@ class ConnectorSiteReputation(ReputationRecord):
         before = self.factor
         requests, blocked, good = max(requests, 0), max(blocked, 0), max(good, 0)
         if not (requests or blocked or good):
-            return ConnectorChange(self.key, before, before)
+            return self._change(now, before)
         self._decay_by(self.decay_factor(now, policy) * math.exp2(-requests / policy.connector_half_life), now)
         self.weighted_blocked += blocked
         self.weighted_requests += requests
@@ -439,7 +447,11 @@ class ConnectorSiteReputation(ReputationRecord):
         self.requests += requests
         self._seen(now)
         self.factor = self._decided(policy)
-        return ConnectorChange(self.key, before, self.factor)
+        return self._change(now, before)
+
+    def _change(self, now: datetime, before: float | None) -> ConnectorChange:
+        """What deciding at ``now`` did to a factor that was ``before``, with the counts the record holds now."""
+        return ConnectorChange(self.key, now, before, self.factor, self.requests, self.blocked_reports)
 
     def _decided(self, policy: ReputationPolicy) -> float | None:
         """The factor the weights make: none below ``MIN_FACTOR_REQUESTS`` weighted requests; else one less the block

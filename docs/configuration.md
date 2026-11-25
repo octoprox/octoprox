@@ -299,18 +299,7 @@ An example is a few hundred bytes, so a kind that fills its examples at the defa
 
 ## Exit Reputation
 
-How long [exit reputation]({{ site.baseurl }}/exit-reputation) records are kept. A project's mode and its five settings are in its Project settings; this one is the install's:
-
-```yaml
-exit_reputation:
-  retention_days: 30   # after the day a record was last seen; 0 keeps records forever
-```
-
-| Setting | Description | Default |
-|---------|-------------|---------|
-| `exit_reputation.retention_days` | Days a record is kept after the day it was last seen, by a report or a request counted. The hourly compaction on the workers deletes the older ones, except an exit IP's whose avoid is still ahead; `0` keeps them forever | `30` |
-
-It can also be set as `OCTOPROX_EXIT_REPUTATION_RETENTION_DAYS`, on the workers, which alone read it. Records exist only for what clients reported: an exit IP on a site, or a connector on a site and a requested place. Keep it at ten times the projects' Remember for or more: an exit IP's record deleted sooner forgets evidence that still weighs, so later reports on the IP are decided without it. A connector's evidence counts half every hour at least, so it weighs next to nothing long before its record is deleted.
+[Exit reputation]({{ site.baseurl }}/exit-reputation) has no setting in the configuration file or the environment. Each project sets its own on its **Exit reputation** settings tab, among them how long its exit reputation data is kept (**Keep data for**, 30 days by default), the records and the history behind a place's **Over time** chart alike; see [Settings]({{ site.baseurl }}/exit-reputation#settings). The hourly compaction, on the workers, applies it.
 
 ## Audit Log
 

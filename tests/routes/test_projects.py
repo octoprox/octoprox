@@ -198,8 +198,9 @@ class TestProjectEndpoints:
             "exit_reputation_bad_share",
             "exit_reputation_strength",
             "exit_reputation_floor",
+            "exit_reputation_retention_days",
         )
-        assert tuple(created_project[field] for field in fields) == ("off", 60, 24, 100, 1, 50, 1, 10)
+        assert tuple(created_project[field] for field in fields) == ("off", 60, 24, 100, 1, 50, 1, 10, 30)
 
         edited = authenticated_client.patch(
             url,
@@ -212,17 +213,20 @@ class TestProjectEndpoints:
                 "exit_reputation_bad_share": 25,
                 "exit_reputation_strength": 10,
                 "exit_reputation_floor": 5,
+                "exit_reputation_retention_days": 90,
             },
         )
         assert edited.status_code == 200
-        assert tuple(edited.json()[field] for field in fields) == ("record", 30, 12, 500, 3, 25, 10, 5)
+        assert tuple(edited.json()[field] for field in fields) == ("record", 30, 12, 500, 3, 25, 10, 5, 90)
         # An edit that leaves them out keeps them, and the list carries them: the project page edits from it.
         kept = authenticated_client.patch(url, json={"description": "kept", "exit_reputation": "avoid"})
-        assert tuple(kept.json()[field] for field in fields) == ("avoid", 30, 12, 500, 3, 25, 10, 5)
+        assert tuple(kept.json()[field] for field in fields) == ("avoid", 30, 12, 500, 3, 25, 10, 5, 90)
         listed = {p["id"]: p for p in authenticated_client.get("/api/v1/projects").json()["projects"]}
-        assert tuple(listed[created_project["id"]][field] for field in fields) == ("avoid", 30, 12, 500, 3, 25, 10, 5)
+        assert tuple(listed[created_project["id"]][field] for field in fields) == (
+            "avoid", 30, 12, 500, 3, 25, 10, 5, 90
+        )
         assert tuple(authenticated_client.get(url).json()[field] for field in fields) == (
-            "avoid", 30, 12, 500, 3, 25, 10, 5
+            "avoid", 30, 12, 500, 3, 25, 10, 5, 90
         )
 
     @pytest.mark.parametrize(
@@ -237,6 +241,8 @@ class TestProjectEndpoints:
             ("exit_reputation_strength", (0, 21), (1, 20)),
             # In percent: 100 never lowers a dynamic connector's weight.
             ("exit_reputation_floor", (0, 101), (1, 100)),
+            # Days after the data was last used; 0 keeps it forever.
+            ("exit_reputation_retention_days", (-1, 366), (0, 365)),
             # Prefer was dropped: the modes are off, record and avoid.
             ("exit_reputation", ("prefer", ""), ("off", "avoid")),
         ],
@@ -271,6 +277,7 @@ class TestProjectEndpoints:
                 "exit_reputation_connector_half_life_requests": 250,
                 "exit_reputation_strength": 5,
                 "exit_reputation_floor": 20,
+                "exit_reputation_retention_days": 0,
             },
         )
         assert created.status_code == 201
@@ -281,13 +288,15 @@ class TestProjectEndpoints:
             body["exit_reputation_connector_half_life_requests"],
             body["exit_reputation_strength"],
             body["exit_reputation_floor"],
-        ) == ("record", 48, 250, 5, 20)
+            body["exit_reputation_retention_days"],
+        ) == ("record", 48, 250, 5, 20, 0)
 
         for refused_field in (
             {"exit_reputation_bad_share": 0},
             {"exit_reputation_connector_half_life_requests": 10},
             {"exit_reputation_strength": 21},
             {"exit_reputation_floor": 0},
+            {"exit_reputation_retention_days": 366},
         ):
             refused = authenticated_client.post(
                 "/api/v1/projects",

@@ -92,6 +92,8 @@ class BackupPayload(BaseModel):
     connector_exit_ips: list[dict[str, Any]] = Field(default_factory=list)
     exit_ip_reputation: list[dict[str, Any]] = Field(default_factory=list)
     connector_site_reputation: list[dict[str, Any]] = Field(default_factory=list)
+    connector_factor_moves: list[dict[str, Any]] = Field(default_factory=list)
+    exit_ip_avoid_moves: list[dict[str, Any]] = Field(default_factory=list)
     wireguard_settings: list[dict[str, Any]] = Field(default_factory=list)
     wireguard_peers: list[dict[str, Any]] = Field(default_factory=list)
     openvpn_settings: list[dict[str, Any]] = Field(default_factory=list)
@@ -153,6 +155,8 @@ class ImportSummary(BaseModel):
     connector_exit_ips: int = 0
     exit_ip_reputation: int = 0
     connector_site_reputation: int = 0
+    connector_factor_moves: int = 0
+    exit_ip_avoid_moves: int = 0
     wireguard_settings: int = 0
     wireguard_peers: int = 0
     openvpn_settings: int = 0

@@ -96,7 +96,6 @@ Give each role only what it reads. Gateways in particular face the internet and 
 | Feed compile interval, the periods of the periodic jobs (`ip_refresh_interval`, `metrics_flush_interval`, `geo.updater`) | | | yes | | |
 | `OCTOPROX_HEALTH_CHECK_INTERVAL` (the api shows it as the interval of connectors without their own) | yes | | yes | | |
 | Health check timeout and concurrency, `OCTOPROX_WORKER_JOBS` | | | | yes | |
-| `OCTOPROX_EXIT_REPUTATION_RETENTION_DAYS` | | | | yes | |
 | `system.metrics_interval` (and `system.metrics_retention_days` on workers) | yes | | yes | yes | |
 
 - **`OCTOPROX_INTERNAL_SECRET`** encrypts and authenticates the routing feed in Redis and signs the gateways' calls to the api. The controller seals the feed with it, gateways open it and the api checks their calls, so those three need the same value; workers and echo never read it. A gateway with another value cannot read the feed: it logs `Loop cycle failed` for its `feed_follower` loop and stays on what it had (unready, when it had nothing). To rotate it, set the new value on all three and restart them together.

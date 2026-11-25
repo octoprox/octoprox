@@ -63,9 +63,6 @@ def _load_yaml_config(config_path: Path) -> dict[str, Any]:
         system_cfg = config_data["system"] or {}
         flat_config["system_metrics_interval"] = system_cfg.get("metrics_interval")
         flat_config["system_metrics_retention_days"] = system_cfg.get("metrics_retention_days")
-    if "exit_reputation" in config_data:
-        reputation_cfg = config_data["exit_reputation"] or {}
-        flat_config["exit_reputation_retention_days"] = reputation_cfg.get("retention_days")
     if "feed" in config_data:
         feed_cfg = config_data["feed"] or {}
         flat_config["feed_compile_interval"] = feed_cfg.get("compile_interval_seconds")
@@ -401,21 +398,6 @@ class Settings(BaseSettings):
         description="How long to keep system metric snapshots, in days (0 keeps them forever)",
     )
 
-    # Exit reputation records (one per project, exit IP and site, and one per
-    # project, connector, site and requested place) are kept this long after
-    # the day they were last seen, by a report or a request counted, then
-    # deleted by the hourly compaction on the workers; an exit IP's whose avoid
-    # is still ahead is kept whatever its age. At the default "Remember for" of
-    # a day, 30 days leaves evidence worth about a billionth of a fresh report,
-    # so an IP that comes back after that starts again with nothing lost.
-    exit_reputation_retention_days: int = Field(
-        default=30,
-        ge=0,
-        description=(
-            "How long an exit reputation record is kept after the day it was last seen, in days "
-            "(0 keeps them forever)"
-        ),
-    )
     update_check: bool = Field(
         default=True,
         description=(

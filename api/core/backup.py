@@ -48,10 +48,12 @@ from api.db.models import (
     AuthIdentityModel,
     AuthProviderModel,
     ConnectorExitIpModel,
+    ConnectorFactorMoveModel,
     ConnectorMetricsModel,
     ConnectorModel,
     ConnectorSiteReputationModel,
     CredentialModel,
+    ExitIpAvoidMoveModel,
     ExitIpReputationModel,
     FailureMetricsModel,
     GeoDatabaseBlobModel,
@@ -253,6 +255,11 @@ _ENTITY_SPECS: tuple[_EntitySpec, ...] = (
     # exits; the connectors' records reference connectors, after them.
     _EntitySpec("exit_ip_reputation", ExitIpReputationModel, is_metric=True),
     _EntitySpec("connector_site_reputation", ConnectorSiteReputationModel, is_metric=True),
+    # The moves of the dynamic connectors' factors and of the exit IPs'
+    # avoids: history too, keyed by their project and time with no id of
+    # their own to keep.
+    _EntitySpec("connector_factor_moves", ConnectorFactorMoveModel, is_metric=True, preserve_id=False),
+    _EntitySpec("exit_ip_avoid_moves", ExitIpAvoidMoveModel, is_metric=True, preserve_id=False),
     # WireGuard: the install's key pair and the devices allowed in. Peers
     # reference projects, so they come after them (and here is after).
     _EntitySpec("wireguard_settings", WireGuardSettingsModel),

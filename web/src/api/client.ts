@@ -225,6 +225,11 @@ export interface Project {
   exit_reputation_strength: number
   /** "Lowest factor": the least a dynamic connector's weight for a site is multiplied by, in percent (1 to 100). */
   exit_reputation_floor: number
+  /**
+   * "Keep data for": days the project's exit reputation data is kept after it was last used (0 forever, up to 365): each
+   * site's reports, avoids and factors, and the Over time history.
+   */
+  exit_reputation_retention_days: number
   /** Deleted, and waiting for its cloud instances to be terminated: its clients are turned away until it goes. */
   pending_deletion: boolean
   created_at: string
@@ -299,6 +304,7 @@ export interface ProjectCreate {
   exit_reputation_bad_share?: number
   exit_reputation_strength?: number
   exit_reputation_floor?: number
+  exit_reputation_retention_days?: number
 }
 
 export interface ProjectUpdate {
@@ -333,6 +339,7 @@ export interface ProjectUpdate {
   exit_reputation_bad_share?: number
   exit_reputation_strength?: number
   exit_reputation_floor?: number
+  exit_reputation_retention_days?: number
 }
 
 export interface Proxy {
@@ -1039,6 +1046,65 @@ export interface SitePlacesView {
 /** One site (the exact host, or a URL) across every place; none asks for the most reported one with a place to list. */
 export const fetchSitePlaces = async (projectId: string, site?: string): Promise<SitePlacesView> =>
   (await api.get(`/projects/${projectId}/exit-reputation/places`, { params: site ? { site } : {} })).data
+
+/** The windows a place's factor history is drawn over. */
+export const PLACE_HISTORY_RANGES = ['1h', '6h', '24h', '7d', '30d'] as const
+export type PlaceHistoryRange = (typeof PLACE_HISTORY_RANGES)[number]
+
+/** The Strength, Lowest factor (0.01 to 1) and mode in force from ``at``, until the next rule. */
+export interface PlaceHistoryRule {
+  at: string
+  /** The mode avoids: routing weighs the connectors by their factors. */
+  applied: boolean
+  strength: number
+  floor: number
+}
+
+/** What a line draws: a dynamic connector's block rate factor, or the share of a connector's IPs usable for the site. */
+export type PlaceHistoryKind = 'block_rate' | 'usable_ips'
+
+/** A connector at one moment: its value from then until its next point. */
+export interface PlaceHistoryPoint {
+  at: string
+  /** Its own factor, at its finest level with one; missing when not judged. With IPs, the usable share. */
+  own?: number | null
+  /** The level ``own`` came from, when that is not the place itself. */
+  level?: string | null
+  /** Its factor compared with the best one's under the rule in force then; 1 when not judged. With IPs, ``own``. */
+  routed: number
+  /** Requests and blocked reports counted since the previous point (dynamic). */
+  requests?: number | null
+  blocked?: number | null
+  /** With IPs: its proxies here whose exit IP was not avoided for the site, of those eligible; hourly, their mean. */
+  usable?: number | null
+  eligible?: number | null
+}
+
+export interface PlaceHistorySeries {
+  connector_id: string
+  name: string
+  kind: PlaceHistoryKind
+  points: PlaceHistoryPoint[]
+}
+
+/** Each connector's factor at a place of a site over a window, with the rule routing used at each moment. */
+export interface PlaceHistory {
+  site: string
+  place: string
+  range: PlaceHistoryRange
+  since: string
+  until: string
+  /** The first factor or IP avoid move kept; nothing is drawn before it. Missing while none is. */
+  recorded_since?: string | null
+  /** Every move (missing), or the time-weighted mean per bucket of this many seconds. */
+  bucket_seconds?: number | null
+  rules: PlaceHistoryRule[]
+  series: PlaceHistorySeries[]
+}
+
+/** A place's factor history: ``place`` is a place key, "" for requests naming no place. */
+export const fetchPlaceHistory = async (projectId: string, site: string, place: string, range: PlaceHistoryRange): Promise<PlaceHistory> =>
+  (await api.get(`/projects/${projectId}/exit-reputation/places/history`, { params: { site, place, range } })).data
 
 /** One connector's share of a place's requests as Avoid would route them, 0-100: at the saved settings and at the draft's. */
 export interface StrengthPreviewConnector {

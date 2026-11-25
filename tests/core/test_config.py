@@ -39,7 +39,6 @@ def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
         "RECONCILE_INTERVAL",
         "HEALTH_CHECK_CONCURRENCY",
         "DEFAULT_STRATEGY",
-        "EXIT_REPUTATION_RETENTION_DAYS",
     ):
         monkeypatch.delenv(f"OCTOPROX_{name}", raising=False)
 
@@ -197,28 +196,6 @@ class TestRetiredSettings:
         )
 
         assert _settings().geo_observation_publish_interval == 2
-
-
-class TestExitReputationRetention:
-    def test_records_are_kept_thirty_days_unless_told_otherwise(self) -> None:
-        assert _settings().exit_reputation_retention_days == 30
-
-    def test_is_read_from_the_environment_and_from_its_yaml_section(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        _yaml(monkeypatch, tmp_path, "exit_reputation:\n  retention_days: 14\n")
-        assert _settings().exit_reputation_retention_days == 14
-
-        monkeypatch.setenv("OCTOPROX_EXIT_REPUTATION_RETENTION_DAYS", "0")
-        assert _settings().exit_reputation_retention_days == 0
-
-    def test_a_negative_retention_is_refused(self) -> None:
-        with pytest.raises(ValidationError):
-            _settings(exit_reputation_retention_days=-1)
-
-    @pytest.mark.parametrize("name", ["dev.yaml", "prod.yaml"])
-    def test_the_shipped_files_spell_out_the_default(self, name: str) -> None:
-        assert config._load_yaml_config(CONFIG_DIR / name)["exit_reputation_retention_days"] == 30
 
 
 class TestYamlKeys:

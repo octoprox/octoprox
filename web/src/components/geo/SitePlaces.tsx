@@ -10,14 +10,17 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { queryOptions, useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { ChevronRight } from 'lucide-react'
 import {
-  fetchSitePlaces,
-  type PlaceCell, type SiteConnector, type SitePlace, type SitePlaceLevel, type SitePlacesView,
+  PLACE_HISTORY_RANGES, fetchPlaceHistory, fetchSitePlaces,
+  type PlaceCell, type PlaceHistoryRange, type SiteConnector, type SitePlace, type SitePlaceLevel, type SitePlacesView,
 } from '../../api/client'
+import { useTheme } from '../../contexts/ThemeContext'
+import { useTimeRange } from '../../contexts/TimeRangeContext'
 import { ProviderLogo } from '../ProviderLogo'
 import { RichSelect } from '../RichSelect'
-import { ShareBar, formatShare, swatch } from '../TrafficSplit'
+import { ShareBar, formatShare, swatch, swatchColor } from '../TrafficSplit'
 import { HATCHED, STATE_LOOKS, factorText, factorTint, factorTone, levelName, placeLevels, strengthNote, type StrengthRule } from '../ConnectorReputation'
-import { Card, CardHeader, InfoTip, Inspector, InspectorSection, LogoLoader, Reloading } from '../ui'
+import { Card, CardHeader, InfoTip, Inspector, InspectorSection, LogoLoader, Reloading, Segmented } from '../ui'
+import { PlaceHistoryChart, type HistoryView } from './PlaceHistoryChart'
 import { LoadError, loadFailed } from '../ui/LoadError'
 import { compact, plural, relativeTime } from '../../utils/format'
 import { cn } from '../../utils/cn'
@@ -28,6 +31,16 @@ export const placesQuery = (projectId: string, site: string) => queryOptions({
   queryFn: () => fetchSitePlaces(projectId, site || undefined),
   // Reports arrive and factors are decided while the page is open.
   refetchInterval: 60_000,
+})
+
+/** Each connector's factor at a place of a site over a range, for the place inspector's chart. */
+export const placeHistoryQuery = (projectId: string, site: string, place: string, range: PlaceHistoryRange) => queryOptions({
+  queryKey: ['exit-reputation-place-history', projectId, site, place, range],
+  queryFn: () => fetchPlaceHistory(projectId, site, place, range),
+  // Factors are decided once a minute.
+  refetchInterval: 60_000,
+  // Another range or place keeps the last chart up, dimmed, until its own arrives; another project's is not shown.
+  placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[1] === projectId ? previous : undefined),
 })
 
 /** Which places the table shows: every one, or only the lowered or the not judged ones. */
@@ -729,6 +742,39 @@ function PlaceConnector({ connector, index, cell, row, site, tree, labelOf, rule
   )
 }
 
+const HISTORY_VIEWS: { value: HistoryView; label: string }[] = [{ value: 'own', label: 'Own' }, { value: 'routed', label: 'Routed' }]
+const HISTORY_RANGE_OPTIONS = PLACE_HISTORY_RANGES.map((r) => ({ value: r, label: r }))
+// A part of a picker a finger can hit.
+const TOUCH_PARTS = '*:pointer-coarse:min-h-11 *:pointer-coarse:min-w-11'
+
+/**
+ * The place's connectors over time: a dynamic one's own factor, or one tap away the value routing weighed it by, and a
+ * connector with IPs the share of them usable for the site. The range follows the page's.
+ */
+function PlaceOverTime({ projectId, site, place, connectors }: { projectId: string; site: string; place: string; connectors: SiteConnector[] }) {
+  const [range, setRange] = useTimeRange(PLACE_HISTORY_RANGES)
+  const [view, setView] = useState<HistoryView>('own')
+  const query = useQuery(placeHistoryQuery(projectId, site, place, range))
+  const { isDark } = useTheme()
+  const colorOf = (id: string) => swatchColor(Math.max(0, connectors.findIndex((c) => c.connector_id === id)), isDark)
+  return (
+    <InspectorSection title="Over time">
+      <div className="flex flex-wrap items-center gap-2">
+        <Segmented size="sm" options={HISTORY_RANGE_OPTIONS} value={range} onChange={setRange} className={TOUCH_PARTS} label="Time range" />
+        <Segmented size="sm" options={HISTORY_VIEWS} value={view} onChange={setView} className={TOUCH_PARTS} label="Value shown" />
+      </div>
+      {loadFailed(query) ? (
+        <LoadError what="the factor history" query={query} />
+      ) : (
+        <Reloading active={query.isPlaceholderData} size="sm">
+          <PlaceHistoryChart history={query.data} view={view} range={range} colorOf={colorOf} loading={!query.data} />
+        </Reloading>
+      )}
+      <p className="text-xs text-fg-subtle">Routed uses the connectors as they are set up now; a connector with IPs uses the IPs its proxies have now.</p>
+    </InspectorSection>
+  )
+}
+
 /**
  * A place of a site in the side panel: the configured and effective split of its requests, and every connector by
  * where it stands, with the reason in words. It reads the card's answer for the site as asked ('' the default one),
@@ -798,6 +844,8 @@ export function PlaceInspector({ projectId, site, place, onClose }: { projectId:
           <p className="text-xs text-fg-subtle">No connector takes these requests.</p>
         )}
       </InspectorSection>
+      {/* Every connector that takes these requests has a line over time. */}
+      {serving && <PlaceOverTime projectId={projectId} site={data.site ?? site} place={row.place} connectors={data.connectors} />}
       {lanes.map((lane) => (
         <InspectorSection key={lane.title} title={`${lane.title} · ${lane.items.length}`}>
           <div>

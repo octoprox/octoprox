@@ -158,11 +158,7 @@ class WorkerRuntime(RoleRuntime):
             EnrichJob(attribution),
             TrafficJob(session_factory, redis_client, alerts=self.alert_checks),
             MetricsFlushJob(session_factory, redis_client),
-            CompactionJob(
-                session_factory,
-                geo.geo_service,
-                reputation_retention_days=settings.exit_reputation_retention_days,
-            ),
+            CompactionJob(session_factory, geo.geo_service),
             SnapshotJob(
                 session_factory,
                 redis_client,

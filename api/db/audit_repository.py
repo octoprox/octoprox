@@ -60,6 +60,19 @@ class AuditRepository:
         models = list((await self._session.execute(query)).scalars())
         return AuditHistory(entries=[self._to_domain(m) for m in models[:limit]], more=len(models) > limit)
 
+    async def made_after(self, entity_type: str, entity_id: str, after: datetime) -> list[AuditEntry]:
+        """One entity's entries made after ``after``, the oldest first. One statement on the entity's index."""
+        query = (
+            select(AuditLogModel)
+            .where(
+                AuditLogModel.entity_type == entity_type,
+                AuditLogModel.entity_id == entity_id,
+                AuditLogModel.created_at > after,
+            )
+            .order_by(AuditLogModel.created_at, AuditLogModel.id)
+        )
+        return [self._to_domain(model) for model in (await self._session.execute(query)).scalars()]
+
     async def delete_older_than(self, cutoff: datetime) -> int:
         """Delete the entries made before ``cutoff``; how many went."""
         result = await self._session.execute(delete(AuditLogModel).where(AuditLogModel.created_at < cutoff))

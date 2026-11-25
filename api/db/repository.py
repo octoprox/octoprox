@@ -223,6 +223,7 @@ class ProjectRepository:
             exit_reputation_bad_share=project.exit_reputation_bad_share,
             exit_reputation_strength=project.exit_reputation_strength,
             exit_reputation_floor=project.exit_reputation_floor,
+            exit_reputation_retention_days=project.exit_reputation_retention_days,
             created_at=project.created_at,
             updated_at=project.updated_at,
         )
@@ -267,6 +268,7 @@ class ProjectRepository:
             model.exit_reputation_bad_share = project.exit_reputation_bad_share
             model.exit_reputation_strength = project.exit_reputation_strength
             model.exit_reputation_floor = project.exit_reputation_floor
+            model.exit_reputation_retention_days = project.exit_reputation_retention_days
             model.updated_at = utc_now()
             await self._session.flush()
         return self._to_domain(model) if model else None
@@ -435,6 +437,7 @@ class ProjectRepository:
             exit_reputation_bad_share=model.exit_reputation_bad_share,
             exit_reputation_strength=model.exit_reputation_strength,
             exit_reputation_floor=model.exit_reputation_floor,
+            exit_reputation_retention_days=model.exit_reputation_retention_days,
             pending_deletion=bool(model.pending_deletion),
             created_at=model.created_at,
             updated_at=model.updated_at,

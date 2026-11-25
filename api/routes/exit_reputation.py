@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Exit reputation as the Exit locations page reads it: a project's records, one IP's, per-IP totals for the exit IPs
-view, and one site across every place; and for the project form, what a draft Strength and Lowest factor would do.
-Open to every signed-in user; times in answers are UTC with a ``Z``.
+view, one site across every place, and how its connectors' values moved at one place over time; and for the project
+form, what a draft Strength and Lowest factor would do. Open to every signed-in user; times in answers are UTC with a
+``Z``.
 """
 
 from __future__ import annotations
@@ -22,6 +23,13 @@ from api.db.geo_repository import ObservationRepository
 from api.db.repository import ConnectorRepository
 from api.db.reputation_repository import ExitReputationRepository, ReputationSort, ReputationSummary
 from api.models.project import MAX_REPUTATION_FLOOR, MAX_REPUTATION_STRENGTH, ExitReputationMode
+from api.reputation.history import (
+    FactorHistory,
+    HistoryPoint,
+    HistoryRange,
+    HistorySeries,
+    RuleInForce,
+)
 from api.reputation.record import ExitIpReputation as IpRecord
 from api.reputation.record import ReputationPolicy, ReputationStatus, place_levels
 from api.reputation.site import canonical_ip, report_site
@@ -30,6 +38,7 @@ from api.reputation.split import (
     PlaceLevel,
     ReputationSplit,
     SitePlaces,
+    place_key,
     place_label,
 )
 from api.reputation.split import ConnectorTile as Tile
@@ -639,6 +648,166 @@ async def _opening_site(
         session, project, preview, sites=names, now=now, connector_ids=connector_ids
     )
     return listed_first or names[0]
+
+
+class HistoryRule(BaseModel):
+    """The project's rule from ``at`` on."""
+
+    at: UtcTime
+    applied: bool = Field(description="Routing weighs the connectors by it: the project's mode was avoid")
+    strength: int
+    floor: float = Field(description="The Lowest factor, 0.01-1")
+
+    @classmethod
+    def of(cls, rule: RuleInForce) -> HistoryRule:
+        return cls(at=rule.at, applied=rule.applied, strength=rule.rule.strength, floor=rule.rule.floor)
+
+
+class PlaceHistoryPoint(BaseModel):
+    """One connector at one point: an exact moment up to a day, a bucket's time-weighted means over 7 or 30 days."""
+
+    at: UtcTime = Field(description="When the values took hold; with bucket_seconds, the start of the bucket")
+    own: float | None = Field(
+        default=None,
+        description="block_rate: its own factor at the finest level of the place with one; absent when not judged. "
+        "usable_ips: the share of its eligible rows whose exit IP was not avoided for the site (1 with none eligible)",
+    )
+    level: str | None = Field(
+        default=None, description="block_rate: the level of the place that factor came from; absent with own"
+    )
+    routed: float = Field(
+        description="What its weight is multiplied by under the rule in force, beside the other dynamic connectors "
+        "taking the requests; 1 when not judged. usable_ips: the same as own, since Strength and Lowest factor do "
+        "not touch it"
+    )
+    requests: int | None = Field(
+        default=None,
+        description="block_rate: requests the record at level counted since that record's previous move, for its "
+        "moves at this point (summed over the bucket with bucket_seconds); absent where it did not move, or when unknown",
+    )
+    blocked: int | None = Field(default=None, description="block_rate: blocked reports counted the same way")
+    usable: int | float | None = Field(
+        default=None,
+        description="usable_ips: its eligible rows whose exit IP was not avoided (the bucket's mean to a tenth, with "
+        "bucket_seconds)",
+    )
+    eligible: int | None = Field(
+        default=None, description="usable_ips: its rows eligible for the requests now, with the exit IPs they have now"
+    )
+
+    @classmethod
+    def of(cls, point: HistoryPoint) -> PlaceHistoryPoint:
+        return cls(
+            at=point.at,
+            own=point.own,
+            level=point.level,
+            routed=point.routed,
+            requests=point.requests,
+            blocked=point.blocked,
+            usable=point.usable,
+            eligible=point.eligible,
+        )
+
+
+class PlaceHistorySeries(BaseModel):
+    """One connector taking the requests at the place, and what measures it."""
+
+    connector_id: str
+    name: str
+    kind: ReputationKind = Field(
+        description="block_rate for a dynamic connector, its factor; usable_ips for a connector with IPs, the share "
+        "of its eligible rows not avoided"
+    )
+    points: list[PlaceHistoryPoint]
+
+    @classmethod
+    def of(cls, series: HistorySeries) -> PlaceHistorySeries:
+        return cls(
+            connector_id=series.connector_id,
+            name=series.name,
+            kind=series.kind,
+            points=[PlaceHistoryPoint.of(point) for point in series.points],
+        )
+
+
+class PlaceHistoryView(BaseModel):
+    """How a site's connectors' values moved at one place over a range of time."""
+
+    site: str
+    place: str = Field(description='The place as a canonical LocationTarget key; "" for requests naming none')
+    range: HistoryRange
+    since: UtcTime = Field(description="The start of the range")
+    until: UtcTime = Field(description="The end of the range: when answered")
+    recorded_since: UtcTime | None = Field(
+        default=None,
+        description="When the history kept begins; nothing is drawn before it. Absent before any factor or avoid "
+        "moved",
+    )
+    bucket_seconds: int | None = Field(
+        default=None,
+        description="The seconds each point's means span: 3600 for 7d, 10800 for 30d; absent when each point is a move",
+    )
+    rules: list[HistoryRule] = Field(
+        description="The rule in force at the first point, then one per change of the mode, Strength or Lowest factor"
+    )
+    series: list[PlaceHistorySeries] = Field(
+        description="One per connector taking the requests at the place now, dynamic or with IPs, by name. Up to a day "
+        "a point at the start and at each moment the connector's values moved, each holding until the next; over a "
+        "week one per hour, over 30 days one per three hours"
+    )
+
+    @classmethod
+    def of(cls, history: FactorHistory) -> PlaceHistoryView:
+        return cls(
+            site=history.site,
+            place=history.place,
+            range=history.range,
+            since=history.since,
+            until=history.until,
+            recorded_since=history.recorded_since,
+            bucket_seconds=history.bucket_seconds,
+            rules=[HistoryRule.of(rule) for rule in history.rules],
+            series=[PlaceHistorySeries.of(series) for series in history.series()],
+        )
+
+
+@router.get("/places/history", response_model=PlaceHistoryView, response_model_exclude_none=True)
+async def place_history(
+    request: Request,
+    project_id: str,
+    session: DbDep,
+    site: Annotated[str, Query(max_length=2048, description="A site (the exact host, or a URL)")],
+    place: Annotated[
+        str | None,
+        Query(
+            max_length=256,
+            description="The requested place, a LocationTarget key such as US, US/NY or US/NY/new_york; left out or "
+            "blank, requests naming none",
+        ),
+    ] = None,
+    range: Annotated[HistoryRange, Query(description="How far back from now")] = HistoryRange.DAY,
+) -> PlaceHistoryView:
+    """How the project's connectors taking the requests to a site from a place moved over a range: a dynamic one's own
+    factor, and the value routing multiplies its weight by under the Strength, Lowest factor and mode in force at each
+    moment, with the moments those changed; a connector with IPs' share of its eligible rows whose exit IP the site did
+    not avoid.
+
+    Up to a day every move is a point; over a week each point is an hour's time-weighted means, over 30 days three
+    hours'. The routed values assume the connectors as they are set up now, and a connector with IPs its rows with the
+    exit IPs they have now. A field with no value is left out of the answer.
+    """
+    try:
+        wanted = report_site(site)
+        wanted_place = place_key(place)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    project = await require_project(request, project_id)
+    preview = await api_runtime_of(request).preview_router(project.id)
+    history = await FactorHistory.read(
+        session, project, preview, site=wanted, place=wanted_place, range=range, now=utc_now()
+    )
+    # The points of every moment for every connector: worked out beside the event loop.
+    return await asyncio.to_thread(PlaceHistoryView.of, history)
 
 
 class StrengthPreviewConnector(BaseModel):

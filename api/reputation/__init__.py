@@ -14,5 +14,6 @@
   :mod:`api.reputation.ingest` applies them to the records, and :mod:`api.reputation.signal` tells the controller when
   routing moved.
 * :mod:`api.reputation.weight` is the effective-weight rule: what a connector's routing weight is multiplied by for a
-  request's site, on gateways and in the api alike; :mod:`api.reputation.split` shows it beside the traffic split.
+  request's site, on gateways and in the api alike; :mod:`api.reputation.split` shows it beside the traffic split, and
+  :mod:`api.reputation.history` how the dynamic connectors' factors moved at a place over time.
 """

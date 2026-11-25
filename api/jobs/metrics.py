@@ -228,26 +228,18 @@ class MetricsFlushJob(Job):
 
 
 class CompactionJob(Job):
-    """Folds old metrics rows into coarser ones and applies every retention; each step is set-based and safe to repeat.
-
-    Args:
-        reputation_retention_days: Days an exit reputation record is kept after the day it was last seen
-            (``exit_reputation_retention_days``); 0 keeps them all.
-    """
+    """Folds old metrics rows into coarser ones and applies every retention; each step is set-based and safe to repeat."""
 
     kind = JobKind.COMPACTION
 
-    def __init__(
-        self, session_factory: SessionFactory, geo_service: GeoService, *, reputation_retention_days: int
-    ) -> None:
+    def __init__(self, session_factory: SessionFactory, geo_service: GeoService) -> None:
         self._session_factory = session_factory
         self._geo = geo_service
-        self._reputation_retention_days = reputation_retention_days
 
     async def run(self, batch: JobBatch) -> None:
         """Compact and retain each project's metrics, then drop gone entities' totals, old observations and records,
-        the exit reputation records past their retention, the audit entries past the install's retention, and the
-        resolved alerts past theirs."""
+        the exit reputation records and their history past each project's Keep data for, the audit entries past the
+        install's retention, and the resolved alerts past theirs."""
         now = utc_now()
         async with self._session_factory() as session:
             projects = await ProjectRepository(session).get_all()
@@ -272,11 +264,11 @@ class CompactionJob(Job):
             )
             flushes = await metrics.delete_flushes_older_than(now - FLUSH_RECORD_AGE)
             await session.commit()
-        reputation_ips, reputation_connectors = await self._retain_exit_reputation(now)
+        reputation_ips, reputation_connectors, factor_moves, avoid_moves = await self._retain_exit_reputation(now)
         audit_entries = await self._retain_audit_log(now)
         alerts = await self._retain_alerts(now)
 
-        reputation = reputation_ips + reputation_connectors
+        reputation = reputation_ips + reputation_connectors + factor_moves + avoid_moves
         if compacted or retained or totals or observed or exits or flushes or reputation or audit_entries or alerts:
             logger.info(
                 "Metrics compaction complete",
@@ -289,6 +281,8 @@ class CompactionJob(Job):
                 flushes_deleted=flushes,
                 exit_ip_reputation_deleted=reputation_ips,
                 connector_reputation_deleted=reputation_connectors,
+                factor_moves_deleted=factor_moves,
+                avoid_moves_deleted=avoid_moves,
                 audit_entries_deleted=audit_entries,
                 alerts_deleted=alerts,
             )
@@ -331,19 +325,20 @@ class CompactionJob(Job):
             await session.commit()
         return deleted
 
-    async def _retain_exit_reputation(self, now: datetime) -> tuple[int, int]:
-        """Delete the exit reputation records last seen on a day before the retention, an exit IP's only once its avoid
-        has passed, none at 0 days; the records deleted (exit IPs, connectors).
+    async def _retain_exit_reputation(self, now: datetime) -> tuple[int, int, int, int]:
+        """Delete each project's exit reputation records last seen on a day before its Keep data for, an exit IP's
+        only once its avoid has passed, and its factor and avoid moves made before it, none of either at 0 days; the
+        rows deleted (exit IPs, connectors, factor moves, avoid moves).
 
-        A record a writer holds is skipped rather than waited for, and goes with the next hour's sweep.
+        A record a writer holds is skipped rather than waited for, and goes with the next hour's sweep; a move is never
+        written again once made.
         """
-        if self._reputation_retention_days == 0:
-            return 0, 0
-        cutoff = (now - timedelta(days=self._reputation_retention_days)).date()
         async with self._session_factory() as session:
-            deleted = await ExitReputationRepository(session).delete_stale(cutoff, now)
+            repository = ExitReputationRepository(session)
+            ips, connectors = await repository.delete_stale(now)
+            factor_moves, avoid_moves = await repository.delete_history_past(now)
             await session.commit()
-        return deleted
+        return ips, connectors, factor_moves, avoid_moves
 
     async def _retain_audit_log(self, now: datetime) -> int:
         """Delete the audit entries past the retention an admin set (a year until one does), none at 0 days; the

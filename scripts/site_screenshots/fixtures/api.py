@@ -61,6 +61,7 @@ def project_json(pid: str) -> dict:
         "exit_reputation_half_life_hours": 24, "exit_reputation_connector_half_life_requests": 1000 if avoids else 100,
         "exit_reputation_bad_reports": 1, "exit_reputation_bad_share": 50,
         "exit_reputation_strength": analytics.REPUTATION_STRENGTH.get(pid, 1), "exit_reputation_floor": 10,
+        "exit_reputation_retention_days": 30,
         "pending_deletion": False,
         "created_at": ago(days=p.created_days_ago), "updated_at": ago(days=1, hours=7),
         "credential_count": len(credentials_of(pid)), "connector_count": len(connectors_of(pid)),
@@ -406,6 +407,8 @@ def _project_get(pid: str, sub: str, q: dict[str, str]) -> object:
         }
     if sub == "/exit-reputation/places":
         return analytics.site_places(pid, q.get("site"))
+    if sub == "/exit-reputation/places/history":
+        return analytics.place_history(pid, q.get("site"), q.get("place", ""), q.get("range", "24h"))
     if sub == "/exit-reputation/strength-preview":
         return analytics.strength_preview(pid, int(q.get("strength", 1)), int(q.get("floor", 10)), q.get("site"))
     if sub == "/connectors":

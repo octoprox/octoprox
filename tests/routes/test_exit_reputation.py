@@ -456,7 +456,7 @@ class Split:
         for n in range(1, 5):
             self._row(self.pool, discovered_ip=f"203.0.113.{n}", country="US", state_code="NY")
         self._row(self.dynamic, provider="oxylabs", proxy_type="residential", dynamic_sessions="true")
-        now = utc_now()
+        now = self.reported_at = utc_now()
         _apply(
             client,
             now,
@@ -1178,3 +1178,181 @@ class TestStrengthPreview:
             ).status_code
             == 404
         )
+
+
+def _move(client: TestClient, when: datetime, evidence: dict[ConnectorSiteKey, RequestCount], dynamic: list[str]) -> None:
+    """What the metrics flush writes for dynamic connectors' requests and reports at every level of each key's place,
+    keeping each factor that moved."""
+
+    async def applied() -> None:
+        async with api_runtime(client).session_factory() as session:
+            await ExitReputationRepository(session).apply_evidence(
+                {level: counts for key, counts in evidence.items() for level in key.levels()}, dynamic, when
+            )
+            await session.commit()
+
+    on_app_loop(client, applied)
+
+
+class TestPlaceHistory:
+    """``GET /exit-reputation/places/history?site=&place=&range=``: how the connectors taking the requests at a place
+    moved over a range: a dynamic one's factor own and routed, a connector with IPs' usable rows of its eligible ones."""
+
+    @staticmethod
+    def history(split: Split, **params: str) -> dict[str, Any]:
+        response = split.client.get(
+            f"/api/v1/projects/{split.project_id}/exit-reputation/places/history", params={"site": Split.SITE, **params}
+        )
+        assert response.status_code == 200, response.text
+        # A field without a value is left out, never sent as null.
+        assert "null" not in response.text, response.text
+        body: dict[str, Any] = response.json()
+        return body
+
+    def test_each_move_of_the_connectors_taking_the_requests(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        began, first, second = (utc_now() - timedelta(minutes=minutes) for minutes in (60, 20, 10))
+        # The history began with a move on another site.
+        _move(authenticated_client, began, {split.key(split.dynamic)._replace(site="bing.com"): RequestCount(20, blocked=10)}, [split.dynamic])
+        _move(authenticated_client, first, {split.key(split.dynamic, "US/NY"): RequestCount(requests=100)}, [split.dynamic])
+        _move(
+            authenticated_client,
+            second,
+            {split.key(split.dynamic, "US/NY"): RequestCount(requests=20, blocked=10)},
+            [split.dynamic],
+        )
+
+        body = self.history(split, place="us/ny")
+
+        assert (body["site"], body["place"], body["range"]) == ("www.google.com", "US/NY", "24h")
+        assert "bucket_seconds" not in body
+        assert datetime.fromisoformat(body["until"]) - datetime.fromisoformat(body["since"]) == timedelta(hours=24)
+        # The first move kept, whatever its project: another test's app may have kept one earlier.
+        assert datetime.fromisoformat(body["recorded_since"]) <= datetime.fromisoformat(_utc(began))
+        start = max(body["since"], body["recorded_since"])
+        assert body["rules"] == [{"at": start, "applied": True, "strength": 1, "floor": 0.1}]
+        # By name: the dynamic connector, then the pool with IPs.
+        dynamic, pool = body["series"]
+        assert (dynamic["connector_id"], dynamic["name"], dynamic["kind"]) == (split.dynamic, "Dynamic", "block_rate")
+        assert dynamic["points"] == [
+            # Before its first move, what that move moved it from; nothing drawn before the history began.
+            {"at": start, "own": 0.75, "level": "US/NY", "routed": 0.75},
+            {"at": _utc(first), "own": 1.0, "level": "US/NY", "routed": 1.0},
+            {"at": _utc(second), "own": 0.9, "level": "US/NY", "routed": 0.9, "requests": 20, "blocked": 10},
+        ]
+        # Its four rows in New York are eligible; the reports avoided two of their IPs. Own and routed agree.
+        assert (pool["connector_id"], pool["name"], pool["kind"]) == (split.pool, "Pool", "usable_ips")
+        assert pool["points"] == [
+            {"at": start, "own": 1.0, "routed": 1.0, "usable": 4, "eligible": 4},
+            {"at": _utc(split.reported_at), "own": 0.5, "routed": 0.5, "usable": 2, "eligible": 4},
+        ]
+
+    def test_a_week_is_hourly_and_no_place_is_its_own(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+
+        body = self.history(split, range="7d")
+
+        assert (body["place"], body["range"], body["bucket_seconds"]) == ("", "7d", 3600)
+        # Nothing moved here: one flat line at the factor now, an hour a point from where the range or the history
+        # starts.
+        dynamic, pool = body["series"]
+        assert dynamic["points"][0]["at"] == max(body["since"], body.get("recorded_since", ""))
+        assert len(dynamic["points"]) <= 169
+        assert {(point["own"], point["level"], point["routed"]) for point in dynamic["points"]} == {(0.95, "", 0.95)}
+        # The pool's hours, the same in own and routed, of its four rows.
+        assert pool["kind"] == "usable_ips" and len(pool["points"]) == len(dynamic["points"])
+        assert all(point["own"] == point["routed"] and point["eligible"] == 4 for point in pool["points"])
+        assert all("level" not in point and "requests" not in point for point in pool["points"])
+        assert self.history(split, place=" ")["place"] == ""
+
+    def test_30_days_are_three_hour_means(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+
+        body = self.history(split, place="US", range="30d")
+
+        assert (body["range"], body["bucket_seconds"]) == ("30d", 10800)
+        assert datetime.fromisoformat(body["until"]) - datetime.fromisoformat(body["since"]) == timedelta(days=30)
+        # A point per three hours of the clock after the first, from where the range or the history starts.
+        for series in body["series"]:
+            points = [datetime.fromisoformat(point["at"]) for point in series["points"]]
+            assert len(points) <= 241
+            assert all(at.hour % 3 == 0 and (at.minute, at.second, at.microsecond) == (0, 0, 0) for at in points[1:])
+
+    def test_nothing_is_drawn_before_the_days_the_project_keeps(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        """The moves the project kept longer ago are gone, or go with the next sweep."""
+        split = Split(authenticated_client, sample_project_data)
+        _move(
+            authenticated_client,
+            utc_now() - timedelta(days=3),
+            {split.key(split.dynamic, "US"): RequestCount(20, blocked=10)},
+            [split.dynamic],
+        )
+        response = authenticated_client.patch(
+            f"/api/v1/projects/{split.project_id}", json={"exit_reputation_retention_days": 1}
+        )
+        assert response.status_code == 200, response.text
+
+        body = self.history(split, range="7d")
+
+        until = datetime.fromisoformat(body["until"])
+        assert datetime.fromisoformat(body["recorded_since"]) == until - timedelta(days=1)
+        assert {len(series["points"]) for series in body["series"]} <= {24, 25}
+
+    def test_the_rule_in_force_from_the_projects_history(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        response = authenticated_client.patch(
+            f"/api/v1/projects/{split.project_id}", json={"exit_reputation_strength": 10, "exit_reputation_floor": 30}
+        )
+        assert response.status_code == 200, response.text
+        response = authenticated_client.patch(f"/api/v1/projects/{split.project_id}", json={"exit_reputation": "record"})
+        assert response.status_code == 200, response.text
+
+        rules = self.history(split, place="US", range="1h")["rules"]
+
+        assert [(rule["applied"], rule["strength"], rule["floor"]) for rule in rules] == [
+            (True, 1, 0.1),
+            (True, 10, 0.3),
+            (False, 10, 0.3),
+        ]
+
+    def test_a_site_or_place_that_names_none_is_a_400_and_a_range_not_offered_a_422(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        project_id = _project(authenticated_client, sample_project_data)["id"]
+        url = f"/api/v1/projects/{project_id}/exit-reputation/places/history"
+
+        response = authenticated_client.get(url, params={"site": "co.uk"})
+        assert (response.status_code, response.json()["detail"]) == (400, "not a site: co.uk is a public suffix")
+        response = authenticated_client.get(url, params={"site": "google.com", "place": "US/NY/a/b"})
+        assert (response.status_code, response.json()["detail"]) == (400, "not a place: US/NY/a/b")
+        assert authenticated_client.get(url, params={"site": "google.com", "range": "90d"}).status_code == 422
+        assert authenticated_client.get(url).status_code == 422
+        response = authenticated_client.get(
+            "/api/v1/projects/nope/exit-reputation/places/history", params={"site": "google.com"}
+        )
+        assert response.status_code == 404
+
+    def test_every_signed_in_role_reads_it(
+        self,
+        authenticated_client: TestClient,
+        sample_project_data: dict[str, Any],
+        editor_auth_headers: dict[str, str],
+        viewer_auth_headers: dict[str, str],
+    ) -> None:
+        split = Split(authenticated_client, sample_project_data)
+        url = f"/api/v1/projects/{split.project_id}/exit-reputation/places/history"
+        for headers in (editor_auth_headers, viewer_auth_headers):
+            response = authenticated_client.get(url, params={"site": Split.SITE}, headers=headers)
+            assert response.status_code == 200, response.text
+        response = authenticated_client.get(url, params={"site": Split.SITE}, headers={"Authorization": "Bearer nope"})
+        assert response.status_code == 401

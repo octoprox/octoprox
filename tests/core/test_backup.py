@@ -40,7 +40,9 @@ from api.db.models import (
     ApiTokenModel,
     AuditLogModel,
     AuthIdentityModel,
+    ConnectorFactorMoveModel,
     ConnectorSiteReputationModel,
+    ExitIpAvoidMoveModel,
     ExitIpReputationModel,
     GeoDatabaseBlobModel,
     IpObservationModel,
@@ -164,12 +166,16 @@ class TestEveryEntityTravels:
         for model, key in (
             (ExitIpReputationModel, "exit_ip_reputation"),
             (ConnectorSiteReputationModel, "connector_site_reputation"),
+            (ConnectorFactorMoveModel, "connector_factor_moves"),
+            (ExitIpAvoidMoveModel, "exit_ip_avoid_moves"),
         ):
             [spec] = [spec for spec in _ENTITY_SPECS if spec.model is model]
             assert (spec.key, spec.is_metric) == (key, True)
             assert not spec.travels(include_metrics=False, include_database_files=True)
         assert keys.index("projects") < keys.index("exit_ip_reputation")
         assert keys.index("connectors") < keys.index("connector_site_reputation")
+        assert keys.index("projects") < keys.index("connector_factor_moves")
+        assert keys.index("projects") < keys.index("exit_ip_avoid_moves")
 
 
 class TestCompatibility:
@@ -412,19 +418,35 @@ class TestOnTheDatabase:
             {connector_key: RequestCount(requests=50, blocked=2)}, [connector.id], datetime(2026, 11, 14, 12)
         )
         await db_session.commit()
+        moves = await records.factor_moves(project.id, "google.com", ["US"], [connector.id], datetime(2026, 11, 14))
+        avoids = await records.avoid_moves(project.id, "google.com", ["203.0.113.7"], datetime(2026, 11, 14))
         before = (await records.ip_record(ip_key), await records.connector_record(connector_key))
         repository = BackupRepository(db_session)
 
         exported = await repository.export(include_metrics=False)
         assert exported["exit_ip_reputation"] == exported["connector_site_reputation"] == []
+        assert exported["connector_factor_moves"] == exported["exit_ip_avoid_moves"] == []
         payload = await repository.export(include_metrics=True)
         assert payload["connector_site_reputation"][0]["last_seen_day"] == "2026-11-14"
+        assert payload["connector_factor_moves"][0]["at"] == "2026-11-14T12:00:00"
+        assert payload["exit_ip_avoid_moves"][0]["new_avoid_until"] == "2026-11-14T13:00:00"
         result = await repository.replace_all(BackupPayload.model_validate(payload), REGISTRY)
         await db_session.commit()
 
         assert (result.summary.exit_ip_reputation, result.summary.connector_site_reputation) == (1, 1)
+        assert (result.summary.connector_factor_moves, result.summary.exit_ip_avoid_moves) == (1, 1)
         assert None not in before
         assert (await records.ip_record(ip_key), await records.connector_record(connector_key)) == before
+        # The dynamic connector's move from not judged to its factor, as it was.
+        assert [(move.old_factor, move.new_factor, move.requests, move.blocked_reports) for move in moves] == [
+            (None, 0.95, 50, 2)
+        ]
+        assert await records.factor_moves(project.id, "google.com", ["US"], [connector.id], datetime(2026, 11, 14)) == moves
+        # The exit IP's avoid begun by the reports, as it was.
+        assert [(move.at, move.old_avoid_until, move.new_avoid_until) for move in avoids] == [
+            (datetime(2026, 11, 14, 12), None, datetime(2026, 11, 14, 13))
+        ]
+        assert await records.avoid_moves(project.id, "google.com", ["203.0.113.7"], datetime(2026, 11, 14)) == avoids
 
     async def test_the_kept_user_keeps_its_sign_ins_and_tokens_and_its_imported_copy_takes_its_own(
         self, db_session: AsyncSession

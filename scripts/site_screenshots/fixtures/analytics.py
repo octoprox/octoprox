@@ -8,11 +8,12 @@ Also the Activity log, and the city names of the Connect page.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import timedelta
 
-from .common import GB, NOW, ago, iso, short_id, unit, uuid_for
+from .common import GB, NOW, ago, from_minute, iso, minute_index, short_id, smooth, unit, uuid_for
 from .series import RANGE_MINUTES, conn_totals, vendor_refusals
 from .world import (
     BRD_GATEWAY,
@@ -578,6 +579,188 @@ def strength_preview(project_id: str, strength: int, floor: int, site: str | Non
              "draft_share": draft[cid]["effective_share"]}
             for cid, cell in current.items() if cell["state"] != "takes_none"]})
     return {"site": REPUTATION_SITE, "places": places}
+
+
+# --------------------------------------------------------------------------- factor history (Real estate listings)
+
+# The minutes each window of the place inspector's chart covers, and the minutes a mean covers where it draws means.
+# History was recorded from a little over a month ago, so every window is full; Strength went from 5 to 8 twenty hours
+# ago, a marker on the Routed line.
+HISTORY_MINUTES = {"1h": 60, "6h": 360, "24h": 1440, "7d": 7 * 1440, "30d": 30 * 1440}
+HISTORY_BUCKET = {"7d": 60, "30d": 180}
+HISTORY_RECORDED = NOW - timedelta(days=30, hours=2)
+STRENGTH_RAISED = NOW - timedelta(hours=20)
+STRENGTH_BEFORE = 5
+# Routing decides factors every flush; the demo checks for a move every few minutes.
+DECIDE_EVERY = 5
+# Requests a minute through each dynamic connector at a place.
+HISTORY_RATE = {"decodo": 0.9, "iproyal": 1.1}
+
+
+def _own_at(key: str, place: str, current: float, minute: int) -> float:
+    """A connector's own factor at ``minute``: ``current`` now, lower when the US evening peaks (about 01:00 UTC) and
+    higher overnight there, with some drift, in the steps routing decides it in."""
+    def shape(m: int) -> float:
+        hour = (m / 60) % 24
+        return math.cos(2 * math.pi * (hour - 1) / 24) + 0.35 * smooth(f"factor:{key}:{place}", m, 180)
+    swing = 0.03 if current > 0.95 else 0.08
+    steps = FACTOR_STEPS * REPUTATION_STRENGTH[P4]
+    value = current - swing * (shape(minute) - shape(minute_index(NOW)))
+    return min(1.0, max(1 / steps, round(value * steps) / steps))
+
+
+def _rule_at(minute: int) -> dict:
+    """The Strength, Lowest factor and mode in force at ``minute``."""
+    strength = REPUTATION_STRENGTH[P4] if from_minute(minute) >= STRENGTH_RAISED else STRENGTH_BEFORE
+    return {"applied": True, "strength": strength, "floor": 0.1}
+
+
+def _routed(own: dict[str, float | None], rule: dict) -> dict[str, float]:
+    """Each connector's routed value under ``rule``: compared with the best judged one, never under the floor; 1 when
+    not judged."""
+    judged = [v for v in own.values() if v is not None]
+    best = max(judged, default=1.0)
+    return {cid: 1.0 if v is None else round(max(rule["floor"], v * (v / best) ** (rule["strength"] - 1)), 4)
+            for cid, v in own.items()}
+
+
+# A connector with IPs: the mean minutes between one exit IP's avoids for the site, and how long they last. Webshare's
+# datacenter IPs are reported most, GCP's fleet least.
+AVOID_GAP = {"webshare": 16 * 60, "acme": 26 * 60, "gcp": 4 * 1440}
+AVOID_MINUTES = (30, 60, 60, 120, 240)
+
+
+def _avoids(key: str, country: str, eligible: int, usable: int) -> list[tuple[int, int]]:
+    """When each of a connector's IPs in ``country`` was avoided for the site, as (start, end) minutes: the first
+    ``eligible - usable`` are avoided now, the others not."""
+    first, end = minute_index(HISTORY_RECORDED) - 1440, minute_index(NOW)
+    spans: list[tuple[int, int]] = []
+    for i in range(eligible):
+        name = f"avoid:{key}:{country}:{i}"
+        # An IP avoided now since a little while ago; the earlier avoids end before that one starts.
+        now = end - 10 - round(unit(name, "now") * 80) if i < eligible - usable else None
+        t, k = first, 0
+        while True:
+            t += round(-math.log(1 - unit(name, f"gap{k}")) * AVOID_GAP.get(key, 1440))
+            length = AVOID_MINUTES[int(unit(name, f"len{k}") * len(AVOID_MINUTES))]
+            if t + length > (end if now is None else now):
+                break
+            spans.append((t, t + length))
+            t, k = t + length, k + 1
+        if now is not None:
+            spans.append((now, end + 60))
+    return spans
+
+
+def _ip_series(c: ConnSpec, place: str, start: int, end: int, bucket: int | None) -> list[dict]:
+    """A connector with IPs at a place over the window: its usable share wherever an avoid starts or ends, or each
+    ``bucket`` minutes' time-weighted mean."""
+    country = place.split("/")[0]
+    spots = {cc: counts for cc, counts in REPUTATION_IPS.get(c.key, {}).items() if not place or cc == country}
+    eligible = sum(e for e, _ in spots.values())
+    # The IPs avoided at each minute of the window.
+    avoided = [0] * (end - start + 2)
+    for cc, (e, u) in spots.items():
+        for a, b in _avoids(c.key, cc, e, u):
+            if b > start and a <= end:
+                avoided[max(a, start) - start] += 1
+                avoided[min(b, end + 1) - start] -= 1
+    for m in range(1, len(avoided)):
+        avoided[m] += avoided[m - 1]
+
+    def point(minute: int, usable: float) -> dict:
+        value = round(usable / eligible, 4) if eligible else 1.0
+        return {"at": iso(from_minute(minute)), "own": value, "routed": value, "usable": round(usable, 1),
+                "eligible": eligible}
+
+    if bucket:
+        points = []
+        at = start - start % bucket
+        while at < end:
+            minutes = range(max(at, start), min(at + bucket, end))
+            points.append(point(minutes[0], sum(eligible - avoided[m - start] for m in minutes) / len(minutes)))
+            at += bucket
+        return points
+    return [point(m, eligible - avoided[m - start]) for m in range(start, end + 1)
+            if m == start or avoided[m - start] != avoided[m - start - 1]]
+
+
+def place_history(project_id: str, site: str | None, place: str, rng: str) -> dict:
+    """Each connector's factor at a place of REPUTATION_SITE over the window, a dynamic one's and the usable share of
+    one with IPs: every move up to 24 h, hourly means over 7 days and 3-hour means over 30. Only Real estate listings
+    has records; elsewhere there is no series."""
+    minutes = HISTORY_MINUTES.get(rng, 1440)
+    bucket = HISTORY_BUCKET.get(rng)
+    end = minute_index(NOW)
+    start = end - minutes
+    answer: dict = {"site": site or REPUTATION_SITE, "place": place, "range": rng, "since": iso(from_minute(start)),
+                    "until": iso(NOW), "rules": [], "series": []}
+    if project_id != P4 or site not in (None, "", REPUTATION_SITE) or place not in REPUTATION_BY_PLACE:
+        return answer
+    cells = reputation_cells(place, REPUTATION_STRENGTH[P4], 0.1)
+    conns = sorted((c for c in connectors_of(P4) if c.target and c.target.get("dynamic")
+                    and cells[c.id]["state"] != "takes_none"), key=lambda c: c.name.lower())
+    current = {c.id: cells[c.id].get("success") for c in conns}
+    levels = {c.id: cells[c.id].get("reputation_place") for c in conns}
+
+    def own_at(minute: int) -> dict[str, float | None]:
+        return {c.id: None if current[c.id] is None else _own_at(c.key, levels[c.id] or "", current[c.id], minute)
+                for c in conns}
+
+    def point(cid: str, minute: int, own: float | None, routed: float, requests: int, blocked: int) -> dict:
+        p: dict = {"at": iso(from_minute(minute)), "routed": routed, "requests": requests, "blocked": blocked}
+        if own is not None:
+            p |= {"own": own, "level": levels[cid]}
+        return p
+
+    series = {c.id: [] for c in conns}
+    rate = {c.id: HISTORY_RATE.get(c.key, 1.0) for c in conns}
+    if bucket:
+        # A time-weighted mean per bucket, from the bucket the window starts in.
+        at = start - start % bucket
+        while at < end:
+            samples = range(max(at, start), min(at + bucket, end), DECIDE_EVERY)
+            owns = [own_at(m) for m in samples]
+            routed = [_routed(o, _rule_at(m)) for o, m in zip(owns, samples, strict=True)]
+            for c in conns:
+                mean_own = None if current[c.id] is None else round(sum(o[c.id] for o in owns) / len(owns), 4)
+                mean_routed = round(sum(r[c.id] for r in routed) / len(routed), 4)
+                requests = round(rate[c.id] * len(samples) * DECIDE_EVERY * (0.7 + 0.6 * unit(f"req:{c.key}", at)))
+                blocked = round(requests * (1 - (mean_own if mean_own is not None else 0.97)))
+                series[c.id].append(point(c.id, max(at, start), mean_own, mean_routed, requests, blocked))
+            at += bucket
+        answer["bucket_seconds"] = bucket * 60
+    else:
+        # A point at the window's start, then one wherever a connector's factor moved or the rule changed.
+        last_own = own_at(start)
+        last_rule = _rule_at(start)
+        last_minute = start
+        moments = [(start, last_own, last_rule)]
+        for m in range(start - start % DECIDE_EVERY + DECIDE_EVERY, end + 1, DECIDE_EVERY):
+            own, rule = own_at(m), _rule_at(m)
+            if own != last_own or rule != last_rule:
+                moments.append((m, own, rule))
+                last_own, last_rule = own, rule
+        for k, (m, own, rule) in enumerate(moments):
+            routed = _routed(own, rule)
+            elapsed = m - last_minute if k else 0
+            last_minute = m
+            for c in conns:
+                requests = round(rate[c.id] * elapsed * (0.7 + 0.6 * unit(f"req:{c.key}", m)))
+                blocked = round(requests * (1 - (own[c.id] if own[c.id] is not None else 0.97)))
+                series[c.id].append(point(c.id, m, own[c.id], routed[c.id], requests, blocked))
+    rules = [{"at": iso(from_minute(start)), **_rule_at(start)}]
+    if from_minute(start) < STRENGTH_RAISED:
+        rules.append({"at": iso(STRENGTH_RAISED), **_rule_at(minute_index(STRENGTH_RAISED) + 1)})
+    lines = [{"connector_id": c.id, "name": c.name, "kind": "block_rate", "points": series[c.id]} for c in conns]
+    with_ips = [c for c in connectors_of(P4) if not (c.target and c.target.get("dynamic"))
+                and cells[c.id]["state"] != "takes_none"]
+    lines += [{"connector_id": c.id, "name": c.name, "kind": "usable_ips",
+               "points": _ip_series(c, place, start, end, bucket)}
+              for c in with_ips]
+    answer |= {"recorded_since": iso(HISTORY_RECORDED), "rules": rules,
+               "series": sorted(lines, key=lambda line: line["name"].lower())}
+    return answer
 
 
 # --------------------------------------------------------------------------- activity (the Enterprise audit log)

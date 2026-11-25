@@ -4,7 +4,8 @@
 """Exit reputation in the workers' metrics jobs: the flush applies the requests and reports the site windows counted
 (and a connector's with IPs requests from its host windows) to the connectors' records of the projects that record, in
 its transaction, and signals once it committed a dynamic connector's factor that moved; while no project records it
-reads nothing past which. Compaction deletes records past their retention by the day they were last seen.
+reads nothing past which. Compaction deletes records past their project's Keep data for by the day they were last
+seen, and their history past the same days by when it was made.
 
 Windows are written as gateways write them, and the jobs run on the real Postgres and Redis test containers.
 """
@@ -13,14 +14,15 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timedelta
-from typing import Any
 
 import pytest
 import structlog
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core import utc_now
 from api.core.stats import RequestCount
+from api.db.models import ConnectorFactorMoveModel, ExitIpAvoidMoveModel
 from api.db.redis import RUNTIME_STREAM_KEY, MetricWindows, RedisClient
 from api.db.repository import ProjectRepository, ProxyRepository
 from api.db.reputation_repository import ExitReputationRepository
@@ -38,7 +40,16 @@ from api.reputation.record import (
     ReputationChanges,
 )
 from tests.jobs.conftest import Rows
-from tests.jobs.test_metrics import FIRST, SECOND, delivery, live, meter, recorded, requests
+from tests.jobs.test_metrics import (
+    FIRST,
+    SECOND,
+    delivery,
+    failing,
+    live,
+    meter,
+    recorded,
+    requests,
+)
 
 # A compaction run's one entry.
 COMPACTION = delivery("1760000000000-0")
@@ -400,45 +411,190 @@ class TestFlush:
 
 
 class TestRetention:
+    """The records go by each project's own Keep data for, whatever the other projects keep."""
+
     @pytest.fixture
-    def compaction(self, sessions: async_sessionmaker[AsyncSession], geo: GeoStack) -> Any:
-        def build(days: int) -> CompactionJob:
-            return CompactionJob(sessions, geo.geo_service, reputation_retention_days=days)
+    def compaction(self, sessions: async_sessionmaker[AsyncSession], geo: GeoStack) -> CompactionJob:
+        return CompactionJob(sessions, geo.geo_service)
 
-        return build
-
-    async def test_records_seen_before_the_retention_go_unless_an_avoid_is_ahead(
-        self,
-        compaction: Any,
-        sessions: async_sessionmaker[AsyncSession],
-        project: Project,
-        static: Connector,
-        rows: Rows,
+    async def test_each_projects_records_go_by_its_own_days_unless_an_avoid_is_ahead(
+        self, compaction: CompactionJob, sessions: async_sessionmaker[AsyncSession], rows: Rows
     ) -> None:
+        """One project keeps 30 days, another 1 and a third forever (0)."""
         now = utc_now()
-        stale, fresh = (ExitIpKey(project.id, f"203.0.113.{n}", "google.com") for n in (1, 2))
-        await reported(sessions, now - timedelta(days=3), {stale: ReportCounts(bad=1)})
-        await flushed(sessions, now - timedelta(days=3), {key(static): RequestCount(blocked=1)})
-        await reported(sessions, now - timedelta(hours=1), {fresh: ReportCounts(good=1)})
-        # A week-long avoid begun three days ago stays.
-        lasting_project = await rows.project(exit_reputation=ExitReputationMode.AVOID, exit_reputation_avoid_minutes=10_080)
-        lasting = ExitIpKey(lasting_project.id, "203.0.113.3", "google.com")
-        await reported(sessions, now - timedelta(days=3), {lasting: ReportCounts(bad=1)})
+        month = await rows.project(exit_reputation=ExitReputationMode.AVOID)
+        # Its first avoid lasts a week.
+        day = await rows.project(
+            exit_reputation=ExitReputationMode.AVOID, exit_reputation_retention_days=1, exit_reputation_avoid_minutes=10_080
+        )
+        forever = await rows.project(exit_reputation=ExitReputationMode.AVOID, exit_reputation_retention_days=0)
+        of_month, of_day, of_forever = [await rows.connector(project) for project in (month, day, forever)]
+        month_stale, month_fresh, day_stale, day_avoided, day_fresh, forever_old = (
+            ExitIpKey(project.id, f"203.0.113.{n}", "google.com")
+            for n, project in enumerate((month, month, day, day, day, forever), start=1)
+        )
+        await reported(sessions, now - timedelta(days=40), {month_stale: ReportCounts(good=1)})
+        await flushed(sessions, now - timedelta(days=40), {key(of_month): RequestCount(blocked=1)})
+        await reported(sessions, now - timedelta(days=3), {month_fresh: ReportCounts(good=1)})
+        await flushed(sessions, now - timedelta(days=3), {key(of_month, "US"): RequestCount(blocked=1)})
+        await reported(
+            sessions, now - timedelta(days=3), {day_stale: ReportCounts(good=1), day_avoided: ReportCounts(bad=1)}
+        )
+        await flushed(sessions, now - timedelta(days=3), {key(of_day): RequestCount(blocked=1)})
+        await reported(sessions, now - timedelta(hours=1), {day_fresh: ReportCounts(good=1)})
+        await flushed(sessions, now - timedelta(hours=1), {key(of_day, "US"): RequestCount(blocked=1)})
+        await reported(sessions, now - timedelta(days=400), {forever_old: ReportCounts(good=1)})
+        await flushed(sessions, now - timedelta(days=400), {key(of_forever): RequestCount(blocked=1)})
 
         with structlog.testing.capture_logs() as logs:
-            await compaction(1).run(COMPACTION)
+            await compaction.run(COMPACTION)
 
-        assert await ip_record(sessions, stale) is None and await connector_record(sessions, key(static)) is None
-        assert await ip_record(sessions, fresh) is not None and await ip_record(sessions, lasting) is not None
+        for gone in (month_stale, day_stale):
+            assert await ip_record(sessions, gone) is None
+        for gone_place in (key(of_month), key(of_day)):
+            assert await connector_record(sessions, gone_place) is None
+        for kept in (month_fresh, day_avoided, day_fresh, forever_old):
+            assert await ip_record(sessions, kept) is not None
+        for kept_place in (key(of_month, "US"), key(of_day, "US"), key(of_forever)):
+            assert await connector_record(sessions, kept_place) is not None
         done = [log for log in logs if log["event"] == "Metrics compaction complete"]
-        assert [(log["exit_ip_reputation_deleted"], log["connector_reputation_deleted"]) for log in done] == [(1, 1)]
+        assert [(log["exit_ip_reputation_deleted"], log["connector_reputation_deleted"]) for log in done] == [(2, 2)]
+        # The same days take the history: the avoid kept 3 days ago goes, its record staying while the avoid lasts.
+        assert [(log["factor_moves_deleted"], log["avoid_moves_deleted"]) for log in done] == [(0, 1)]
+        assert await avoid_moves(sessions, day, day_avoided.ip) == []
 
-    async def test_a_retention_of_zero_days_keeps_them_all(
-        self, compaction: Any, sessions: async_sessionmaker[AsyncSession], project: Project
+    async def test_a_changed_setting_applies_at_the_next_sweep(
+        self, compaction: CompactionJob, sessions: async_sessionmaker[AsyncSession], project: Project
     ) -> None:
         old = ExitIpKey(project.id, "203.0.113.7", "google.com")
-        await reported(sessions, utc_now() - timedelta(days=400), {old: ReportCounts(good=1)})
-
-        await compaction(0).run(COMPACTION)
-
+        await reported(sessions, utc_now() - timedelta(days=10), {old: ReportCounts(good=1)})
+        await compaction.run(COMPACTION)
         assert await ip_record(sessions, old) is not None
+
+        async with sessions() as session:
+            await ProjectRepository(session).update(project.model_copy(update={"exit_reputation_retention_days": 7}))
+            await session.commit()
+        await compaction.run(COMPACTION)
+
+        assert await ip_record(sessions, old) is None
+
+
+async def moved(sessions: async_sessionmaker[AsyncSession], *keys: ConnectorSiteKey) -> None:
+    """A move of each of ``keys``' dynamic factors kept now, as a flush keeps them."""
+    async with sessions() as session:
+        await ExitReputationRepository(session).apply_evidence(
+            {k: RequestCount(20, blocked=10) for k in keys}, {k.connector_id for k in keys}, utc_now()
+        )
+        await session.commit()
+
+
+async def factor_moves(sessions: async_sessionmaker[AsyncSession], connector: Connector, *places: str) -> list[datetime]:
+    """When each move of the connector's factors for google.com at ``places`` was made."""
+    async with sessions() as session:
+        moves = await ExitReputationRepository(session).factor_moves(
+            connector.project_id, "google.com", places, [connector.id], datetime(2000, 1, 1)
+        )
+    return [move.at for move in moves]
+
+
+class TestFactorMoves:
+    async def test_a_flush_keeps_each_move_and_a_redelivered_one_keeps_none(
+        self,
+        flush: MetricsFlushJob,
+        sessions: async_sessionmaker[AsyncSession],
+        redis_client: RedisClient,
+        dynamic: Connector,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The moves are written in the flush's transaction, which records the flush: a delivery of it again writes
+        nothing."""
+        entity = (dynamic.project_id, dynamic.id, "google.com", "US")
+        await meter(redis_client, MetricWindows(site_requests={entity: RequestCount(20, blocked=10)}))
+        # The commit lands, and the staging hash's delete does not.
+        with monkeypatch.context() as patched:
+            patched.setattr(redis_client, "clear_metric_windows", failing)
+            with pytest.raises(ConnectionError):
+                await flush.run(delivery(FIRST))
+        [first] = await factor_moves(sessions, dynamic, "US")
+
+        await flush.run(delivery(FIRST))
+
+        assert await factor_moves(sessions, dynamic, "US") == [first]
+
+
+async def avoid_moves(sessions: async_sessionmaker[AsyncSession], project: Project, *ips: str) -> list[datetime]:
+    """When each move of ``ips``' avoids for google.com was made."""
+    async with sessions() as session:
+        moves = await ExitReputationRepository(session).avoid_moves(project.id, "google.com", ips, datetime(2000, 1, 1))
+    return [move.at for move in moves]
+
+
+class TestHistoryRetention:
+    """The factor moves and the avoid moves go by the same Keep data for as the records, by when they were made,
+    whatever day the records were last seen."""
+
+    @pytest.fixture
+    def compaction(self, sessions: async_sessionmaker[AsyncSession], geo: GeoStack) -> CompactionJob:
+        return CompactionJob(sessions, geo.geo_service)
+
+    @staticmethod
+    async def aged(sessions: async_sessionmaker[AsyncSession], project: Project, days: int) -> None:
+        """Every move of the project's, factors' and avoids', made ``days`` ago."""
+        async with sessions() as session:
+            for model in (ConnectorFactorMoveModel, ExitIpAvoidMoveModel):
+                await session.execute(
+                    update(model).where(model.project_id == project.id).values(at=utc_now() - timedelta(days=days))
+                )
+            await session.commit()
+
+    @staticmethod
+    async def history(
+        sessions: async_sessionmaker[AsyncSession], rows: Rows, days: int, age: int
+    ) -> tuple[Project, Connector]:
+        """A project keeping ``days`` of data with a dynamic connector's move and an exit IP's avoid move made ``age``
+        days ago, their records last seen today."""
+        project = await rows.project(exit_reputation=ExitReputationMode.AVOID, exit_reputation_retention_days=days)
+        connector = await rows.connector(project)
+        await moved(sessions, key(connector, "US"))
+        await reported(sessions, utc_now(), {ExitIpKey(project.id, "203.0.113.7", "google.com"): ReportCounts(bad=1)})
+        await TestHistoryRetention.aged(sessions, project, age)
+        return project, connector
+
+    async def test_each_project_keeps_its_own_days(
+        self, compaction: CompactionJob, sessions: async_sessionmaker[AsyncSession], rows: Rows
+    ) -> None:
+        day, day_connector = await self.history(sessions, rows, 1, 2)
+        month, month_connector = await self.history(sessions, rows, 30, 8)
+        forever, forever_connector = await self.history(sessions, rows, 0, 400)
+
+        with structlog.testing.capture_logs() as logs:
+            await compaction.run(COMPACTION)
+
+        assert await factor_moves(sessions, day_connector, "US") == []
+        assert await avoid_moves(sessions, day, "203.0.113.7") == []
+        assert len(await factor_moves(sessions, month_connector, "US")) == 1
+        assert len(await avoid_moves(sessions, month, "203.0.113.7")) == 1
+        # 0 days keep them all.
+        assert len(await factor_moves(sessions, forever_connector, "US")) == 1
+        assert len(await avoid_moves(sessions, forever, "203.0.113.7")) == 1
+        # The records stay: they were last seen today.
+        assert await connector_record(sessions, key(day_connector, "US")) is not None
+        done = [log for log in logs if log["event"] == "Metrics compaction complete"]
+        deleted = ("factor_moves_deleted", "avoid_moves_deleted", "connector_reputation_deleted")
+        assert [tuple(log[name] for name in deleted) for log in done] == [(1, 1, 0)]
+
+    async def test_a_changed_setting_applies_at_the_next_sweep(
+        self, compaction: CompactionJob, sessions: async_sessionmaker[AsyncSession], rows: Rows
+    ) -> None:
+        project, connector = await self.history(sessions, rows, 30, 8)
+        await compaction.run(COMPACTION)
+        assert len(await factor_moves(sessions, connector, "US")) == 1
+
+        async with sessions() as session:
+            repository = ProjectRepository(session)
+            await repository.update(project.model_copy(update={"exit_reputation_retention_days": 7}))
+            await session.commit()
+        await compaction.run(COMPACTION)
+
+        assert await factor_moves(sessions, connector, "US") == []
+        assert await avoid_moves(sessions, project, "203.0.113.7") == []

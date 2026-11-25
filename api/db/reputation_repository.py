@@ -1,18 +1,20 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The exit reputation records (``exit_ip_reputation``, ``connector_site_reputation``), in the caller's session; the
-caller commits."""
+"""The exit reputation records (``exit_ip_reputation``, ``connector_site_reputation``) and their history: the moves of
+the dynamic connectors' factors (``connector_factor_moves``) and of the exit IPs' avoids (``exit_ip_avoid_moves``), in
+the caller's session; the caller commits."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Any, NamedTuple, cast
 
 from sqlalchemy import (
     ColumnElement,
+    Date,
     Row,
     Select,
     Table,
@@ -21,8 +23,11 @@ from sqlalchemy import (
     delete,
     false,
     func,
+    literal,
     literal_column,
     select,
+    text,
+    true,
     tuple_,
     update,
 )
@@ -33,18 +38,22 @@ from api.core.stats import RequestCount
 from api.db.filters import any_of, rows_of
 from api.db.geo_repository import COUNT_CAP
 from api.db.models import (
+    ConnectorFactorMoveModel,
     ConnectorModel,
     ConnectorSiteReputationModel,
+    ExitIpAvoidMoveModel,
     ExitIpReputationModel,
     ProjectModel,
 )
 from api.models.project import ExitReputationMode
 from api.reputation.record import (
     MAX_EXIT_SITES,
+    ConnectorChange,
     ConnectorSiteKey,
     ConnectorSiteReputation,
     ExitIpKey,
     ExitIpReputation,
+    IpChange,
     ReportCounts,
     ReputationChanges,
     ReputationPolicy,
@@ -123,6 +132,29 @@ class _RecordTable[R: ReputationRecord]:
 
 _IPS = _RecordTable(ExitIpReputationModel, tuple(ExitIpKey._fields), ExitIpReputation)
 _CONNECTORS = _RecordTable(ConnectorSiteReputationModel, tuple(ConnectorSiteKey._fields), ConnectorSiteReputation)
+_MOVES = cast("Table", ConnectorFactorMoveModel.__table__)
+# The columns of a factor move, in the order :meth:`ExitReputationRepository._log_moves` writes them.
+_MOVE_COLUMNS = (
+    "project_id", "site", "place", "connector_id", "at", "old_factor", "new_factor", "requests", "blocked_reports"
+)
+_AVOID_MOVES = cast("Table", ExitIpAvoidMoveModel.__table__)
+# The columns of an avoid move, in the order :meth:`ExitReputationRepository._log_avoid_moves` writes them.
+_AVOID_MOVE_COLUMNS = ("project_id", "site", "ip", "at", "old_avoid_until", "new_avoid_until")
+# Each project's moves made more than its Keep data for days before :now, none of a project at 0, from a history table.
+# A cutoff that differs per project gives the planner no range on the time, so a join of the projects scans the whole
+# table every hour; the lateral subquery reads one project's expired rows on its (project_id, at) index instead, its
+# OFFSET keeping it from being flattened into that join, and the rows go by their address.
+_DELETE_HISTORY_PAST = """
+DELETE FROM {table} WHERE ctid = ANY(ARRAY(
+    SELECT expired.ctid FROM projects p
+    CROSS JOIN LATERAL (
+        SELECT m.ctid FROM {table} m
+        WHERE m.project_id = p.id
+          AND m.at < CAST(:now AS timestamp) - make_interval(days => p.exit_reputation_retention_days)
+        OFFSET 0
+    ) expired
+    WHERE p.exit_reputation_retention_days > 0
+))"""
 
 
 class ExitReputationRepository:
@@ -140,7 +172,8 @@ class ExitReputationRepository:
         A record of a project that is gone or records nothing (``off``) is skipped. A new record is inserted with its
         final values; one already stored is locked by the same statement, in key order, then updated, so two writers
         with overlapping batches wait for each other instead of deadlocking, and neither loses the other's evidence.
-        Constant statements whatever the batch's size.
+        Each avoid whose end changed is kept as an avoid move, by one more statement. Constant statements whatever the
+        batch's size.
         """
         if not ips:
             return ReputationChanges()
@@ -153,6 +186,7 @@ class ExitReputationRepository:
             lambda record: record.apply(ips[record.key], now, settings[record.project_id].policy),
             now,
         )
+        await self._log_avoid_moves([change for change in changes if change.old_avoid_until != change.new_avoid_until])
         return ReputationChanges(ips=tuple(changes), avoiding=self._avoiding(settings))
 
     async def recording_connectors(self, pairs: Collection[tuple[str, str | None]]) -> Recording:
@@ -183,7 +217,8 @@ class ExitReputationRepository:
         when one is stored, since requests never make one. A record of a project that is gone or records nothing, or of
         a connector that is gone or another project's, is skipped. The records are made or locked by one statement in
         key order and updated by one: the flush is their one writer, besides a connector's delete and the retention
-        sweep, which skips what a writer holds. Constant statements whatever the number of keys.
+        sweep, which skips what a writer holds. Each dynamic connector's factor that moved is kept as a factor move, by
+        one more statement. Constant statements whatever the number of keys.
         """
         counted = {key: counts for key, counts in evidence.items() if counts.requests or counts.blocked or counts.good}
         if not counted:
@@ -211,9 +246,63 @@ class ExitReputationRepository:
             ),
             now,
         )
-        return ReputationChanges(
-            connectors=tuple(change for change in changes if change.key.connector_id in dynamic),
-            avoiding=self._avoiding(settings),
+        told = tuple(change for change in changes if change.key.connector_id in dynamic)
+        await self._log_moves([change for change in told if change.moved])
+        return ReputationChanges(connectors=told, avoiding=self._avoiding(settings))
+
+    async def _log_moves(self, moved: Sequence[ConnectorChange]) -> None:
+        """Keep each of ``moved`` (dynamic connectors' factors that moved) as a factor move, one statement; a move kept
+        already for its key and time stays as it is."""
+        if not moved:
+            return
+        moves = rows_of(
+            "moves",
+            {name: _MOVES.c[name] for name in _MOVE_COLUMNS},
+            (
+                (
+                    change.key.project_id,
+                    change.key.site,
+                    change.key.place,
+                    change.key.connector_id,
+                    change.at,
+                    change.old_factor,
+                    change.new_factor,
+                    change.requests,
+                    change.blocked_reports,
+                )
+                for change in moved
+            ),
+        )
+        await self._session.execute(
+            pg_insert(_MOVES)
+            .from_select(list(_MOVE_COLUMNS), select(*(moves.c[name] for name in _MOVE_COLUMNS)))
+            .on_conflict_do_nothing()
+        )
+
+    async def _log_avoid_moves(self, changed: Sequence[IpChange]) -> None:
+        """Keep each of ``changed`` (exit IPs' avoids whose end changed) as an avoid move, one statement; a move kept
+        already for its key and time stays as it is."""
+        if not changed:
+            return
+        moves = rows_of(
+            "moves",
+            {name: _AVOID_MOVES.c[name] for name in _AVOID_MOVE_COLUMNS},
+            (
+                (
+                    change.key.project_id,
+                    change.key.site,
+                    change.key.ip,
+                    change.at,
+                    change.old_avoid_until,
+                    change.new_avoid_until,
+                )
+                for change in changed
+            ),
+        )
+        await self._session.execute(
+            pg_insert(_AVOID_MOVES)
+            .from_select(list(_AVOID_MOVE_COLUMNS), select(*(moves.c[name] for name in _AVOID_MOVE_COLUMNS)))
+            .on_conflict_do_nothing()
         )
 
     async def _apply[R: ReputationRecord, C](
@@ -352,43 +441,57 @@ class ExitReputationRepository:
 
     # --- Retention -----------------------------------------------------------------------------
 
-    async def delete_stale(self, cutoff: date, now: datetime) -> tuple[int, int]:
-        """Delete the records last seen before the day ``cutoff``, an exit IP's only with no avoid ahead of ``now``; how
-        many went from each table (exit IPs, connectors).
+    async def delete_stale(self, now: datetime) -> tuple[int, int]:
+        """Delete each project's records last seen on a day more than its Keep data for days before ``now``, none of a
+        project at 0 days, an exit IP's only with no avoid ahead of ``now``; how many went from each table (exit IPs,
+        connectors).
 
         A record another transaction holds is skipped, never waited for, so the sweep and a writer cannot deadlock; it
-        goes with a later sweep. One statement per table.
+        goes with a later sweep. One statement per table, joined to the projects for their days.
         """
-        ips = _IPS.table.c
-        stale_ips = (
-            select(ips.project_id, ips.ip, ips.site)
+        days = ProjectModel.exit_reputation_retention_days
+        fewest = (await self._session.execute(select(func.min(days)).where(days > 0))).scalar_one_or_none()
+        if fewest is None:
+            return 0, 0
+        # The cutoff of the project with the fewest days, as a constant, gives the planner a range on the day's index;
+        # the join then applies each project's own days.
+        before = now.date() - timedelta(days=fewest)
+        # An end that is not set compares as unknown: not being ahead is not being true.
+        ips = await self._delete_stale(_IPS, now, before, (_IPS.table.c.avoid_until > now).is_not(True))
+        connectors = await self._delete_stale(_CONNECTORS, now, before)
+        return ips, connectors
+
+    async def _delete_stale[R: ReputationRecord](
+        self, records: _RecordTable[R], now: datetime, before: date, *also: ColumnElement[bool]
+    ) -> int:
+        """Delete ``records``' rows last seen before ``before`` and past their project's Keep data for that also match
+        ``also``, locking only the rows themselves; how many went."""
+        table = records.table
+        key = tuple_(*(table.c[name] for name in records.key))
+        days = ProjectModel.exit_reputation_retention_days
+        stale = (
+            select(*(table.c[name] for name in records.key))
+            .join(ProjectModel, ProjectModel.id == table.c.project_id)
             .where(
-                ips.last_seen_day < cutoff,
-                # An end that is not set compares as unknown: not being ahead is not being true.
-                (ips.avoid_until > now).is_not(True),
+                days > 0,
+                table.c.last_seen_day < before,
+                table.c.last_seen_day < literal(now.date(), Date) - days,
+                *also,
             )
-            .with_for_update(skip_locked=True)
+            .with_for_update(of=table, skip_locked=True)
         )
-        deleted_ips = await self._session.execute(
-            delete(_IPS.table).where(tuple_(ips.project_id, ips.ip, ips.site).in_(stale_ips))
-        )
-        connectors = _CONNECTORS.table.c
-        stale_connectors = (
-            select(connectors.project_id, connectors.connector_id, connectors.site, connectors.place)
-            .where(connectors.last_seen_day < cutoff)
-            .with_for_update(skip_locked=True)
-        )
-        deleted_connectors = await self._session.execute(
-            delete(_CONNECTORS.table).where(
-                tuple_(connectors.project_id, connectors.connector_id, connectors.site, connectors.place).in_(
-                    stale_connectors
-                )
-            )
-        )
-        return (
-            int(deleted_ips.rowcount or 0),  # type: ignore[attr-defined]
-            int(deleted_connectors.rowcount or 0),  # type: ignore[attr-defined]
-        )
+        result = await self._session.execute(delete(table).where(key.in_(stale)))
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def delete_history_past(self, now: datetime) -> tuple[int, int]:
+        """Delete each project's factor moves and avoid moves made more than its Keep data for days before ``now``, none
+        of a project at 0 days; how many went (factor moves, avoid moves). One statement per table, reading each
+        project's expired rows alone (:data:`_DELETE_HISTORY_PAST`)."""
+        deleted: list[int] = []
+        for table in (_MOVES, _AVOID_MOVES):
+            result = await self._session.execute(text(_DELETE_HISTORY_PAST.format(table=table.name)), {"now": now})
+            deleted.append(int(result.rowcount or 0))  # type: ignore[attr-defined]
+        return deleted[0], deleted[1]
 
     # --- Reads ------------------------------------------------------------------------------------
 
@@ -469,6 +572,109 @@ class ExitReputationRepository:
             .order_by(*_CONNECTORS.lock_order())
         )
         return [_CONNECTORS.to_record(row) for row in result]
+
+    async def factor_moves(
+        self, project_id: str, site: str, places: Collection[str], connector_ids: Collection[str], since: datetime
+    ) -> list[ConnectorChange]:
+        """The moves of ``connector_ids``' factors for ``site`` at each of ``places`` (levels of a requested place) made
+        at ``since`` or later, the earliest first. One statement on the key."""
+        if not places or not connector_ids:
+            return []
+        await self._plan_for_the_values()
+        c = _MOVES.c
+        result = await self._session.execute(
+            select(_MOVES)
+            .where(
+                c.project_id == project_id,
+                c.site == site,
+                any_of(c.place, sorted(set(places))),
+                any_of(c.connector_id, sorted(set(connector_ids))),
+                c.at >= since,
+            )
+            .order_by(c.at, c.connector_id, c.place)
+        )
+        return [_move(row) for row in result]
+
+    async def last_moves_before(
+        self, project_id: str, site: str, places: Collection[str], connector_ids: Collection[str], before: datetime
+    ) -> list[ConnectorChange]:
+        """The last move before ``before`` of each of ``connector_ids``' factors for ``site`` at each of ``places``, where
+        there is one: the counts the first move from ``before`` on is told against. One statement, one step back on the
+        key per connector and level."""
+        if not places or not connector_ids:
+            return []
+        await self._plan_for_the_values()
+        c = _MOVES.c
+        wanted = rows_of(
+            "wanted",
+            {"place": c.place, "connector_id": c.connector_id},
+            [(place, connector_id) for place in sorted(set(places)) for connector_id in sorted(set(connector_ids))],
+        )
+        last = (
+            select(_MOVES)
+            .where(
+                c.project_id == project_id,
+                c.site == site,
+                c.place == wanted.c.place,
+                c.connector_id == wanted.c.connector_id,
+                c.at < before,
+            )
+            .order_by(c.at.desc())
+            .limit(1)
+            .lateral("last")
+        )
+        result = await self._session.execute(select(last).select_from(wanted).join(last, true()))
+        return sorted((_move(row) for row in result), key=lambda move: (move.at, move.key))
+
+    async def avoid_moves(
+        self, project_id: str, site: str, ips: Collection[str], since: datetime
+    ) -> list[IpChange]:
+        """The moves of ``ips``' avoids for ``site`` made at ``since`` or later, the earliest first. One statement on the
+        key."""
+        if not ips:
+            return []
+        await self._plan_for_the_values()
+        c = _AVOID_MOVES.c
+        result = await self._session.execute(
+            select(_AVOID_MOVES)
+            .where(c.project_id == project_id, c.site == site, any_of(c.ip, sorted(set(ips))), c.at >= since)
+            .order_by(c.at, c.ip)
+        )
+        return [
+            IpChange(ExitIpKey(row.project_id, row.ip, row.site), row.at, row.old_avoid_until, row.new_avoid_until)
+            for row in result
+        ]
+
+    async def avoid_ends(self, project_id: str, site: str, ips: Collection[str]) -> dict[str, datetime]:
+        """The end of the last avoid of each of ``ips`` that has one for ``site``, past or ahead. One statement on the
+        key."""
+        if not ips:
+            return {}
+        await self._plan_for_the_values()
+        c = _IPS.table.c
+        result = await self._session.execute(
+            select(c.ip, c.avoid_until).where(
+                c.project_id == project_id, c.site == site, any_of(c.ip, sorted(set(ips))), c.avoid_until.is_not(None)
+            )
+        )
+        return {row.ip: row.avoid_until for row in result}
+
+    async def first_move_at(self, project_id: str) -> datetime | None:
+        """When the project's earliest move kept was made, a factor's or an avoid's; None before any. One statement, a
+        step on each table's index of the project's times."""
+        first: datetime | None = (
+            await self._session.execute(
+                select(
+                    func.least(
+                        select(func.min(_MOVES.c.at)).where(_MOVES.c.project_id == project_id).scalar_subquery(),
+                        select(func.min(_AVOID_MOVES.c.at))
+                        .where(_AVOID_MOVES.c.project_id == project_id)
+                        .scalar_subquery(),
+                    )
+                )
+            )
+        ).scalar_one()
+        return first
 
     async def avoided_ips(self, project_id: str, sites: Collection[str], now: datetime) -> dict[str, frozenset[str]]:
         """Each of ``sites`` that avoids exit IPs of the project at ``now``, with those IPs. One statement."""
@@ -824,6 +1030,18 @@ class ExitReputationRepository:
                 return offset + seen, True
         head = matching.limit(offset).subquery()
         return int((await self._session.execute(select(func.count()).select_from(head))).scalar_one()), True
+
+
+def _move(row: Row[Any]) -> ConnectorChange:
+    """A factor move as its row holds it."""
+    return ConnectorChange(
+        ConnectorSiteKey(row.project_id, row.connector_id, row.site, row.place),
+        row.at,
+        row.old_factor,
+        row.new_factor,
+        row.requests,
+        row.blocked_reports,
+    )
 
 
 def _site_text(text: str) -> str:

@@ -25,8 +25,15 @@ const SWATCHES = [
   'bg-[#2a78d6] dark:bg-[#3987e5]', 'bg-[#eb6834] dark:bg-[#d95926]', 'bg-[#1baf7a] dark:bg-[#199e70]', 'bg-[#eda100] dark:bg-[#c98500]',
   'bg-[#e87ba4] dark:bg-[#d55181]', 'bg-[#008300]', 'bg-[#4a3aa7] dark:bg-[#9085e9]', 'bg-[#e34948] dark:bg-[#e66767]',
 ]
+// The same slots as colours (light, dark), for a chart line; the classes above stay written out for Tailwind to find.
+const SWATCH_HEX: [string, string][] = [
+  ['#2a78d6', '#3987e5'], ['#eb6834', '#d95926'], ['#1baf7a', '#199e70'], ['#eda100', '#c98500'],
+  ['#e87ba4', '#d55181'], ['#008300', '#008300'], ['#4a3aa7', '#9085e9'], ['#e34948', '#e66767'],
+]
 /** The colour classes of the connector at position ``i``, for its dot, its bar segment and its row. */
 export const swatch = (i: number) => SWATCHES[i % SWATCHES.length]
+/** The colour of the connector at position ``i`` in the theme, matching its ``swatch``. */
+export const swatchColor = (i: number, dark: boolean) => SWATCH_HEX[i % SWATCH_HEX.length][dark ? 1 : 0]
 
 export const formatShare = (v: number | null | undefined): string => {
   if (v == null) return '-'

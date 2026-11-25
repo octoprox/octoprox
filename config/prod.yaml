@@ -56,11 +56,6 @@ system:
   metrics_interval: 300
   metrics_retention_days: 90
 
-exit_reputation:
-  # Records are deleted this long after the day they were last seen, unless
-  # an avoid is still ahead; 0 keeps them forever.
-  retention_days: 30
-
 # The routing feed: the controller compiles the definitions in Postgres into
 # Redis, and gateways follow it. The controller, the api and workers follow
 # a Redis stream that announces every saved change.

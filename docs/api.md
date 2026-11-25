@@ -172,7 +172,7 @@ Projects provide multi-tenancy support. Each project has its own credentials, co
 
 `observation_log` (boolean, default `true`) keeps a row in the [observation log]({{ site.baseurl }}/ip-attribution#unique-exits-per-connector) for each sighting of the project's exits; off, the sightings still count in its exit IPs and provider accuracy. `observation_retention_days` (optional, up to 3650; `0` keeps forever) is how many days the project's rows are kept; left out it follows the install's `observation_retention_days`, and on update an empty string clears it.
 
-`exit_reputation` (`off`, `record` or `avoid`; default `off`) decides what the project's [exit reputation]({{ site.baseurl }}/exit-reputation) does with exit reports: nothing, keep them, or also route by them, keeping exits avoided for a site away from it and weighing dynamic connectors by their record there. Seven numbers tune the decision: `exit_reputation_avoid_minutes` ("Avoid for", 1 to 10080, default 60) is how long a first avoid lasts, doubled for each recent one up to 7 days; `exit_reputation_half_life_hours` ("Remember for", 1 to 168, default 24) is how many hours an exit IP's reports and avoids take to count half; `exit_reputation_connector_half_life_requests` ("Connector memory", 20 to 10000, default 100) is how many more requests a dynamic connector's blocked reports and requests for a site and place take to count half, an hour at most; `exit_reputation_bad_reports` (1 to 10, default 1) is how many fresh bad reports avoid an exit for a site; `exit_reputation_bad_share` (1 to 99, default 50) is the least percentage of the IP's recent reports for the site that must be bad; `exit_reputation_strength` ("Strength", 1 to 20, default 1) is how hard a dynamic connector is weighed against the best one at a place, 1 being the trim exit reputation always made; and `exit_reputation_floor` ("Lowest factor", a percentage, 1 to 100, default 10) is the least share of its weight a dynamic connector keeps for a site. A value out of range is a `422`. See [Settings]({{ site.baseurl }}/exit-reputation#settings).
+`exit_reputation` (`off`, `record` or `avoid`; default `off`) decides what the project's [exit reputation]({{ site.baseurl }}/exit-reputation) does with exit reports: nothing, keep them, or also route by them, keeping exits avoided for a site away from it and weighing dynamic connectors by their record there. Seven numbers tune the decision: `exit_reputation_avoid_minutes` ("Avoid for", 1 to 10080, default 60) is how long a first avoid lasts, doubled for each recent one up to 7 days; `exit_reputation_half_life_hours` ("Remember for", 1 to 168, default 24) is how many hours an exit IP's reports and avoids take to count half; `exit_reputation_connector_half_life_requests` ("Connector memory", 20 to 10000, default 100) is how many more requests a dynamic connector's blocked reports and requests for a site and place take to count half, an hour at most; `exit_reputation_bad_reports` (1 to 10, default 1) is how many fresh bad reports avoid an exit for a site; `exit_reputation_bad_share` (1 to 99, default 50) is the least percentage of the IP's recent reports for the site that must be bad; `exit_reputation_strength` ("Strength", 1 to 20, default 1) is how hard a dynamic connector is weighed against the best one at a place, 1 being the trim exit reputation always made; and `exit_reputation_floor` ("Lowest factor", a percentage, 1 to 100, default 10) is the least share of its weight a dynamic connector keeps for a site. `exit_reputation_retention_days` ("Keep data for", 0 to 365, default 30) is how many days the project's exit reputation data is kept: its records for each site (an exit IP's reports and avoids, a dynamic connector's factor for each place) after the day they were last seen, and the history behind a place's [Over time](#exit-reputation-records) chart after it was recorded. `0` keeps it forever. A record that goes starts afresh with the next report. A value out of range is a `422`. See [Settings]({{ site.baseurl }}/exit-reputation#settings).
 
 ### List Projects
 
@@ -364,6 +364,7 @@ What a project's [exit reputation]({{ site.baseurl }}/exit-reputation#views) hol
 | GET | `/projects/{project_id}/exit-reputation/ips/{ip}` | One IP: how many sites it has a record for (`sites`) and how many avoid it now (`avoided_sites`); up to 100 of those records as `records`, those avoiding it now first, each the one seen last first; and the project's connectors that handed it out, from their exit IPs, as `connectors` (`connector_id`, `connector_name`, `first_seen`, `last_seen`, `sightings`). Both lists are empty for an IP the project has nothing on; `400` for text that is not an IP |
 | POST | `/projects/{project_id}/exit-reputation/summary` | Per IP, its records over every site: `{"ips": [...]}`, up to 1000, answers `{"ips": [{ip, good_reports, bad_reports, sites, avoided_sites, avoided_until}]}` for the IPs with a record, in the order asked, each under the text it was asked by. A read, sent as a `POST` so a page of IPs fits |
 | GET | `/projects/{project_id}/exit-reputation/places` | One `site` across every place requests to it named: each connector's reputation and share of the requests from each place, with a tile per connector and a summary. See below |
+| GET | `/projects/{project_id}/exit-reputation/places/history` | How each connector taking the requests at one site and place did over a time range: a dynamic connector's factor, own and routed, and a connector with IPs' usable IPs. See below |
 | GET | `/projects/{project_id}/exit-reputation/strength-preview` | How the shares of a site's busiest places would move at another Strength and Lowest factor. See below |
 
 A record, read half an hour after the report that began its second avoid:
@@ -464,6 +465,59 @@ A cell's `state` says where the connector stands at the place:
 | `takes_none` | Routing keeps the connector off these requests: it is disabled or over its traffic limit, its domain filter, a reservation or its country list keeps it off, or no healthy row of it serves the place |
 
 `reputation` is the value in force, 1 when nothing says otherwise; `reputation_kind` and `reputation_place` are as on the [traffic split](#effective-shares), and `own_factor` is a dynamic connector's factor stored at this place itself (left out without one). `success` is a judged dynamic connector's own factor at the level its reputation came from, before it is compared with the best; `best_success` and `best_connector_id` are the best judged dynamic connector that takes the place's requests and its own factor, which `reputation` is `success` × (`success` / `best_success`) ^ (`reputation_strength` - 1) from, never under `reputation_floor` ([how]({{ site.baseurl }}/exit-reputation#strength-and-lowest-factor)). All three are sent only on a judged dynamic connector's cell: they are left out for a connector with IPs, for a dynamic connector not judged there, and everywhere at a place where no connector taking the requests is judged. `blocked` and `requests` are the weighted counts as routing last decided the factor, at `counted_at`, not faded since: a dynamic connector's from the place's own record, so an inherited cell shows the place's own few requests. They are left out without a record, and for a connector with IPs, whose reports are kept for the whole site and weigh nothing on their own. A quiet place keeps its counts and its factor until new requests or reports there decide them again, or its record expires ([how]({{ site.baseurl }}/exit-reputation#a-connectors-reputation-for-a-site)). `usable_ips` of `eligible_ips` are a connector with IPs' rows eligible for a request to the site from the place, as on the traffic split. `configured_share` is the connector's share of the place's requests by weight, among the connectors that take them, and `effective_share` by weight times `reputation` whatever the mode: what `avoid` does, or would do.
+
+
+**A place over time.** `GET /projects/{project_id}/exit-reputation/places/history?site=www.google.com&place=US/NY&range=24h` says how each connector taking requests to `site` from `place` did, as the **Over time** chart of a place on the [Reputation tab]({{ site.baseurl }}/exit-reputation#every-place-for-a-site) draws it. Any signed-in role may read it. `site` is handled as by `GET /exit-reputation/places`; `place` is the place as `-cc-`, `-st-` and `-city-` name it (`US`, `US/NY`, `US/NY/new_york`, `US//austin`), left out or empty for requests naming none. `range` is `1h`, `6h`, `24h` (the default), `7d` or `30d`. `404` for an unknown project, `400` for a `site` or `place` that names none, `422` for a missing `site` or another `range`.
+
+```json
+{
+  "site": "www.google.com",
+  "place": "US/NY",
+  "range": "24h",
+  "since": "2026-11-24T11:00:00Z",
+  "until": "2026-11-25T11:00:00Z",
+  "recorded_since": "2026-11-20T09:14:00Z",
+  "bucket_seconds": null,
+  "rules": [
+    {"at": "2026-11-24T11:00:00Z", "applied": true, "strength": 1, "floor": 0.1},
+    {"at": "2026-11-25T08:30:00Z", "applied": true, "strength": 10, "floor": 0.1}
+  ],
+  "series": [
+    {
+      "connector_id": "9a40…", "name": "Bright Data residential", "kind": "block_rate",
+      "points": [
+        {"at": "2026-11-24T11:00:00Z", "routed": 1},
+        {"at": "2026-11-24T14:05:00Z", "own": 0.99, "level": "US", "routed": 0.99, "requests": 420, "blocked": 3}
+      ]
+    },
+    {
+      "connector_id": "6f1c…", "name": "Oxylabs residential", "kind": "block_rate",
+      "points": [
+        {"at": "2026-11-24T11:00:00Z", "own": 0.95, "level": "US", "routed": 0.95},
+        {"at": "2026-11-24T19:42:00Z", "own": 0.8, "level": "US/NY", "routed": 0.8, "requests": 1840, "blocked": 61},
+        {"at": "2026-11-25T08:30:00Z", "own": 0.8, "level": "US/NY", "routed": 0.12}
+      ]
+    },
+    {
+      "connector_id": "c27e…", "name": "Webshare static", "kind": "usable_ips",
+      "points": [
+        {"at": "2026-11-24T11:00:00Z", "own": 1, "routed": 1, "usable": 20, "eligible": 20},
+        {"at": "2026-11-24T16:20:00Z", "own": 0.85, "routed": 0.85, "usable": 17, "eligible": 20},
+        {"at": "2026-11-25T04:20:00Z", "own": 0.9, "routed": 0.9, "usable": 18, "eligible": 20}
+      ]
+    }
+  ]
+}
+```
+
+A field with no value is left out; read a missing field as `null`. Times are UTC.
+
+- `since` and `until` bound the range, `until` being the time of the answer. `recorded_since` is the project's first move kept, of a dynamic connector's factor or of an exit IP's avoid on a site: the history starts when Octoprox was upgraded to the version that keeps it, and nothing is drawn before it. It is left out while the project has nothing kept. The history is kept for the project's `exit_reputation_retention_days` (30 by default, see [Projects](#projects)).
+- `bucket_seconds` is `null` up to `24h`, where the points are every move, `3600` at `7d`, where each point is a connector's mean over the hour, weighted by time, and `10800` at `30d`, where each point is its mean over the 3 hours.
+- `rules` are the project's Strength and Lowest factor (`floor`, as a factor, 0.01 to 1) and whether its mode applies them (`applied`: the mode is `avoid`), the first in force at the first point (`since`, or `recorded_since` when later), then one per change within the range, taken from the project's [History]({{ site.baseurl }}/audit-log).
+- `series` has one entry per connector taking the place's requests now, dynamic and with IPs, by its `connector_id` and `name`, in name order. `kind` says what its points measure: `block_rate` for a dynamic connector's factor, `usable_ips` for a connector with IPs' usable IPs. Up to `24h` a connector has a point at the first moment (`since`, or `recorded_since` when later), then one at each moment its values changed, each in force until the next point or `until`: a connector whose values did not move in the range has its first point alone. At `7d` and `30d` every connector has a point per bucket.
+- A `block_rate` point's `own` is the connector's own factor in force from `at`, from the finest level of the place with one (`level`: `US/NY`, `US`, or `""` for requests naming no place), as routing takes it; it is left out while no level judges the connector, and `routed` is then 1. `routed` is what its weight was multiplied by, at the rule in force at `at`, compared with the best judged connector taking the place's requests: what `avoid` did, or would have done. The connectors taking the requests are those that take them now, as `GET /exit-reputation/places` finds them, applied to every moment. `requests` and `blocked` are given only at a point where the connector's factor moved at `level`, or at a finer level that stopped judging it: the requests and blocked reports that level counted since its previous move (summed over the bucket's moves at `7d` and `30d`). They are left out where it did not move, or where there is no earlier count to compare with.
+- A `usable_ips` point has no `level`, `requests` or `blocked`. `eligible` is the connector's rows eligible for a request to the site from the place, and `usable` those whose exit IP the site did not avoid at `at`, so a point is added where an avoid began, changed or ran out. `own` and `routed` are both `usable` / `eligible` (1 with none eligible), since Strength and Lowest factor leave a connector with IPs alone. The rows and their exit IPs are the connector's now, applied to every moment: exact for a fixed list, approximate further back for rows whose exit IP changes, such as cloud instances or pooled slots. At `7d` and `30d` the values are the bucket's mean, weighted by time, `usable` to a tenth of a row.
 
 **Previewing Strength.** `GET /projects/{project_id}/exit-reputation/strength-preview?strength=10&floor=10&site=www.google.com` says how the split of a site's requests would move at another Strength and Lowest factor, as the settings form previews it. Any signed-in role may read it. `strength` is 1 to 20 and `floor` a percentage, 1 to 100, as on the project; `site` is a host or a URL, left out for the site the [places](#exit-reputation-records) read opens on. A value out of range is a `422`, a `site` that names none a `400`, and an unknown project a `404`.
 
@@ -1674,7 +1728,7 @@ POST /api/v1/backup/export
 | Field | Type | Notes |
 |-------|------|-------|
 | `passphrase` | string | Minimum 8 characters. Required again to import - it cannot be recovered. |
-| `include_metrics` | boolean | Include history: proxy/project metrics, exit IP observations, per-connector exit IPs, [exit reputation]({{ site.baseurl }}/exit-reputation) records, and the [alerts](#alerts): each project's, and the install's resolved ones. Default `false` (smaller file). |
+| `include_metrics` | boolean | Include history: proxy/project metrics, exit IP observations, per-connector exit IPs, [exit reputation]({{ site.baseurl }}/exit-reputation) records and their history over time, and the [alerts](#alerts): each project's, and the install's resolved ones. Default `false` (smaller file). |
 | `include_database_files` | boolean | Include the bytes of uploaded and downloaded IP databases. Default `false`; a city database is tens of megabytes. Their rows are always included, so without the files the restored instance lists them without a file, ready to re-upload or refresh. |
 
 **Response:** the backup file as `application/octet-stream` with a
@@ -1688,7 +1742,7 @@ settings (the audit retention, the install alert retention and the Octoprox
 Enterprise license key), under the payload keys `audit_log` and
 `system_settings`. The audit log travels whether or not history is included.
 Optionally the file also carries the history (metrics, attribution
-observations, exit reputation records, each project's alerts, and the
+observations, exit reputation records and their history, each project's alerts, and the
 install's resolved alerts) and the IP database files. A project's alert
 settings travel with the project.
 

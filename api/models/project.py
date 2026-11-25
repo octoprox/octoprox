@@ -85,6 +85,8 @@ MAX_REPUTATION_BAD_SHARE = 99
 MAX_REPUTATION_STRENGTH = 20
 # The highest lowest factor, in percent: at 100 no dynamic connector's weight is ever lowered.
 MAX_REPUTATION_FLOOR = 100
+# The longest a project's exit reputation data is kept after it was last used, in days: a year.
+MAX_REPUTATION_RETENTION_DAYS = 365
 
 
 def mitm_fields(
@@ -178,8 +180,14 @@ class Project(Audited):
     # repeat doubles it), how many hours an exit IP's reports take to count half ("Remember for"), how many more
     # requests a connector's evidence takes to count half ("Connector memory"), how many fresh bad reports avoid an exit
     # for a site, the least share (percent) of the site's recent reports that must be bad, how hard a dynamic connector
-    # is weighed against the best one at a place ("Strength", 1 the plain trim), and the least share (percent) of its
-    # weight a dynamic connector keeps ("Lowest factor").
+    # is weighed against the best one at a place ("Strength", 1 the plain trim), the least share (percent) of its
+    # weight a dynamic connector keeps ("Lowest factor"), and how many days the project's data is kept after it was
+    # last used ("Keep data for", 0 forever): a site's records (an exit IP's reports and avoids, a dynamic connector's
+    # factor per place) after the day they were last seen, by a report or a request counted, and the Over time chart's
+    # history after the time it was recorded. The hourly compaction on the workers deletes the older ones, an exit IP's
+    # record only once its avoid has passed; a record that goes takes its evidence with it, and the next report starts
+    # it afresh. At the default "Remember for" of a day, 30 days leaves evidence worth about a billionth of a fresh
+    # report, so an IP that comes back after that starts again with nothing lost.
     exit_reputation: ExitReputationMode = ExitReputationMode.OFF
     exit_reputation_avoid_minutes: int = Field(default=60, ge=1, le=MAX_REPUTATION_AVOID_MINUTES)
     exit_reputation_half_life_hours: int = Field(default=24, ge=1, le=MAX_REPUTATION_HALF_LIFE_HOURS)
@@ -190,6 +198,7 @@ class Project(Audited):
     exit_reputation_bad_share: int = Field(default=50, ge=1, le=MAX_REPUTATION_BAD_SHARE)
     exit_reputation_strength: int = Field(default=1, ge=1, le=MAX_REPUTATION_STRENGTH)
     exit_reputation_floor: int = Field(default=10, ge=1, le=MAX_REPUTATION_FLOOR)
+    exit_reputation_retention_days: int = Field(default=30, ge=0, le=MAX_REPUTATION_RETENTION_DAYS)
 
     # Deleted, and waiting for its cloud instances to be terminated: its clients are turned away and it takes no new
     # connector. Only a delete sets it (``ProjectRepository.mark_pending_deletion``); create and edit never write it.
@@ -261,6 +270,7 @@ class ProjectCreate(BaseModel):
     exit_reputation_bad_share: int = Field(default=50, ge=1, le=MAX_REPUTATION_BAD_SHARE)
     exit_reputation_strength: int = Field(default=1, ge=1, le=MAX_REPUTATION_STRENGTH)
     exit_reputation_floor: int = Field(default=10, ge=1, le=MAX_REPUTATION_FLOOR)
+    exit_reputation_retention_days: int = Field(default=30, ge=0, le=MAX_REPUTATION_RETENTION_DAYS)
 
     @model_validator(mode="after")
     def validate_mitm_fields(self) -> "ProjectCreate":
@@ -306,6 +316,7 @@ class ProjectUpdate(BaseModel):
     exit_reputation_bad_share: Annotated[int, Field(ge=1, le=MAX_REPUTATION_BAD_SHARE)] | None = None
     exit_reputation_strength: Annotated[int, Field(ge=1, le=MAX_REPUTATION_STRENGTH)] | None = None
     exit_reputation_floor: Annotated[int, Field(ge=1, le=MAX_REPUTATION_FLOOR)] | None = None
+    exit_reputation_retention_days: Annotated[int, Field(ge=0, le=MAX_REPUTATION_RETENTION_DAYS)] | None = None
 
     def changes(self) -> dict[str, object]:
         """The fields this edit sets, with the empty strings that clear an override turned into None."""
@@ -347,6 +358,7 @@ class ProjectResponse(BaseModel):
     exit_reputation_bad_share: int = 50
     exit_reputation_strength: int = 1
     exit_reputation_floor: int = 10
+    exit_reputation_retention_days: int = 30
     pending_deletion: bool = False
     created_at: datetime
     updated_at: datetime
@@ -386,6 +398,7 @@ class ProjectSummary(BaseModel):
     exit_reputation_bad_share: int = 50
     exit_reputation_strength: int = 1
     exit_reputation_floor: int = 10
+    exit_reputation_retention_days: int = 30
     pending_deletion: bool = False
     credential_count: int = 0
     connector_count: int = 0

@@ -238,6 +238,15 @@ class TestIpBookkeeping:
         same = IpChange(KEY, T0, at(1), at(1))
         assert (began.moved, expired_then_none.moved, same.moved) == (True, False, False)
 
+    def test_a_batch_stamped_before_one_applied_first_moves_the_avoid_after_it(self) -> None:
+        """Two ingest workers can apply their batches in the other order than they took their times."""
+        r = ip_record()
+        began = report(r, at(0.5), bad=1)
+        lifted = report(r, at(0.25), good=5)
+
+        assert began == IpChange(KEY, at(0.5), None, at(1.5))
+        assert lifted == IpChange(KEY, at(0.5) + timedelta(microseconds=1), at(1.5), None)
+
 
 class TestConnectorMemory:
     """A connector record's evidence counts half after "Connector memory" more requests, and half every hour."""
@@ -317,13 +326,23 @@ class TestConnectorFactor:
     def test_no_factor_below_twenty_weighted_requests(self) -> None:
         r = connector_record()
         change = flush(r, T0, requests=19, blocked=1)
-        assert r.factor is None and change == ConnectorChange(CONNECTOR, None, None)
+        assert r.factor is None and change == ConnectorChange(CONNECTOR, T0, None, None, 19, 1)
 
         change = flush(r, T0, requests=2)
 
         # The 19 count about 18.7 after two more requests: 20.7 weighted, about 0.99 of them blocked.
         assert r.weighted_requests == pytest.approx(19 * 2 ** -0.02 + 2)
-        assert r.factor == 0.95 and change == ConnectorChange(CONNECTOR, None, 0.95)
+        assert r.factor == 0.95 and change == ConnectorChange(CONNECTOR, T0, None, 0.95, 21, 1)
+
+    def test_a_change_carries_the_flushs_time_and_the_records_lifetime_counts(self) -> None:
+        """What the factor moves are kept with: the flush's decision time and the counts once it decided."""
+        r = connector_record()
+        flush(r, T0, requests=30, blocked=3, good=2)
+
+        change = flush(r, at(0.5), requests=10, blocked=1)
+        assert change == ConnectorChange(CONNECTOR, at(0.5), 0.9, 0.9, 40, 4) and not change.moved
+        # A flush with nothing for the record decides nothing, and says so as of its time.
+        assert flush(r, at(3)) == ConnectorChange(CONNECTOR, at(3), 0.9, 0.9, 40, 4)
 
     def test_the_factor_is_one_less_the_block_rate_to_the_nearest_step(self) -> None:
         r = connector_record()
@@ -389,7 +408,7 @@ class TestHysteresis:
         assert r.factor == 0.9 and not change.moved
 
         change = flush(r, T0, blocked=1)
-        assert r.factor == 0.85 and change == ConnectorChange(CONNECTOR, 0.9, 0.85)
+        assert r.factor == 0.85 and change == ConnectorChange(CONNECTOR, T0, 0.9, 0.85, 0, 5)
 
     def test_it_comes_back_a_whole_step_too(self) -> None:
         r = weighed(connector_record(), 100.0, 11.0, 0.85)
@@ -437,7 +456,7 @@ class TestHysteresis:
 
         # 20.3 weighted again, 4.6 of them blocked: decided as a new factor, with no step to clear.
         change = flush(r, at(1), requests=11)
-        assert r.factor == 0.75 and change == ConnectorChange(CONNECTOR, None, 0.75)
+        assert r.factor == 0.75 and change == ConnectorChange(CONNECTOR, at(1), None, 0.75, 31, 10)
 
 
 class TestStrength:
@@ -461,7 +480,7 @@ class TestStrength:
         assert r.factor == 0.87 and not change.moved
 
         change = flush(r, T0, blocked=1, policy=STRENGTH_10)
-        assert r.factor == 0.865 and change == ConnectorChange(CONNECTOR, 0.87, 0.865)
+        assert r.factor == 0.865 and change == ConnectorChange(CONNECTOR, T0, 0.87, 0.865, 0, 5)
 
     def test_a_factor_stored_at_another_strength_is_read_on_the_new_grid(self) -> None:
         # 0.85 from strength 1, the rate 0.87: four steps of 0.005 away.
@@ -509,7 +528,7 @@ class TestBatches:
         recording = ExitIpKey("recording", "203.0.113.7", "google.com")
         changes = ReputationChanges(
             ips=(IpChange(KEY, T0, None, at(1)), IpChange(recording, T0, None, at(1))),
-            connectors=(ConnectorChange(CONNECTOR._replace(project_id="other"), 0.5, 0.5),),
+            connectors=(ConnectorChange(CONNECTOR._replace(project_id="other"), T0, 0.5, 0.5, 0, 0),),
             avoiding=frozenset({"project-1", "other"}),
         )
         assert changes.moved_projects == ["project-1"]

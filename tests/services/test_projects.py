@@ -100,7 +100,8 @@ class TestCreate:
             project.exit_reputation_connector_half_life_requests,
             project.exit_reputation_bad_reports,
             project.exit_reputation_bad_share,
-        ) == (ExitReputationMode.AVOID, 60, 24, 100, 2, 50)
+            project.exit_reputation_retention_days,
+        ) == (ExitReputationMode.AVOID, 60, 24, 100, 2, 50, 30)
 
     async def test_an_unknown_routing_strategy_is_refused(
         self, project_service: ProjectService, sessions: async_sessionmaker[AsyncSession], actor: Actor
@@ -244,6 +245,7 @@ class TestUpdate:
             exit_reputation_bad_share=75,
             exit_reputation_strength=10,
             exit_reputation_floor=5,
+            exit_reputation_retention_days=0,
         )
 
         saved = await project_service.update(project.id, edit, actor)
@@ -257,7 +259,8 @@ class TestUpdate:
             saved.exit_reputation_bad_share,
             saved.exit_reputation_strength,
             saved.exit_reputation_floor,
-        ) == (ExitReputationMode.AVOID, 15, 6, 40, 2, 75, 10, 5)
+            saved.exit_reputation_retention_days,
+        ) == (ExitReputationMode.AVOID, 15, 6, 40, 2, 75, 10, 5, 0)
         assert await stored(sessions, project.id) == saved
         assert await queued_job_keys(redis_client, JobKind.REATTRIBUTE) == []
         *_, entry = await audit_entries(sessions, project.id)
@@ -270,6 +273,7 @@ class TestUpdate:
             "exit_reputation_bad_share": [50, 75],
             "exit_reputation_strength": [1, 10],
             "exit_reputation_floor": [10, 5],
+            "exit_reputation_retention_days": [30, 0],
         }
 
 

@@ -52,6 +52,13 @@ const trimmed = (value: number, digits: number) => value.toFixed(digits).replace
 /** A factor as the views show it: ×0.65, ×1. */
 export const factorText = (factor: number) => `×${trimmed(factor, 2)}`
 
+/** A share blocked (0 to 1) as the views show it: one decimal under 10% ("1.3%", "2%"), whole above ("12%"). */
+const shareText = (share: number) => {
+  // To 9 places first: 1 - 0.9875 is a hair under 0.0125, which would read as 1.2%.
+  const rate = Math.min(100, Math.max(0, Number((share * 100).toFixed(9))))
+  return `${rate < 10 ? trimmed(rate, 1) : Math.round(rate)}%`
+}
+
 /** An effective weight: two decimals under 10 (3 × 0.65 is 1.95), one above. */
 export const weightText = (weight: number) => trimmed(weight, weight >= 10 ? 1 : 2)
 
@@ -138,8 +145,8 @@ export function reputationReason(facts: ReputationFacts, site: string, place: st
         : `too little evidence yet for ${site}${from}`
       return `${evidence}, so its weight is unchanged (${counts} requests reported blocked)`
     }
-    const rate = facts.requests > 0 ? Math.min(100, Math.round((facts.blocked / facts.requests) * 100)) : 100
-    const reported = `${rate}% of its requests to ${site}${from} were reported blocked (${counts})`
+    const rate = shareText(facts.requests > 0 ? facts.blocked / facts.requests : 1)
+    const reported = `${rate} of its requests to ${site}${from} were reported blocked (${counts})`
     return facts.reputation >= 1 ? `${reported}, too few to lower its weight` : reported
   }
   return `no reports about it for ${site}${from}, so its weight is unchanged`
@@ -155,17 +162,15 @@ export interface BlockCounts {
  * A share blocked, one decimal under 10% ("1.3%", "2%"), whole above ("12%"): from ``counts`` when given, so it reads as
  * the counts beside it do, else from an own factor, which is stored to the nearest step.
  */
-const blockedText = (success: number, counts?: BlockCounts) => {
-  const share = counts?.blocked != null && counts.requests ? counts.blocked / counts.requests : 1 - success
-  // To 9 places first: 1 - 0.9875 is a hair under 0.0125, which would read as 1.2%.
-  const rate = Math.max(0, Number((share * 100).toFixed(9)))
-  return `${rate < 10 ? trimmed(rate, 1) : Math.round(rate)}%`
-}
+const blockedText = (success: number, counts?: BlockCounts) =>
+  shareText(counts?.blocked != null && counts.requests ? counts.blocked / counts.requests : 1 - success)
 
 /**
  * How a judged dynamic connector compares with the best one at the place, as sentences: "Blocked 12% here vs 1.3% at
- * B, the best here. At strength 10 that gives ×0.31.", "The best here, blocked 1.3%.", and "Held at the lowest factor,
- * ×0.1." when the comparison would go under it. Empty when not judged, or at strength 1 above the lowest factor.
+ * B, the best here. At strength 10 that gives ×0.31.", "The best here, blocked 1.3%." ("Tied for the best here" when its
+ * stored factor equals the best's, so a lower rate is never named against a higher one on a tie), and "Held at the
+ * lowest factor, ×0.1." when the comparison would go under it. Empty when not judged, or at strength 1 above the lowest
+ * factor.
  * ``countsOf`` gives a connector's counts at the level its factor came from, when the view has them.
  */
 export function strengthNote(
@@ -184,6 +189,8 @@ export function strengthNote(
   const own = blockedText(success, countsOf(connectorId))
   const isBest = facts.best_connector_id == null || facts.best_connector_id === connectorId
   if (isBest) return `The best here, blocked ${own}.${held ? ` ${heldLine}` : ''}`
+  // Factors are stored to the nearest step, so close rates tie; the best is then picked by id, not by rate.
+  if (success >= best) return `Tied for the best here, blocked ${own}.${held ? ` ${heldLine}` : ''}`
   const bestName = rule.nameOf(facts.best_connector_id!) ?? 'another connector'
   const compared = `Blocked ${own} here vs ${blockedText(best, countsOf(facts.best_connector_id!))} at ${bestName}, the best here.`
   return `${compared} ${held ? heldLine : `At strength ${rule.strength} that gives ${factorText(facts.reputation)}.`}`
