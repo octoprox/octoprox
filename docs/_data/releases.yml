@@ -10,6 +10,23 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.9.5
+  date: 2026-11-25
+  title: Exit reputation history and per-project retention
+  changes:
+    - text: "A place on the Reputation tab now has an Over time chart. It shows how each connector at that place did over the last hour, 6 hours, 24 hours, 7 days or 30 days, and marks each change to Strength, Lowest factor or mode."
+      docs: exit-reputation#every-place-for-a-site
+    - text: "For a dynamic connector, the chart shows its own factor and the factor routing applied. For a connector with IPs, it shows the share of its IPs the site was not avoiding. The history starts from the moment you upgrade."
+      docs: exit-reputation#every-place-for-a-site
+    - text: "The API can now return the same history for a site and place over a time range."
+      docs: api
+    - text: "Each project now sets how long its exit reputation data is kept, under Keep data for on its Exit reputation settings tab. The default is 30 days, and 0 keeps the data forever."
+      docs: exit-reputation#settings
+    - text: "Upgrade note: `exit_reputation.retention_days` and `OCTOPROX_EXIT_REPUTATION_RETENTION_DAYS` no longer apply. Every project starts at 30 days, so if you used another value, set Keep data for on each project."
+      docs: configuration#exit-reputation
+    - text: "Backups that include history now also carry the exit reputation history."
+      docs: api
+
 - version: 6.9.4
   date: 2026-11-24
   title: Shareable links to every view and panel
