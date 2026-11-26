@@ -219,6 +219,7 @@ class ProjectRepository:
             exit_reputation_avoid_minutes=project.exit_reputation_avoid_minutes,
             exit_reputation_half_life_hours=project.exit_reputation_half_life_hours,
             exit_reputation_connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
+            exit_reputation_connector_half_life_minutes=project.exit_reputation_connector_half_life_minutes,
             exit_reputation_bad_reports=project.exit_reputation_bad_reports,
             exit_reputation_bad_share=project.exit_reputation_bad_share,
             exit_reputation_strength=project.exit_reputation_strength,
@@ -264,6 +265,7 @@ class ProjectRepository:
             model.exit_reputation_avoid_minutes = project.exit_reputation_avoid_minutes
             model.exit_reputation_half_life_hours = project.exit_reputation_half_life_hours
             model.exit_reputation_connector_half_life_requests = project.exit_reputation_connector_half_life_requests
+            model.exit_reputation_connector_half_life_minutes = project.exit_reputation_connector_half_life_minutes
             model.exit_reputation_bad_reports = project.exit_reputation_bad_reports
             model.exit_reputation_bad_share = project.exit_reputation_bad_share
             model.exit_reputation_strength = project.exit_reputation_strength
@@ -433,6 +435,7 @@ class ProjectRepository:
             exit_reputation_avoid_minutes=model.exit_reputation_avoid_minutes,
             exit_reputation_half_life_hours=model.exit_reputation_half_life_hours,
             exit_reputation_connector_half_life_requests=model.exit_reputation_connector_half_life_requests,
+            exit_reputation_connector_half_life_minutes=model.exit_reputation_connector_half_life_minutes,
             exit_reputation_bad_reports=model.exit_reputation_bad_reports,
             exit_reputation_bad_share=model.exit_reputation_bad_share,
             exit_reputation_strength=model.exit_reputation_strength,

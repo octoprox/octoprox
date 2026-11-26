@@ -202,8 +202,8 @@ class ConnectorTrafficShare(BaseModel):
     )
     blocked: int | None = Field(
         default=None,
-        description="Recent blocked reports behind the reputation (decayed by Connector memory, and by half every "
-        "hour); null without a record",
+        description="Recent blocked reports behind the reputation (decayed by Connector memory, and by Remember for "
+        "since the last count); null without a record",
     )
     requests: int | None = Field(default=None, description="Recent requests behind the reputation, decayed the same way")
     success: float | None = Field(

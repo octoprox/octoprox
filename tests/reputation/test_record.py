@@ -3,8 +3,8 @@
 
 """The decisions records carry: an exit IP's avoid ("Avoid for" doubled per recent avoid, lifted by good reports) and a
 connector's factor (one less its block rate in steps of 0.05 / Strength, moved a whole step at a time), with the examples the design gives at the
-defaults (Avoid for 60 minutes, Remember for 24 hours, Connector memory 100 requests, one fresh bad report avoids, half
-the reports bad)."""
+defaults (Avoid for 60 minutes, Remember for 24 hours, Connector memory 100 requests and 10 minutes, one fresh bad report
+avoids, half the reports bad)."""
 
 from datetime import datetime, timedelta
 
@@ -31,12 +31,32 @@ from api.reputation.record import (
 T0 = datetime(2026, 11, 15, 12, 0, 0)
 KEY = ExitIpKey("project-1", "203.0.113.7", "google.com")
 CONNECTOR = ConnectorSiteKey("project-1", "connector-1", "google.com", "US")
-DEFAULTS = ReputationPolicy.of_settings(60, 24, 100, 1, 50)
-STRENGTH_10 = ReputationPolicy.of_settings(60, 24, 100, 1, 50, 10)
+# A project's default settings.
+SETTINGS = {
+    "avoid_minutes": 60,
+    "half_life_hours": 24,
+    "connector_half_life_requests": 100,
+    "connector_half_life_minutes": 10,
+    "bad_reports": 1,
+    "bad_share": 50,
+}
+
+
+def policy(**changed: int) -> ReputationPolicy:
+    """The policy of the default settings with the ``changed`` ones."""
+    return ReputationPolicy.of_settings(**{**SETTINGS, **changed})
+
+
+DEFAULTS = policy()
+STRENGTH_10 = policy(strength=10)
 
 
 def at(hours: float) -> datetime:
     return T0 + timedelta(hours=hours)
+
+
+def at_minute(minutes: float) -> datetime:
+    return T0 + timedelta(minutes=minutes)
 
 
 def hours_until(end: datetime | None, since: datetime) -> float | None:
@@ -65,10 +85,11 @@ def flush(
     requests: int = 0,
     blocked: int = 0,
     good: int = 0,
+    window: timedelta = timedelta(minutes=1),
     policy: ReputationPolicy = DEFAULTS,
 ) -> ConnectorChange:
-    """A metrics flush's evidence for the record, applied at ``when``."""
-    return r.apply_evidence(requests, blocked, good, when, policy)
+    """A metrics flush's evidence for the record, counted over the ``window`` before ``when`` and applied then."""
+    return r.apply_evidence(requests, blocked, good, when, window, policy)
 
 
 def weighed(r: ConnectorSiteReputation, requests: float, blocked: float, factor: float | None) -> ConnectorSiteReputation:
@@ -154,34 +175,33 @@ class TestAvoid:
         assert hours_until(r.avoid_until, at(0.1)) == 1.0
 
     def test_more_bad_reports_to_avoid_need_that_many_fresh_ones(self) -> None:
-        policy = ReputationPolicy.of_settings(60, 24, 100, 3, 50)
+        three = policy(bad_reports=3)
         r = ip_record()
-        report(r, T0, bad=1, policy=policy)
-        report(r, T0, bad=1, policy=policy)
+        report(r, T0, bad=1, policy=three)
+        report(r, T0, bad=1, policy=three)
         assert r.avoid_until is None
         # The third fresh report passes the threshold of 2.5 and begins the avoid.
-        report(r, T0, bad=1, policy=policy)
+        report(r, T0, bad=1, policy=three)
         assert r.avoid_until is not None
 
     def test_a_report_from_a_little_earlier_still_counts_towards_the_setting(self) -> None:
-        policy = ReputationPolicy.of_settings(60, 24, 100, 2, 50)
+        two = policy(bad_reports=2)
         r = ip_record()
-        report(r, T0, bad=1, policy=policy)
+        report(r, T0, bad=1, policy=two)
         assert r.avoid_until is None
         # An hour later the first weighs about 0.97: with the second, past 1.5.
-        report(r, at(1), bad=1, policy=policy)
+        report(r, at(1), bad=1, policy=two)
         assert r.avoid_until is not None
 
     def test_an_avoid_lasts_at_most_seven_days(self) -> None:
         r = ip_record()
         r.weighted_avoids = 30.0
-        report(r, T0, bad=1, policy=ReputationPolicy.of_settings(10_080, 24, 100, 1, 50))
+        report(r, T0, bad=1, policy=policy(avoid_minutes=10_080))
         assert r.avoid_until == T0 + AVOID_CEILING
-        assert ReputationPolicy.of_settings(1, 24, 100, 1, 50).avoid_length(1e9) == AVOID_CEILING
+        assert policy(avoid_minutes=1).avoid_length(1e9) == AVOID_CEILING
 
     def test_avoid_for_doubles_per_recent_avoid_rounded(self) -> None:
-        policy = ReputationPolicy.of_settings(60, 24, 100, 1, 50)
-        assert [policy.avoid_length(n) for n in (0, 0.4, 0.6, 1, 2.49, 3)] == [
+        assert [DEFAULTS.avoid_length(n) for n in (0, 0.4, 0.6, 1, 2.49, 3)] == [
             timedelta(hours=hours) for hours in (1, 1, 2, 2, 4, 8)
         ]
 
@@ -249,77 +269,138 @@ class TestIpBookkeeping:
 
 
 class TestConnectorMemory:
-    """A connector record's evidence counts half after "Connector memory" more requests, and half every hour."""
+    """A connector record's evidence counts half after "Connector memory" in minutes or in requests, whichever is
+    longer, and never later than "Remember for"."""
 
-    def test_evidence_counts_half_after_that_many_more_requests(self) -> None:
+    def test_a_quiet_record_counts_half_after_that_many_more_requests(self) -> None:
+        """A hundred requests over half an hour: they take longer than the ten minutes."""
         r = connector_record()
         flush(r, T0, requests=100, blocked=40)
         assert (r.weighted_requests, r.weighted_blocked, r.factor) == (100.0, 40.0, 0.6)
 
-        flush(r, T0, requests=100)
+        flush(r, at(0.5), requests=100, window=timedelta(minutes=30))
 
         assert (r.weighted_requests, r.weighted_blocked) == (pytest.approx(150.0), pytest.approx(20.0))
         assert r.factor == 0.85
 
-    def test_and_half_every_hour_with_no_request(self) -> None:
+    def test_a_busy_record_counts_half_after_that_many_minutes(self) -> None:
+        """A thousand requests in ten minutes: ten times the hundred, half all the same."""
         r = connector_record()
         flush(r, T0, requests=100, blocked=40)
 
-        flush(r, at(1), blocked=1)
+        flush(r, at_minute(10), requests=1000, window=timedelta(minutes=10))
+
+        assert (r.weighted_requests, r.weighted_blocked) == (pytest.approx(1050.0), pytest.approx(20.0))
+
+    def test_a_flush_a_minute_fades_a_quiet_record_by_requests_and_a_busy_one_by_minutes(self) -> None:
+        """A flush a minute: one request each fades by its requests, a thousand each by their minute."""
+        quiet, busy = connector_record(), connector_record()
+        flush(quiet, T0, requests=100, blocked=40)
+        flush(busy, T0, requests=1000, blocked=400)
+
+        for flushed in range(1, 101):
+            flush(quiet, at_minute(flushed), requests=1)
+        for flushed in range(1, 11):
+            flush(busy, at_minute(flushed), requests=1000)
+
+        assert (quiet.weighted_blocked, busy.weighted_blocked) == (pytest.approx(20.0), pytest.approx(200.0))
+
+    def test_a_quiet_gap_before_a_burst_counts_no_minutes_however_full_its_first_flush(self) -> None:
+        """Half an hour without requests, then a flush of 7,000 or of 70: each is one minute of traffic, a tenth of
+        the ten minutes, and the gap fades by "Remember for" alone, which a tenth outweighs."""
+        full, sparse = connector_record(), connector_record()
+        for r in (full, sparse):
+            flush(r, T0, requests=1000, blocked=400)
+
+        flush(full, at_minute(31), requests=7000)
+        flush(sparse, at_minute(31), requests=70)
+
+        assert full.weighted_blocked == sparse.weighted_blocked == pytest.approx(400 * 2**-0.1)
+
+    def test_a_stretch_with_no_requests_fades_by_remember_for_alone(self) -> None:
+        r = connector_record()
+        flush(r, T0, requests=100, blocked=40)
+
+        flush(r, at(24), blocked=1)
 
         assert (r.weighted_requests, r.weighted_blocked) == (pytest.approx(50.0), pytest.approx(21.0))
-        assert r.weighted_at == at(1)
+        assert r.weighted_at == at(24)
 
-    def test_requests_and_hours_add_up(self) -> None:
+    def test_the_designs_places_busy_quiet_and_sparse(self) -> None:
+        """The design's places at 10 minutes, 1,000 requests and a day of Remember for."""
+        places = policy(connector_half_life_requests=1000)
+        # The UK at 7,000 requests a minute: half after 10 minutes, some 70,000 requests.
+        assert places.connector_decay(600, 70_000, 600) == pytest.approx(0.5)
+        # Lithuania at 1.4 a minute: half after its thousand requests, about 12 hours.
+        assert places.connector_decay(1000 / 1.4 * 60, 1000, 1000 / 1.4 * 60) == pytest.approx(0.5)
+        # 50 requests a day: half after the day, though its thousand requests take 20 days.
+        assert places.connector_decay(24 * 3600, 50, 24 * 3600) == pytest.approx(0.5)
+
+    def test_remember_for_wins_over_longer_minutes(self) -> None:
+        """At a day of minutes and an hour of Remember for, an hour halves a busy record."""
+        hour = policy(connector_half_life_minutes=1440, half_life_hours=1)
         r = connector_record()
-        flush(r, T0, requests=100, blocked=40)
+        flush(r, T0, requests=100, blocked=40, policy=hour)
 
-        flush(r, at(2), requests=100)
+        flush(r, at(1), requests=10_000, policy=hour)
 
-        # Half for the hundred requests, and a quarter for the two hours.
-        assert (r.weighted_requests, r.weighted_blocked) == (pytest.approx(112.5), pytest.approx(5.0))
+        assert (r.weighted_requests, r.weighted_blocked) == (pytest.approx(10_050.0), pytest.approx(20.0))
 
     def test_the_memory_is_the_projects(self) -> None:
         r = connector_record()
         flush(r, T0, requests=40, blocked=40)
 
-        flush(r, T0, requests=20, policy=ReputationPolicy.of_settings(60, 24, 20, 1, 50))
+        flush(r, at(1), requests=20, window=timedelta(hours=1), policy=policy(connector_half_life_requests=20))
 
         assert (r.weighted_requests, r.weighted_blocked) == (pytest.approx(40.0), pytest.approx(20.0))
 
-    def test_a_flush_dated_before_the_clock_decays_by_its_requests_alone(self) -> None:
+        flush(r, at(1.5), requests=1000, window=timedelta(minutes=30), policy=policy(connector_half_life_minutes=60))
+
+        assert r.weighted_blocked == pytest.approx(20.0 * 2**-0.5)
+
+    def test_a_flush_dated_before_the_clock_fades_nothing(self) -> None:
+        """No time has passed for it, so the minutes have not, whatever its requests."""
         r = connector_record()
         flush(r, at(1), requests=100, blocked=40)
 
         flush(r, T0, requests=100)
 
-        assert (r.weighted_requests, r.weighted_blocked, r.weighted_at) == (pytest.approx(150.0), 20.0, at(1))
+        assert (r.weighted_requests, r.weighted_blocked, r.weighted_at) == (200.0, 40.0, at(1))
 
-    def test_between_flushes_only_the_hours_decay_it_whatever_remember_for_says(self) -> None:
-        """What the views show of a record a minute after its flush: its weights as that flush left them, an hour halving
-        them."""
+    def test_between_flushes_only_remember_for_decays_it(self) -> None:
+        """What the views show of a record a minute after its flush: its weights as that flush left them, "Remember for"
+        halving them, whatever "Connector memory" says."""
         r = connector_record()
         flush(r, T0, requests=80, blocked=20)
-        week = ReputationPolicy.of_settings(60, 168, 100, 1, 50)
+        week = policy(half_life_hours=168)
 
-        assert r.decay_factor(at(1), DEFAULTS) == r.decay_factor(at(1), week) == 0.5
+        assert r.decay_factor(at(24), DEFAULTS) == r.decay_factor(at(168), week) == 0.5
+        assert r.decay_factor(at(24), policy(connector_half_life_minutes=1, connector_half_life_requests=20)) == 0.5
+        assert r.decay_factor(at(1), DEFAULTS) == pytest.approx(2 ** (-1 / 24))
         assert r.decay_factor(at(-1), DEFAULTS) == 1.0
-        # An exit IP's record decays by Remember for.
+        # An exit IP's record decays by Remember for too.
         assert ip_record().decay_factor(at(24), DEFAULTS) == 0.5
 
-    def test_a_busy_connector_a_site_starts_blocking_falls_within_minutes(self) -> None:
-        """A hundred requests a minute, a tenth of them blocked, then every one."""
-        r = connector_record()
-        for minute in range(120):
-            flush(r, at(minute / 60), requests=100, blocked=10)
-        assert r.factor == 0.9
+    def test_a_busy_connector_a_site_starts_blocking_falls_over_its_minutes(self) -> None:
+        """A hundred requests a minute, a tenth of them blocked, then every one: a step a minute, and half the way down
+        after the ten minutes. Remembering its hundred requests alone, it fell in three."""
+        r, brief = connector_record(), connector_record()
+        one_minute = policy(connector_half_life_minutes=1)
+        for flushed in range(120):
+            flush(r, at_minute(flushed), requests=100, blocked=10)
+            flush(brief, at_minute(flushed), requests=100, blocked=10, policy=one_minute)
+        assert r.factor == brief.factor == 0.9
 
-        factors = []
-        for minute in range(120, 123):
-            flush(r, at(minute / 60), requests=100, blocked=100)
+        factors, brief_factors = [], []
+        for flushed in range(120, 130):
+            flush(r, at_minute(flushed), requests=100, blocked=100)
+            flush(brief, at_minute(flushed), requests=100, blocked=100, policy=one_minute)
             factors.append(r.factor)
+            brief_factors.append(brief.factor)
 
-        assert factors == [0.45, 0.2, 0.1]
+        assert factors[:3] == [0.85, 0.8, 0.75]
+        assert r.block_rate == pytest.approx(0.55, abs=0.001) and r.factor == 0.45
+        assert brief_factors[:3] == [0.45, 0.2, 0.1]
 
 
 class TestConnectorFactor:
@@ -330,8 +411,8 @@ class TestConnectorFactor:
 
         change = flush(r, T0, requests=2)
 
-        # The 19 count about 18.7 after two more requests: 20.7 weighted, about 0.99 of them blocked.
-        assert r.weighted_requests == pytest.approx(19 * 2 ** -0.02 + 2)
+        # The 19 count in full in the same moment: 21 weighted, one of them blocked.
+        assert r.weighted_requests == 21.0
         assert r.factor == 0.95 and change == ConnectorChange(CONNECTOR, T0, None, 0.95, 21, 1)
 
     def test_a_change_carries_the_flushs_time_and_the_records_lifetime_counts(self) -> None:
@@ -369,11 +450,11 @@ class TestConnectorFactor:
         assert (r.good_reports, r.blocked_reports, r.factor, change.moved) == (7, 10, 0.75, False)
         assert (r.weighted_requests, r.weighted_blocked) == (40.0, 10.0)
 
-    def test_the_hourly_decay_keeps_the_rate(self) -> None:
+    def test_the_decay_between_flushes_keeps_the_rate(self) -> None:
         """Both weights halve together, so the factor a record keeps between flushes is the one its evidence made."""
         r = connector_record()
         flush(r, T0, requests=200, blocked=40)
-        r.decay(at(2), DEFAULTS)
+        r.decay(at(48), DEFAULTS)
         assert (r.weighted_requests, r.weighted_blocked) == (pytest.approx(50.0), pytest.approx(10.0))
         assert r.block_rate == pytest.approx(0.2) and r.factor == 0.8
 
@@ -451,12 +532,12 @@ class TestHysteresis:
         flush(r, T0, requests=20, blocked=10)
         assert r.factor == 0.5
 
-        flush(r, at(1), good=1)
+        flush(r, at(24), good=1)
         assert r.weighted_requests == pytest.approx(10.0) and r.factor is None
 
-        # 20.3 weighted again, 4.6 of them blocked: decided as a new factor, with no step to clear.
-        change = flush(r, at(1), requests=11)
-        assert r.factor == 0.75 and change == ConnectorChange(CONNECTOR, at(1), None, 0.75, 31, 10)
+        # 21 weighted again, 5 of them blocked: decided as a new factor, with no step to clear.
+        change = flush(r, at(24), requests=11)
+        assert r.factor == 0.75 and change == ConnectorChange(CONNECTOR, at(24), None, 0.75, 31, 10)
 
 
 class TestStrength:
@@ -543,10 +624,17 @@ class TestBatches:
             exit_reputation_avoid_minutes=30,
             exit_reputation_half_life_hours=12,
             exit_reputation_connector_half_life_requests=50,
+            exit_reputation_connector_half_life_minutes=30,
             exit_reputation_bad_reports=3,
             exit_reputation_bad_share=25,
             exit_reputation_strength=10,
         )
         assert ReputationPolicy.of(project) == ReputationPolicy(
-            half_life=12 * 3600.0, connector_half_life=50.0, threshold=2.5, bad_share=0.25, avoid_base=1800.0, strength=10
+            half_life=12 * 3600.0,
+            connector_half_life=50.0,
+            connector_half_life_time=1800.0,
+            threshold=2.5,
+            bad_share=0.25,
+            avoid_base=1800.0,
+            strength=10,
         )

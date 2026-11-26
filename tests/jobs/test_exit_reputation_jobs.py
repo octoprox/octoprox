@@ -57,7 +57,7 @@ COMPACTION = delivery("1760000000000-0")
 
 @pytest.fixture
 def flush(sessions: async_sessionmaker[AsyncSession], redis_client: RedisClient) -> MetricsFlushJob:
-    return MetricsFlushJob(sessions, redis_client)
+    return MetricsFlushJob(sessions, redis_client, timedelta(minutes=1))
 
 
 @pytest.fixture
@@ -91,7 +91,7 @@ async def flushed(
 ) -> None:
     """Evidence applied to the connector records as an earlier flush applied it, at ``at``, committed."""
     async with sessions() as session:
-        await ExitReputationRepository(session).apply_evidence(evidence, (), at)
+        await ExitReputationRepository(session).apply_evidence(evidence, (), at, timedelta(minutes=1))
         await session.commit()
 
 
@@ -127,9 +127,10 @@ class Weighed:
             evidence: Mapping[ConnectorSiteKey, RequestCount],
             dynamic: Collection[str],
             now: datetime,
+            window: timedelta,
         ) -> ReputationChanges:
             self.keys.append(set(evidence))
-            return await apply_evidence(repository, evidence, dynamic, now)
+            return await apply_evidence(repository, evidence, dynamic, now, window)
 
         monkeypatch.setattr(ProxyRepository, "dynamic_connectors", asking)
         monkeypatch.setattr(ExitReputationRepository, "apply_evidence", weighing)
@@ -483,7 +484,7 @@ async def moved(sessions: async_sessionmaker[AsyncSession], *keys: ConnectorSite
     """A move of each of ``keys``' dynamic factors kept now, as a flush keeps them."""
     async with sessions() as session:
         await ExitReputationRepository(session).apply_evidence(
-            {k: RequestCount(20, blocked=10) for k in keys}, {k.connector_id for k in keys}, utc_now()
+            {k: RequestCount(20, blocked=10) for k in keys}, {k.connector_id for k in keys}, utc_now(), timedelta(minutes=1)
         )
         await session.commit()
 

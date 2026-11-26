@@ -415,7 +415,10 @@ class TestOnTheDatabase:
         records = ExitReputationRepository(db_session)
         await records.apply_reports({ip_key: ReportCounts(bad=2, reason="captcha")}, datetime(2026, 11, 14, 12))
         await records.apply_evidence(
-            {connector_key: RequestCount(requests=50, blocked=2)}, [connector.id], datetime(2026, 11, 14, 12)
+            {connector_key: RequestCount(requests=50, blocked=2)},
+            [connector.id],
+            datetime(2026, 11, 14, 12),
+            timedelta(minutes=1),
         )
         await db_session.commit()
         moves = await records.factor_moves(project.id, "google.com", ["US"], [connector.id], datetime(2026, 11, 14))

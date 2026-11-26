@@ -212,7 +212,7 @@ async def openvpn_device(sessions: async_sessionmaker[AsyncSession], project: Pr
 
 @pytest.fixture
 def flush(sessions: async_sessionmaker[AsyncSession], redis_client: RedisClient) -> MetricsFlushJob:
-    return MetricsFlushJob(sessions, redis_client)
+    return MetricsFlushJob(sessions, redis_client, timedelta(minutes=1))
 
 
 @pytest.fixture
@@ -631,7 +631,7 @@ class TestGiveUp:
         held = await staged(redis_client, FIRST)
 
         with pytest.raises(ConnectionRefusedError):
-            await MetricsFlushJob(unreachable, redis_client).give_up(delivery(FIRST))
+            await MetricsFlushJob(unreachable, redis_client, timedelta(minutes=1)).give_up(delivery(FIRST))
 
         assert held and await staged(redis_client, FIRST) == held
         assert (await live(redis_client)).empty

@@ -7,10 +7,11 @@
 * :class:`ConnectorSiteReputation`: one connector on one site and requested place, and the factor its routing weight is
   multiplied by there.
 
-An exit IP record's weights decay with the project's "Remember for" half-life, a connector record's with its requests
-("Connector memory") and at least half every hour, each on one clock per record. A decision is stored and moves only
-with new evidence: an avoid's end is a time, and a factor, decided once a minute by the metrics flush, moves only once
-its block rate is a whole step from it (see docs/exit-reputation.md).
+An exit IP record's weights decay with the project's "Remember for" half-life. A connector record's evidence counts half
+after "Connector memory" in minutes of traffic or in requests, whichever is longer, and never later than "Remember
+for". Each record keeps one clock. A decision is stored and moves only with new evidence: an avoid's end is a time, and a factor,
+decided once a minute by the metrics flush, moves only once its block rate is a whole step from it (see
+docs/exit-reputation.md).
 """
 
 from __future__ import annotations
@@ -45,9 +46,6 @@ _STEP_TOLERANCE = 1e-9
 # How far after the record's last batch an avoid move of a batch stamped earlier is put: two ingest workers can apply
 # their batches in the other order than they took their times, and the history reads an IP's moves by time.
 _AFTER = timedelta(microseconds=1)
-# The time floor of a connector record's memory: its evidence counts half every hour besides every "Connector memory"
-# requests, so a quiet record's block rate stays recent.
-CONNECTOR_HALF_LIFE_TIME = timedelta(hours=1)
 # The longest requested place a record is kept at: a country, a state and a city slug with their separators.
 MAX_PLACE_LENGTH = 128
 
@@ -61,13 +59,15 @@ class ReputationStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ReputationPolicy:
-    """How a project weighs evidence: an exit IP record's half-life in seconds ("Remember for"), a connector record's in
-    requests ("Connector memory"), the bad weight past which an exit is avoided (the project's bad reports to avoid,
-    less half a report), the least share of a site's reports that must be bad (0 to 1), a first avoid's length in
-    seconds ("Avoid for"), and the strength connectors are compared at, which sets how finely a factor is stored."""
+    """How a project weighs evidence: an exit IP record's half-life in seconds ("Remember for"), also the longest a
+    connector record's is, a connector record's in requests and in seconds ("Connector memory"), the bad weight past
+    which an exit is avoided (the project's bad reports to avoid, less half a report), the least share of a site's
+    reports that must be bad (0 to 1), a first avoid's length in seconds ("Avoid for"), and the strength connectors are
+    compared at, which sets how finely a factor is stored."""
 
     half_life: float
     connector_half_life: float
+    connector_half_life_time: float
     threshold: float
     bad_share: float
     avoid_base: float
@@ -77,29 +77,33 @@ class ReputationPolicy:
     def of(cls, project: Project) -> ReputationPolicy:
         """The policy of ``project``'s exit reputation settings."""
         return cls.of_settings(
-            project.exit_reputation_avoid_minutes,
-            project.exit_reputation_half_life_hours,
-            project.exit_reputation_connector_half_life_requests,
-            project.exit_reputation_bad_reports,
-            project.exit_reputation_bad_share,
-            project.exit_reputation_strength,
+            avoid_minutes=project.exit_reputation_avoid_minutes,
+            half_life_hours=project.exit_reputation_half_life_hours,
+            connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
+            connector_half_life_minutes=project.exit_reputation_connector_half_life_minutes,
+            bad_reports=project.exit_reputation_bad_reports,
+            bad_share=project.exit_reputation_bad_share,
+            strength=project.exit_reputation_strength,
         )
 
     @classmethod
     def of_settings(
         cls,
+        *,
         avoid_minutes: int,
         half_life_hours: int,
         connector_half_life_requests: int,
+        connector_half_life_minutes: int,
         bad_reports: int,
         bad_share: int,
         strength: int = 1,
     ) -> ReputationPolicy:
-        """The policy of the settings as a project stores them: minutes, hours, requests, fresh bad reports, a
-        percentage and a strength."""
+        """The policy of the settings as a project stores them: minutes, hours, requests and minutes, fresh bad
+        reports, a percentage and a strength."""
         return cls(
             half_life=half_life_hours * 3600.0,
             connector_half_life=float(connector_half_life_requests),
+            connector_half_life_time=connector_half_life_minutes * 60.0,
             # N fresh reports pass N - 0.5; the half a report of slack lets one that arrived a little earlier still count.
             threshold=bad_reports - 0.5,
             bad_share=bad_share / 100,
@@ -118,6 +122,15 @@ class ReputationPolicy:
         # Past 2**32 any base is longer than the ceiling; the cap keeps the power finite.
         doublings = min(max(round(avoids), 0), 32)
         return timedelta(seconds=min(self.avoid_base * 2.0**doublings, AVOID_CEILING.total_seconds()))
+
+    def connector_decay(self, elapsed: float, requests: int, window: float) -> float:
+        """What a connector record's weights are worth ``elapsed`` seconds and ``requests`` more requests on, the
+        requests counted over the last ``window`` seconds: half per "Connector memory" in minutes of traffic or in
+        requests, whichever is longer, and at least half per "Remember for"."""
+        # Only the window is traffic: a quiet stretch before it brought no requests, so it fades by "Remember for" alone.
+        traffic = min(elapsed, window)
+        halvings = min(traffic / self.connector_half_life_time, requests / self.connector_half_life)
+        return math.exp2(-max(halvings, elapsed / self.half_life))
 
 
 def place_levels(place: str) -> tuple[str, ...]:
@@ -253,9 +266,9 @@ class ReputationRecord(ABC):
     def key(self) -> tuple[str, ...]:
         """What the record is kept for."""
 
-    @abstractmethod
     def decay_factor(self, now: datetime, policy: ReputationPolicy) -> float:
-        """What the weights are worth at ``now`` with no new evidence: never more than they were."""
+        """What the weights are worth at ``now`` with no new evidence: half per "Remember for" since the clock."""
+        return math.exp2(-self._elapsed(now) / policy.half_life)
 
     def decay(self, now: datetime, policy: ReputationPolicy) -> None:
         """Bring the weights up to ``now``; a ``now`` before the last decay leaves them, and the clock, as they are."""
@@ -328,10 +341,6 @@ class ExitIpReputation(ReputationRecord):
     def status(self, now: datetime) -> ReputationStatus:
         """Where the record stands as of ``now``."""
         return ReputationStatus.AVOIDED if self.avoided_until(now) is not None else ReputationStatus.NONE
-
-    def decay_factor(self, now: datetime, policy: ReputationPolicy) -> float:
-        """Half per "Remember for" since the clock."""
-        return math.exp2(-self._elapsed(now) / policy.half_life)
 
     def _scale(self, factor: float) -> None:
         self.weighted_good *= factor
@@ -417,29 +426,25 @@ class ConnectorSiteReputation(ReputationRecord):
         """Recent blocked reports per recent request; None before any request."""
         return self.weighted_blocked / self.weighted_requests if self.weighted_requests > 0 else None
 
-    def decay_factor(self, now: datetime, policy: ReputationPolicy) -> float:
-        """Half per hour since the clock (``CONNECTOR_HALF_LIFE_TIME``): between flushes no request fades the weights,
-        and "Remember for" never does."""
-        return math.exp2(-self._elapsed(now) / CONNECTOR_HALF_LIFE_TIME.total_seconds())
-
     def _scale(self, factor: float) -> None:
         self.weighted_blocked *= factor
         self.weighted_requests *= factor
 
     def apply_evidence(
-        self, requests: int, blocked: int, good: int, now: datetime, policy: ReputationPolicy
+        self, requests: int, blocked: int, good: int, now: datetime, window: timedelta, policy: ReputationPolicy
     ) -> ConnectorChange:
-        """Add a flush's requests and blocked and good reports as of ``now``, and decide the factor once; what that did
-        to it.
+        """Add a flush's requests and blocked and good reports, counted over the ``window`` before ``now``, and decide
+        the factor once; what that did to it.
 
-        The weights decay first, half per "Connector memory" of the requests added and half per hour since the clock.
-        Blocked reports weigh against the requests; good ones are counted for the record's life only.
+        The weights decay first, half per "Connector memory" in minutes of traffic or in the requests added, whichever
+        is longer, and at least half per "Remember for" since the clock. Blocked reports weigh against the requests;
+        good ones are counted for the record's life only.
         """
         before = self.factor
         requests, blocked, good = max(requests, 0), max(blocked, 0), max(good, 0)
         if not (requests or blocked or good):
             return self._change(now, before)
-        self._decay_by(self.decay_factor(now, policy) * math.exp2(-requests / policy.connector_half_life), now)
+        self._decay_by(policy.connector_decay(self._elapsed(now), requests, window.total_seconds()), now)
         self.weighted_blocked += blocked
         self.weighted_requests += requests
         self.blocked_reports = min(self.blocked_reports + blocked, MAX_COUNT)

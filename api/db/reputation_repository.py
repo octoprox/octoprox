@@ -208,10 +208,15 @@ class ExitReputationRepository:
         return set(result.scalars().all())
 
     async def apply_evidence(
-        self, evidence: Mapping[ConnectorSiteKey, RequestCount], dynamic: Collection[str], now: datetime
+        self,
+        evidence: Mapping[ConnectorSiteKey, RequestCount],
+        dynamic: Collection[str],
+        now: datetime,
+        window: timedelta,
     ) -> ReputationChanges:
-        """Apply a metrics flush's requests and reports to the connector records as of ``now``, each record decided once;
-        what it did to the factors of the ``dynamic`` connectors, the only ones routing weighs by a factor.
+        """Apply a metrics flush's requests and reports, counted over the ``window`` before ``now``, to the connector
+        records, each record decided once; what it did to the factors of the ``dynamic`` connectors, the only ones
+        routing weighs by a factor.
 
         A key with reports makes its record or locks the stored one; a key with requests alone locks the record only
         when one is stored, since requests never make one. A record of a project that is gone or records nothing, or of
@@ -242,6 +247,7 @@ class ExitReputationRepository:
                 counted[record.key].blocked,
                 counted[record.key].good,
                 now,
+                window,
                 settings[record.project_id].policy,
             ),
             now,
@@ -396,6 +402,7 @@ class ExitReputationRepository:
                 p.exit_reputation_avoid_minutes,
                 p.exit_reputation_half_life_hours,
                 p.exit_reputation_connector_half_life_requests,
+                p.exit_reputation_connector_half_life_minutes,
                 p.exit_reputation_bad_reports,
                 p.exit_reputation_bad_share,
                 p.exit_reputation_strength,
@@ -408,12 +415,13 @@ class ExitReputationRepository:
             mode = ExitReputationMode(row.exit_reputation or "off")
             if mode.records:
                 policy = ReputationPolicy.of_settings(
-                    row.exit_reputation_avoid_minutes,
-                    row.exit_reputation_half_life_hours,
-                    row.exit_reputation_connector_half_life_requests,
-                    row.exit_reputation_bad_reports,
-                    row.exit_reputation_bad_share,
-                    row.exit_reputation_strength,
+                    avoid_minutes=row.exit_reputation_avoid_minutes,
+                    half_life_hours=row.exit_reputation_half_life_hours,
+                    connector_half_life_requests=row.exit_reputation_connector_half_life_requests,
+                    connector_half_life_minutes=row.exit_reputation_connector_half_life_minutes,
+                    bad_reports=row.exit_reputation_bad_reports,
+                    bad_share=row.exit_reputation_bad_share,
+                    strength=row.exit_reputation_strength,
                 )
                 settings[row.id] = _Settings(policy, mode.avoids)
         return settings

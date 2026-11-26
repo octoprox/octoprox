@@ -213,9 +213,11 @@ export interface Project {
   exit_reputation: ExitReputationMode
   /** How long a first avoid lasts, in minutes (1 to 10080); each repeat avoid doubles it, up to 7 days. */
   exit_reputation_avoid_minutes: number
-  /** "Remember for": hours an exit IP's reports and avoids take to count half (1 to 168). */
+  /** "Remember for": hours an exit IP's reports and avoids take to count half (1 to 168), and the most a dynamic connector's evidence takes. */
   exit_reputation_half_life_hours: number
-  /** "Connector memory": requests a dynamic connector's evidence for a site and place takes to count half, an hour at most (20 to 10000). */
+  /** "Connector memory (minutes)": a dynamic connector's evidence for a site and place counts half after these minutes or the requests, whichever is longer (1 to 1440). */
+  exit_reputation_connector_half_life_minutes: number
+  /** "Connector memory (requests)": the requests that evidence waits for at a quiet place (20 to 10000). */
   exit_reputation_connector_half_life_requests: number
   /** Fresh bad reports that avoid an exit for a site (1 to 10). */
   exit_reputation_bad_reports: number
@@ -299,6 +301,7 @@ export interface ProjectCreate {
   exit_reputation?: ExitReputationMode
   exit_reputation_avoid_minutes?: number
   exit_reputation_half_life_hours?: number
+  exit_reputation_connector_half_life_minutes?: number
   exit_reputation_connector_half_life_requests?: number
   exit_reputation_bad_reports?: number
   exit_reputation_bad_share?: number
@@ -334,6 +337,7 @@ export interface ProjectUpdate {
   exit_reputation?: ExitReputationMode
   exit_reputation_avoid_minutes?: number
   exit_reputation_half_life_hours?: number
+  exit_reputation_connector_half_life_minutes?: number
   exit_reputation_connector_half_life_requests?: number
   exit_reputation_bad_reports?: number
   exit_reputation_bad_share?: number

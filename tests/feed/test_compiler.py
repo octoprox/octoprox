@@ -869,7 +869,7 @@ async def blocked(harness: Harness, key: ConnectorSiteKey, at: datetime, *, repo
     the place as the metrics flush applies them, at ``at``."""
     async with harness.session_factory() as session:
         evidence = dict.fromkeys(key.levels(), RequestCount(requests=requests, blocked=reports))
-        await ExitReputationRepository(session).apply_evidence(evidence, [key.connector_id], at)
+        await ExitReputationRepository(session).apply_evidence(evidence, [key.connector_id], at, timedelta(minutes=1))
         await session.commit()
 
 

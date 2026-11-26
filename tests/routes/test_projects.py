@@ -194,13 +194,14 @@ class TestProjectEndpoints:
             "exit_reputation_avoid_minutes",
             "exit_reputation_half_life_hours",
             "exit_reputation_connector_half_life_requests",
+            "exit_reputation_connector_half_life_minutes",
             "exit_reputation_bad_reports",
             "exit_reputation_bad_share",
             "exit_reputation_strength",
             "exit_reputation_floor",
             "exit_reputation_retention_days",
         )
-        assert tuple(created_project[field] for field in fields) == ("off", 60, 24, 100, 1, 50, 1, 10, 30)
+        assert tuple(created_project[field] for field in fields) == ("off", 60, 24, 100, 10, 1, 50, 1, 10, 30)
 
         edited = authenticated_client.patch(
             url,
@@ -209,6 +210,7 @@ class TestProjectEndpoints:
                 "exit_reputation_avoid_minutes": 30,
                 "exit_reputation_half_life_hours": 12,
                 "exit_reputation_connector_half_life_requests": 500,
+                "exit_reputation_connector_half_life_minutes": 45,
                 "exit_reputation_bad_reports": 3,
                 "exit_reputation_bad_share": 25,
                 "exit_reputation_strength": 10,
@@ -217,16 +219,16 @@ class TestProjectEndpoints:
             },
         )
         assert edited.status_code == 200
-        assert tuple(edited.json()[field] for field in fields) == ("record", 30, 12, 500, 3, 25, 10, 5, 90)
+        assert tuple(edited.json()[field] for field in fields) == ("record", 30, 12, 500, 45, 3, 25, 10, 5, 90)
         # An edit that leaves them out keeps them, and the list carries them: the project page edits from it.
         kept = authenticated_client.patch(url, json={"description": "kept", "exit_reputation": "avoid"})
-        assert tuple(kept.json()[field] for field in fields) == ("avoid", 30, 12, 500, 3, 25, 10, 5, 90)
+        assert tuple(kept.json()[field] for field in fields) == ("avoid", 30, 12, 500, 45, 3, 25, 10, 5, 90)
         listed = {p["id"]: p for p in authenticated_client.get("/api/v1/projects").json()["projects"]}
         assert tuple(listed[created_project["id"]][field] for field in fields) == (
-            "avoid", 30, 12, 500, 3, 25, 10, 5, 90
+            "avoid", 30, 12, 500, 45, 3, 25, 10, 5, 90
         )
         assert tuple(authenticated_client.get(url).json()[field] for field in fields) == (
-            "avoid", 30, 12, 500, 3, 25, 10, 5, 90
+            "avoid", 30, 12, 500, 45, 3, 25, 10, 5, 90
         )
 
     @pytest.mark.parametrize(
@@ -236,6 +238,8 @@ class TestProjectEndpoints:
             ("exit_reputation_half_life_hours", (0, 169), (1, 168)),
             # Below 20 a busy connector's weighted requests would never reach the 20 a factor needs.
             ("exit_reputation_connector_half_life_requests", (19, 10_001), (20, 10_000)),
+            # Minutes up to a day; "Remember for" caps the memory as well.
+            ("exit_reputation_connector_half_life_minutes", (0, 1441), (1, 1440)),
             ("exit_reputation_bad_reports", (0, 11), (1, 10)),
             ("exit_reputation_bad_share", (0, 100), (1, 99)),
             ("exit_reputation_strength", (0, 21), (1, 20)),
@@ -275,6 +279,7 @@ class TestProjectEndpoints:
                 "exit_reputation": "record",
                 "exit_reputation_half_life_hours": 48,
                 "exit_reputation_connector_half_life_requests": 250,
+                "exit_reputation_connector_half_life_minutes": 60,
                 "exit_reputation_strength": 5,
                 "exit_reputation_floor": 20,
                 "exit_reputation_retention_days": 0,
@@ -286,14 +291,16 @@ class TestProjectEndpoints:
             body["exit_reputation"],
             body["exit_reputation_half_life_hours"],
             body["exit_reputation_connector_half_life_requests"],
+            body["exit_reputation_connector_half_life_minutes"],
             body["exit_reputation_strength"],
             body["exit_reputation_floor"],
             body["exit_reputation_retention_days"],
-        ) == ("record", 48, 250, 5, 20, 0)
+        ) == ("record", 48, 250, 60, 5, 20, 0)
 
         for refused_field in (
             {"exit_reputation_bad_share": 0},
             {"exit_reputation_connector_half_life_requests": 10},
+            {"exit_reputation_connector_half_life_minutes": 0},
             {"exit_reputation_strength": 21},
             {"exit_reputation_floor": 0},
             {"exit_reputation_retention_days": 366},

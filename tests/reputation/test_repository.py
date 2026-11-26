@@ -37,6 +37,8 @@ from api.reputation.record import (
 from tests.reputation.world import make_connector, make_project
 
 T0 = datetime(2026, 11, 15, 12, 0, 0)
+# A metrics flush's window, the default flush interval.
+FLUSH = timedelta(minutes=1)
 BAD = ReportCounts(bad=1)
 GOOD = ReportCounts(good=1)
 # A flush's one blocked report through a connector.
@@ -76,8 +78,9 @@ async def _flush(
     when: datetime,
     evidence: dict[ConnectorSiteKey, RequestCount],
     dynamic: Collection[str] = (),
+    window: timedelta = FLUSH,
 ) -> Any:
-    changes = await ExitReputationRepository(session).apply_evidence(evidence, dynamic, when)
+    changes = await ExitReputationRepository(session).apply_evidence(evidence, dynamic, when, window)
     await session.commit()
     return changes
 
@@ -186,8 +189,8 @@ class TestApplyReports:
             assert len(changes.ips) == size
             # Reports making records, then requests alone locking them.
             sites = [place(connector, site=f"site-{n}.example") for n in range(size)]
-            made = await repository.apply_evidence(dict.fromkeys(sites, BLOCKED), [connector.id], T0)
-            locked = await repository.apply_evidence(dict.fromkeys(sites, RequestCount(requests=3)), [connector.id], T0)
+            made = await repository.apply_evidence(dict.fromkeys(sites, BLOCKED), [connector.id], T0, FLUSH)
+            locked = await repository.apply_evidence(dict.fromkeys(sites, RequestCount(requests=3)), [connector.id], T0, FLUSH)
             assert len(made.connectors) == len(locked.connectors) == size
         # Anchored at the start, so this query, prepared too, does not count itself.
         prepared = await db_session.execute(
@@ -255,16 +258,17 @@ class TestApplyEvidence:
             at(1),
             {place(connector, "US"): RequestCount(requests=40, blocked=2), place(connector, "GB"): RequestCount(500)},
             [connector.id],
+            timedelta(hours=1),
         )
 
-        assert changes.connectors == (ConnectorChange(place(connector, "US"), at(1), None, 0.95, 40, 4),)
+        assert changes.connectors == (ConnectorChange(place(connector, "US"), at(1), None, 0.9, 40, 4),)
         assert changes.moved_projects == [project.id]
         repository = ExitReputationRepository(db_session)
         stored = await repository.connector_record(place(connector, "US"))
         assert stored is not None
-        # The first two count about 0.38 each now: half for the hour, and about three quarters of that for the 40 requests.
-        assert stored.weighted_blocked == pytest.approx(2 * 0.5 * 2 ** -0.4 + 2)
-        assert (stored.blocked_reports, stored.requests, stored.weighted_requests, stored.factor) == (4, 40, 40.0, 0.95)
+        # The first two count about 0.76 each now: the hour is past the 10 minutes, so the 40 requests decide.
+        assert stored.weighted_blocked == pytest.approx(2 * 2 ** -0.4 + 2)
+        assert (stored.blocked_reports, stored.requests, stored.weighted_requests, stored.factor) == (4, 40, 40.0, 0.9)
         assert (stored.last_seen_at, stored.weighted_at) == (at(1), at(1))
         assert await repository.connector_record(place(connector, "GB")) is None
 
@@ -340,11 +344,25 @@ class TestApplyEvidence:
         connector = await make_connector(db_session, brief)
         await _flush(db_session, T0, {place(connector): RequestCount(requests=40, blocked=40)})
 
-        await _flush(db_session, T0, {place(connector): RequestCount(requests=20)})
+        await _flush(db_session, at(1), {place(connector): RequestCount(requests=20)}, window=timedelta(hours=1))
 
         stored = await ExitReputationRepository(db_session).connector_record(place(connector))
         assert stored is not None
         assert (stored.weighted_requests, stored.weighted_blocked) == (pytest.approx(40.0), pytest.approx(20.0))
+
+    async def test_the_projects_connector_minutes_decide(self, db_session: AsyncSession) -> None:
+        slow = await make_project(
+            db_session, "slow", ExitReputationMode.AVOID, exit_reputation_connector_half_life_minutes=60
+        )
+        connector = await make_connector(db_session, slow)
+        await _flush(db_session, T0, {place(connector): RequestCount(requests=40, blocked=40)})
+
+        # Half an hour of its hour's memory: the minutes decide, as 1,000 requests are far past its 100.
+        await _flush(db_session, at(0.5), {place(connector): RequestCount(requests=1000)}, window=timedelta(minutes=30))
+
+        stored = await ExitReputationRepository(db_session).connector_record(place(connector))
+        assert stored is not None
+        assert stored.weighted_blocked == pytest.approx(40 * 2 ** -0.5)
 
 
 async def _moves(session: AsyncSession, connector: Connector, *places: str) -> list[ConnectorChange]:
@@ -404,14 +422,14 @@ class TestFactorMoves:
         self, db_session: AsyncSession, project: Project, connector: Connector
     ) -> None:
         await _flush(db_session, T0, {place(connector): RequestCount(requests=20, blocked=10)}, [connector.id])
-        # An hour later the 20 count 10: too few to tell.
-        await _flush(db_session, at(1), {place(connector): RequestCount(good=1)}, [connector.id])
-        await _flush(db_session, at(1.5), {place(connector): RequestCount(requests=30)}, [connector.id])
+        # A day later the 20 count 10: too few to tell.
+        await _flush(db_session, at(24), {place(connector): RequestCount(good=1)}, [connector.id])
+        await _flush(db_session, at(24.5), {place(connector): RequestCount(requests=30)}, [connector.id])
 
         assert [(move.at, move.old_factor, move.new_factor) for move in await _moves(db_session, connector, "")] == [
             (T0, None, 0.5),
-            (at(1), 0.5, None),
-            (at(1.5), None, 0.9),
+            (at(24), 0.5, None),
+            (at(24.5), None, 0.9),
         ]
 
     async def test_reads_from_a_time_the_last_before_it_and_the_first_kept(
@@ -557,14 +575,14 @@ class TestConcurrentWriters:
         share, then locks both and adds to them in its turn."""
         k0, k1, k2 = (place(connector, site=f"{n}.example") for n in (0, 1, 2))
         async with db_session_factory() as session:
-            await ExitReputationRepository(session).apply_evidence({k1: BLOCKED}, [connector.id], T0)
+            await ExitReputationRepository(session).apply_evidence({k1: BLOCKED}, [connector.id], T0, FLUSH)
             await session.commit()
         requests = RequestCount(requests=10)
         async with db_session_factory() as first, db_session_factory() as second:
-            await ExitReputationRepository(first).apply_evidence({k0: BLOCKED, k1: requests}, [connector.id], T0)
+            await ExitReputationRepository(first).apply_evidence({k0: BLOCKED, k1: requests}, [connector.id], T0, FLUSH)
             waiting = asyncio.create_task(
                 ExitReputationRepository(second).apply_evidence(
-                    {k2: BLOCKED, k1: requests, k0: BLOCKED}, [connector.id], T0
+                    {k2: BLOCKED, k1: requests, k0: BLOCKED}, [connector.id], T0, FLUSH
                 )
             )
             await asyncio.sleep(0.3)
@@ -608,7 +626,7 @@ class TestConcurrentWriters:
                     level: RequestCount(requests=10, blocked=int(level in reported)) for level in chosen
                 }
                 async with db_session_factory() as session:
-                    await ExitReputationRepository(session).apply_evidence(evidence, [connector.id], T0)
+                    await ExitReputationRepository(session).apply_evidence(evidence, [connector.id], T0, FLUSH)
                     await asyncio.sleep(0.01)
                     await session.commit()
                 expected.update(reported)
@@ -810,7 +828,7 @@ class TestDeleteStale:
         async with db_session_factory() as session:
             repository = ExitReputationRepository(session)
             await repository.apply_reports(dict.fromkeys((ip(project, n) for n in (1, 2, 3)), GOOD), at(-40 * 24))
-            await repository.apply_evidence({place(connector, level): BLOCKED for level in ("US", "GB")}, (), at(-40 * 24))
+            await repository.apply_evidence({place(connector, level): BLOCKED for level in ("US", "GB")}, (), at(-40 * 24), FLUSH)
             await session.commit()
 
         async with db_session_factory() as writer, db_session_factory() as sweep:

@@ -57,15 +57,17 @@ class MetricsFlushJob(Job):
     measures connectors by into their records, as one flush named by its job entry's ID.
 
     The windows are taken into the flush's staging hash, committed with the ID in ``metric_flushes``, then cleared.
+    Each flush's windows hold about one ``window``, the flush interval.
     """
 
     kind = JobKind.METRICS_FLUSH
     # One entry a run: its ID names the flush.
     batch_size = 1
 
-    def __init__(self, session_factory: SessionFactory, redis_client: RedisClient) -> None:
+    def __init__(self, session_factory: SessionFactory, redis_client: RedisClient, window: timedelta) -> None:
         self._session_factory = session_factory
         self._redis = redis_client
+        self._window = window
         self._signal = ReputationSignal(redis_client)
 
     async def run(self, batch: JobBatch) -> None:
@@ -177,7 +179,7 @@ class MetricsFlushJob(Job):
         if not recording:
             return ReputationChanges()
         evidence, dynamic = await self._reputation_evidence(session, windows, recording)
-        return await repository.apply_evidence(evidence, dynamic, utc_now())
+        return await repository.apply_evidence(evidence, dynamic, utc_now(), self._window)
 
     @staticmethod
     async def _reputation_evidence(

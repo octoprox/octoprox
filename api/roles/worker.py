@@ -10,6 +10,7 @@ runtime state strictly and builds its routing previews off the event loop.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import structlog
@@ -157,7 +158,7 @@ class WorkerRuntime(RoleRuntime):
             ReattributeJob(attribution, geo.geo_service),
             EnrichJob(attribution),
             TrafficJob(session_factory, redis_client, alerts=self.alert_checks),
-            MetricsFlushJob(session_factory, redis_client),
+            MetricsFlushJob(session_factory, redis_client, timedelta(seconds=settings.metrics_flush_interval)),
             CompactionJob(session_factory, geo.geo_service),
             SnapshotJob(
                 session_factory,

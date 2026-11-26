@@ -292,6 +292,7 @@ class TestSitesAndPlaces:
             },
             [dynamic.id],
             T0,
+            timedelta(minutes=1),
         )
         await session.commit()
         return pool.id, dynamic.id

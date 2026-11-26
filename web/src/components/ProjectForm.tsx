@@ -183,6 +183,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
     exit_reputation: project?.exit_reputation ?? 'off',
     exit_reputation_avoid_minutes: project?.exit_reputation_avoid_minutes ?? 60,
     exit_reputation_half_life_hours: project?.exit_reputation_half_life_hours ?? 24,
+    exit_reputation_connector_half_life_minutes: project?.exit_reputation_connector_half_life_minutes ?? 10,
     exit_reputation_connector_half_life_requests: project?.exit_reputation_connector_half_life_requests ?? 100,
     exit_reputation_bad_reports: project?.exit_reputation_bad_reports ?? 1,
     exit_reputation_bad_share: project?.exit_reputation_bad_share ?? 50,
@@ -600,13 +601,13 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
               />
             </div>
           </div>
-          {/* The two memories and how long data is kept: three across from sm up, stacked on a phone; the inputs line up under the tallest label. */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 items-end gap-3">
+          {/* The memories and how long data is kept: two across from sm up, stacked on a phone. Remember for and Keep data for share a row, the two Connector memory fields the next; each row's inputs line up under its taller label. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 items-end gap-3">
             <div>
               <Label className="text-xs">
                 <span className="inline-flex items-center gap-1.5">
                   <span>Remember for (hours)</span>
-                  <InfoTip label="About Remember for">For exit IPs: their reports, and the avoids a repeat avoid doubles by, count half after this many hours, so an IP that recovered comes back on its own.</InfoTip>
+                  <InfoTip label="About Remember for">For exit IPs: their reports, and the avoids a repeat avoid doubles by, count half after this many hours, so an IP that recovered comes back on its own. For dynamic connectors: the longest their evidence takes to count half.</InfoTip>
                 </span>
               </Label>
               <Input
@@ -614,22 +615,6 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
                 disabled={reputationMode === 'off'}
                 value={formData.exit_reputation_half_life_hours ?? ''}
                 onChange={(e) => setFormData({ ...formData, exit_reputation_half_life_hours: boundedInt(e.target.value, 1, 168) })}
-              />
-            </div>
-            <div>
-              <Label className="text-xs">
-                <span className="inline-flex items-center gap-1.5">
-                  <span>Connector memory (requests)</span>
-                  <InfoTip label="About Connector memory">A dynamic connector's block rate for a site and place counts its recent requests there: evidence counts half after this many more requests, and at least half every hour.</InfoTip>
-                </span>
-              </Label>
-              <Input
-                type="number" required min={20} max={10000} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
-                disabled={reputationMode === 'off'}
-                value={formData.exit_reputation_connector_half_life_requests ?? ''}
-                // Raised to 20 only on leaving the field, so 100 can be typed digit by digit.
-                onChange={(e) => setFormData({ ...formData, exit_reputation_connector_half_life_requests: boundedInt(e.target.value, 1, 10000) })}
-                onBlur={(e) => setFormData({ ...formData, exit_reputation_connector_half_life_requests: boundedInt(e.target.value, 20, 10000) })}
               />
             </div>
             <div>
@@ -644,6 +629,36 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
                 disabled={reputationMode === 'off'}
                 value={formData.exit_reputation_retention_days ?? ''}
                 onChange={(e) => setFormData({ ...formData, exit_reputation_retention_days: boundedInt(e.target.value, 0, 365) })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Connector memory (minutes)</span>
+                  <InfoTip label="About Connector memory in minutes">Busy places remember this many minutes of traffic. A dynamic connector's evidence for a site and place counts half after the minutes or the requests, whichever is longer, never later than Remember for.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={1} max={1440} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_connector_half_life_minutes ?? ''}
+                onChange={(e) => setFormData({ ...formData, exit_reputation_connector_half_life_minutes: boundedInt(e.target.value, 1, 1440) })}
+              />
+            </div>
+            <div>
+              <Label className="text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Connector memory (requests)</span>
+                  <InfoTip label="About Connector memory in requests">Quiet places wait for this many requests, so a handful does not decide. Evidence counts half after the minutes or the requests, whichever is longer, never later than Remember for.</InfoTip>
+                </span>
+              </Label>
+              <Input
+                type="number" required min={20} max={10000} step={1} className="pointer-coarse:h-11 disabled:bg-surface-raised disabled:cursor-not-allowed"
+                disabled={reputationMode === 'off'}
+                value={formData.exit_reputation_connector_half_life_requests ?? ''}
+                // Raised to 20 only on leaving the field, so 100 can be typed digit by digit.
+                onChange={(e) => setFormData({ ...formData, exit_reputation_connector_half_life_requests: boundedInt(e.target.value, 1, 10000) })}
+                onBlur={(e) => setFormData({ ...formData, exit_reputation_connector_half_life_requests: boundedInt(e.target.value, 20, 10000) })}
               />
             </div>
           </div>
@@ -679,7 +694,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
             </div>
           </div>
           {reputationMode !== 'off' && (formData.exit_reputation_strength ?? 1) > 5 && (formData.exit_reputation_connector_half_life_requests ?? 100) < 1000 && (
-            <p className="text-xs text-warning">At this strength a few unlucky requests move a connector's weight a lot. A Connector memory of 1,000 or more steadies it.</p>
+            <p className="text-xs text-warning">At this strength a few unlucky requests move a connector's weight a lot. A Connector memory of 1,000 requests or more steadies quiet places.</p>
           )}
           {project && reputationMode !== 'off' && previewStrength !== undefined && previewFloor !== undefined
             && (previewStrength !== loaded.exit_reputation_strength || previewFloor !== loaded.exit_reputation_floor) && (
@@ -691,6 +706,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
           {(() => {
             const minutes = formData.exit_reputation_avoid_minutes ?? 60
             const hours = formData.exit_reputation_half_life_hours ?? 24
+            const connectorMinutes = formData.exit_reputation_connector_half_life_minutes ?? 10
             const memory = formData.exit_reputation_connector_half_life_requests ?? 100
             const reports = formData.exit_reputation_bad_reports ?? 1
             const share = formData.exit_reputation_bad_share ?? 50
@@ -700,7 +716,7 @@ export function ProjectForm({ project, onSave, onValidityChange, error, formId, 
               <div className="flex gap-2 p-3 rounded-lg border border-line bg-surface-raised/50 text-xs leading-relaxed text-fg-muted">
                 <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>
-                  {reputationAvoids ? '' : 'Once the mode avoids: '}{reports} fresh bad {plural(reports, 'report keeps', 'reports keep')} an exit IP away from a site for {minutesText(minutes)}. Each further avoid doubles that while the earlier ones are remembered, counting half after {hours} {plural(hours, 'hour', 'hours')}, never past 7 days. At least {share}% of the IP's recent reports for the site must be bad, and good reports can end an avoid early. A dynamic connector is weighed for a site by the share of its recent requests there reported blocked: evidence counts half after {memory.toLocaleString()} more {plural(memory, 'request', 'requests')}, and at least half every hour.
+                  {reputationAvoids ? '' : 'Once the mode avoids: '}{reports} fresh bad {plural(reports, 'report keeps', 'reports keep')} an exit IP away from a site for {minutesText(minutes)}. Each further avoid doubles that while the earlier ones are remembered, counting half after {hours} {plural(hours, 'hour', 'hours')}, never past 7 days. At least {share}% of the IP's recent reports for the site must be bad, and good reports can end an avoid early. A dynamic connector is weighed for a site by the share of its recent requests there reported blocked: evidence counts half after {minutesText(connectorMinutes)} or {memory.toLocaleString()} more {plural(memory, 'request', 'requests')}, whichever is longer, and never later than {hours} {plural(hours, 'hour', 'hours')}.
                   {strength > 1 && ` At strength ${strength}, dynamic connectors are compared with the best one at each place, never under the lowest factor, ${factorText(floor)}.`}
                 </span>
               </div>

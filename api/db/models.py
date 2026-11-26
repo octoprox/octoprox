@@ -162,14 +162,18 @@ class ProjectModel(Base):
     observation_log: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     observation_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Exit reputation: what exit reports do (api.models.project.ExitReputationMode), how many minutes a first avoid
-    # lasts, an exit IP record's half-life in hours, a connector record's in requests, the fresh bad reports that avoid
-    # an exit for a site, the least bad share in percent, the strength dynamic connectors are compared at, the lowest
-    # factor in percent, and the days the project's records and Over time history are kept after last use (0 forever).
+    # lasts, an exit IP record's half-life in hours (also a connector record's longest), a connector record's in
+    # requests and in minutes, the fresh bad reports that avoid an exit for a site, the least bad share in percent, the
+    # strength dynamic connectors are compared at, the lowest factor in percent, and the days the project's records and
+    # Over time history are kept after last use (0 forever).
     exit_reputation: Mapped[str] = mapped_column(String(16), nullable=False, default="off", server_default="off")
     exit_reputation_avoid_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=60, server_default="60")
     exit_reputation_half_life_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24, server_default="24")
     exit_reputation_connector_half_life_requests: Mapped[int] = mapped_column(
         Integer, nullable=False, default=100, server_default="100"
+    )
+    exit_reputation_connector_half_life_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10, server_default="10"
     )
     exit_reputation_bad_reports: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     exit_reputation_bad_share: Mapped[int] = mapped_column(Integer, nullable=False, default=50, server_default="50")
@@ -974,9 +978,9 @@ class ConnectorSiteReputationModel(Base):
     """What clients reported about one connector on one site and requested place, against the requests it carried
     there, and the factor its routing weight is multiplied by for them.
 
-    Counts are for the record's life; the weights decay with the requests the metrics flush adds (the project's
-    connector half-life) and by the hour from ``weighted_at`` (api.reputation.record.ConnectorSiteReputation). A report
-    makes a record; requests only add to one.
+    Counts are for the record's life; from ``weighted_at`` the weights count half after the project's Connector memory
+    in minutes or in the requests the metrics flush adds, whichever is longer, and never later than its Remember for
+    (api.reputation.record.ConnectorSiteReputation). A report makes a record; requests only add to one.
     """
 
     __tablename__ = "connector_site_reputation"

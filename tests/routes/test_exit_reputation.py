@@ -49,7 +49,7 @@ def _apply_connectors(client: TestClient, when: datetime, evidence: dict[Connect
     async def applied() -> None:
         async with api_runtime(client).session_factory() as session:
             await ExitReputationRepository(session).apply_evidence(
-                {level: counts for key, counts in evidence.items() for level in key.levels()}, (), when
+                {level: counts for key, counts in evidence.items() for level in key.levels()}, (), when, timedelta(minutes=1)
             )
             await session.commit()
 
@@ -710,13 +710,13 @@ class TestPlaces:
         # Two of the pool's four rows avoided: x0.5 wherever it takes the requests; its counts, for the site as a whole,
         # are left out.
         pool = {"state": "own", "reputation": 0.5, "reputation_kind": "usable_ips", "usable_ips": 2, "eligible_ips": 4}
-        # The state's 5 of 20 halved per 100 requests by the city's 5 more, and the city's 1 of 5 added: 5.8 of 24.3.
-        # The only judged dynamic connector is the best one there.
+        # The state's 5 of 20 and the city's 1 of 5 added a moment later, before Connector memory's minutes faded
+        # anything: 6 of 25. The only judged dynamic connector is the best one there.
         best = {"success": 0.75, "best_success": 0.75, "best_connector_id": split.dynamic}
         assert cells["US/NY"] == {
             "Dynamic": {
                 "state": "own", "reputation": 0.75, "reputation_kind": "block_rate", "reputation_place": "US/NY",
-                "own_factor": 0.75, "blocked": 6, "requests": 24, "configured_share": 66.67, "effective_share": 75.0,
+                "own_factor": 0.75, "blocked": 6, "requests": 25, "configured_share": 66.67, "effective_share": 75.0,
             } | best,
             "Pool": pool | {"configured_share": 33.33, "effective_share": 25.0},
         }
@@ -797,7 +797,7 @@ class TestPlaces:
         body = self.places(split, site="quiet.example.com")
 
         cell = body["places"][0]["cells"][split.dynamic]
-        # Three hours of decay would leave an eighth of each count; the factor stays as decided.
+        # Three hours of "Remember for" would leave 7 and 18 of them; the counts show as decided.
         assert (cell["state"], cell["reputation"], cell["blocked"], cell["requests"]) == ("own", 0.6, 8, 20)
         assert cell["counted_at"] == then.replace(tzinfo=None).isoformat() + "Z"
 
@@ -1187,7 +1187,10 @@ def _move(client: TestClient, when: datetime, evidence: dict[ConnectorSiteKey, R
     async def applied() -> None:
         async with api_runtime(client).session_factory() as session:
             await ExitReputationRepository(session).apply_evidence(
-                {level: counts for key, counts in evidence.items() for level in key.levels()}, dynamic, when
+                {level: counts for key, counts in evidence.items() for level in key.levels()},
+                dynamic,
+                when,
+                timedelta(minutes=1),
             )
             await session.commit()
 
@@ -1239,7 +1242,8 @@ class TestPlaceHistory:
         assert dynamic["points"] == [
             # Before its first move, what that move moved it from; nothing drawn before the history began.
             {"at": start, "own": 0.75, "level": "US/NY", "routed": 0.75},
-            {"at": _utc(first), "own": 1.0, "level": "US/NY", "routed": 1.0},
+            # Dated before the split's own flush, the 100 clean requests fade nothing: 5 of 120 blocked.
+            {"at": _utc(first), "own": 0.95, "level": "US/NY", "routed": 0.95},
             {"at": _utc(second), "own": 0.9, "level": "US/NY", "routed": 0.9, "requests": 20, "blocked": 10},
         ]
         # Its four rows in New York are eligible; the reports avoided two of their IPs. Own and routed agree.

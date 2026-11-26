@@ -98,10 +98,11 @@ class TestCreate:
             project.exit_reputation_avoid_minutes,
             project.exit_reputation_half_life_hours,
             project.exit_reputation_connector_half_life_requests,
+            project.exit_reputation_connector_half_life_minutes,
             project.exit_reputation_bad_reports,
             project.exit_reputation_bad_share,
             project.exit_reputation_retention_days,
-        ) == (ExitReputationMode.AVOID, 60, 24, 100, 2, 50, 30)
+        ) == (ExitReputationMode.AVOID, 60, 24, 100, 10, 2, 50, 30)
 
     async def test_an_unknown_routing_strategy_is_refused(
         self, project_service: ProjectService, sessions: async_sessionmaker[AsyncSession], actor: Actor
@@ -241,6 +242,7 @@ class TestUpdate:
             exit_reputation_avoid_minutes=15,
             exit_reputation_half_life_hours=6,
             exit_reputation_connector_half_life_requests=40,
+            exit_reputation_connector_half_life_minutes=5,
             exit_reputation_bad_reports=2,
             exit_reputation_bad_share=75,
             exit_reputation_strength=10,
@@ -255,12 +257,13 @@ class TestUpdate:
             saved.exit_reputation_avoid_minutes,
             saved.exit_reputation_half_life_hours,
             saved.exit_reputation_connector_half_life_requests,
+            saved.exit_reputation_connector_half_life_minutes,
             saved.exit_reputation_bad_reports,
             saved.exit_reputation_bad_share,
             saved.exit_reputation_strength,
             saved.exit_reputation_floor,
             saved.exit_reputation_retention_days,
-        ) == (ExitReputationMode.AVOID, 15, 6, 40, 2, 75, 10, 5, 0)
+        ) == (ExitReputationMode.AVOID, 15, 6, 40, 5, 2, 75, 10, 5, 0)
         assert await stored(sessions, project.id) == saved
         assert await queued_job_keys(redis_client, JobKind.REATTRIBUTE) == []
         *_, entry = await audit_entries(sessions, project.id)
@@ -269,6 +272,7 @@ class TestUpdate:
             "exit_reputation_avoid_minutes": [60, 15],
             "exit_reputation_half_life_hours": [24, 6],
             "exit_reputation_connector_half_life_requests": [100, 40],
+            "exit_reputation_connector_half_life_minutes": [10, 5],
             "exit_reputation_bad_reports": [1, 2],
             "exit_reputation_bad_share": [50, 75],
             "exit_reputation_strength": [1, 10],

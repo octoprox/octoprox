@@ -412,8 +412,8 @@ class ReputationSplit:
         return off
 
     def _counts(self, record: ConnectorSiteReputation | None) -> tuple[int | None, int | None]:
-        """A record's blocked reports and requests as the last flush weighed them, decayed by the hours since alone;
-        none without a record."""
+        """A record's blocked reports and requests as the last flush weighed them, decayed since by "Remember for"
+        alone; none without a record."""
         if record is None:
             return None, None
         decay = record.decay_factor(self._now, self._policy)

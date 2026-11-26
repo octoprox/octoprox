@@ -73,8 +73,10 @@ MAX_REPUTATION_AVOID_MINUTES = 10_080
 # nothing.
 MAX_REPUTATION_HALF_LIFE_HOURS = 168
 # The longest connector memory, in requests ("Connector memory"). The shortest is 20: a busy record's weighted requests
-# settle at about 1.44 times it, and a factor needs 20 of them.
+# settle at about 1.44 times it at least, and a factor needs 20 of them.
 MAX_REPUTATION_CONNECTOR_HALF_LIFE_REQUESTS = 10_000
+# The longest connector memory, in minutes ("Connector memory"): a day. "Remember for" caps it as well.
+MAX_REPUTATION_CONNECTOR_HALF_LIFE_MINUTES = 1440
 # The most fresh bad reports a project may ask for before an exit is avoided.
 MAX_REPUTATION_BAD_REPORTS = 10
 # The highest minimum bad share, in percent: at 100 a single good report would keep an exit from ever being avoided
@@ -177,10 +179,11 @@ class Project(Audited):
     observation_retention_days: int | None = Field(default=None, ge=0, le=MAX_OBSERVATION_RETENTION_DAYS)
 
     # Exit reputation (see docs/exit-reputation.md): what exit reports do, how many minutes a first avoid lasts (each
-    # repeat doubles it), how many hours an exit IP's reports take to count half ("Remember for"), how many more
-    # requests a connector's evidence takes to count half ("Connector memory"), how many fresh bad reports avoid an exit
-    # for a site, the least share (percent) of the site's recent reports that must be bad, how hard a dynamic connector
-    # is weighed against the best one at a place ("Strength", 1 the plain trim), the least share (percent) of its
+    # repeat doubles it), how many hours an exit IP's reports take to count half ("Remember for", the longest a dynamic
+    # connector's evidence takes too), how many more requests and how many minutes a dynamic connector's evidence takes
+    # to count half, whichever is longer ("Connector memory"), how many fresh bad reports avoid an exit for a site, the
+    # least share (percent) of the site's recent reports that must be bad, how hard a dynamic connector is weighed
+    # against the best one at a place ("Strength", 1 the plain trim), the least share (percent) of its
     # weight a dynamic connector keeps ("Lowest factor"), and how many days the project's data is kept after it was
     # last used ("Keep data for", 0 forever): a site's records (an exit IP's reports and avoids, a dynamic connector's
     # factor per place) after the day they were last seen, by a report or a request counted, and the Over time chart's
@@ -193,6 +196,9 @@ class Project(Audited):
     exit_reputation_half_life_hours: int = Field(default=24, ge=1, le=MAX_REPUTATION_HALF_LIFE_HOURS)
     exit_reputation_connector_half_life_requests: int = Field(
         default=100, ge=20, le=MAX_REPUTATION_CONNECTOR_HALF_LIFE_REQUESTS
+    )
+    exit_reputation_connector_half_life_minutes: int = Field(
+        default=10, ge=1, le=MAX_REPUTATION_CONNECTOR_HALF_LIFE_MINUTES
     )
     exit_reputation_bad_reports: int = Field(default=1, ge=1, le=MAX_REPUTATION_BAD_REPORTS)
     exit_reputation_bad_share: int = Field(default=50, ge=1, le=MAX_REPUTATION_BAD_SHARE)
@@ -266,6 +272,9 @@ class ProjectCreate(BaseModel):
     exit_reputation_connector_half_life_requests: int = Field(
         default=100, ge=20, le=MAX_REPUTATION_CONNECTOR_HALF_LIFE_REQUESTS
     )
+    exit_reputation_connector_half_life_minutes: int = Field(
+        default=10, ge=1, le=MAX_REPUTATION_CONNECTOR_HALF_LIFE_MINUTES
+    )
     exit_reputation_bad_reports: int = Field(default=1, ge=1, le=MAX_REPUTATION_BAD_REPORTS)
     exit_reputation_bad_share: int = Field(default=50, ge=1, le=MAX_REPUTATION_BAD_SHARE)
     exit_reputation_strength: int = Field(default=1, ge=1, le=MAX_REPUTATION_STRENGTH)
@@ -312,6 +321,9 @@ class ProjectUpdate(BaseModel):
     exit_reputation_connector_half_life_requests: (
         Annotated[int, Field(ge=20, le=MAX_REPUTATION_CONNECTOR_HALF_LIFE_REQUESTS)] | None
     ) = None
+    exit_reputation_connector_half_life_minutes: (
+        Annotated[int, Field(ge=1, le=MAX_REPUTATION_CONNECTOR_HALF_LIFE_MINUTES)] | None
+    ) = None
     exit_reputation_bad_reports: Annotated[int, Field(ge=1, le=MAX_REPUTATION_BAD_REPORTS)] | None = None
     exit_reputation_bad_share: Annotated[int, Field(ge=1, le=MAX_REPUTATION_BAD_SHARE)] | None = None
     exit_reputation_strength: Annotated[int, Field(ge=1, le=MAX_REPUTATION_STRENGTH)] | None = None
@@ -354,6 +366,7 @@ class ProjectResponse(BaseModel):
     exit_reputation_avoid_minutes: int = 60
     exit_reputation_half_life_hours: int = 24
     exit_reputation_connector_half_life_requests: int = 100
+    exit_reputation_connector_half_life_minutes: int = 10
     exit_reputation_bad_reports: int = 1
     exit_reputation_bad_share: int = 50
     exit_reputation_strength: int = 1
@@ -394,6 +407,7 @@ class ProjectSummary(BaseModel):
     exit_reputation_avoid_minutes: int = 60
     exit_reputation_half_life_hours: int = 24
     exit_reputation_connector_half_life_requests: int = 100
+    exit_reputation_connector_half_life_minutes: int = 10
     exit_reputation_bad_reports: int = 1
     exit_reputation_bad_share: int = 50
     exit_reputation_strength: int = 1
