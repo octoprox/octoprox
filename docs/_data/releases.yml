@@ -10,6 +10,21 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.9.6
+  date: 2026-11-26
+  title: Steadier exit reputation for dynamic connectors
+  changes:
+    - text: "Exit reputation has a new Connector memory (minutes) setting next to Connector memory (requests). A dynamic connector's record for a site and place counts half after that many minutes or that many requests, whichever is longer."
+      docs: exit-reputation#settings
+    - text: "The minutes keep a busy place from swinging on a minute of bad luck, and the requests keep a quiet place from being judged on a handful. Every project starts at 10 minutes, so with the defaults a busy place now reacts to a blocking site in about 10 minutes instead of about a minute."
+      docs: exit-reputation#how-fast-a-dynamic-connector-reacts
+    - text: "Remember for now also sets the longest a dynamic connector's record takes to count half. Before, it counted half every hour. A quiet place now keeps its record for up to 24 hours by default, so it recovers more slowly."
+      docs: exit-reputation#how-fast-a-dynamic-connector-reacts
+    - text: "When requests to a place come in bursts, the quiet time between bursts fades its record by Remember for alone. Each burst starts from where the last one ended."
+      docs: exit-reputation#how-fast-a-dynamic-connector-reacts
+    - text: "The project API accepts the new setting as `exit_reputation_connector_half_life_minutes`, from 1 to 1440."
+      docs: api
+
 - version: 6.9.5
   date: 2026-11-25
   title: Exit reputation history and per-project retention
