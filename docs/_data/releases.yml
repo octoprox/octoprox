@@ -10,6 +10,18 @@
 #   changes  what changed, for the people who use Octoprox; `docs` is a page
 #            on octoprox.com that explains it, such as connecting#exit-headers
 
+- version: 6.9.7
+  date: 2026-11-26
+  title: Cloud proxies refuse internal destinations
+  changes:
+    - text: "AWS, GCP and Azure cloud proxies now refuse requests for private, loopback, link-local and shared addresses, IPv4 and IPv6. Clients can no longer reach the instance itself, its cloud metadata service or other hosts in your network through them."
+      docs: aws-setup#how-octoprox-manages-the-instances
+    - text: "A refused request gets `403 Forbidden` from the instance. Over HTTPS, Octoprox answers `502 Bad Gateway` and says the upstream proxy refused the tunnel with `403`."
+      docs: aws-setup#how-octoprox-manages-the-instances
+    - text: "Upgrade note: A cloud connector's `healthcheck_url` must be a public URL. A check against a private address now fails."
+      docs: configuration
+    - text: "Upgrade note: Cloud instances launched before 6.9.7 keep their old proxy setup until they are replaced. Replace them to apply the block now."
+
 - version: 6.9.6
   date: 2026-11-26
   title: Steadier exit reputation for dynamic connectors
