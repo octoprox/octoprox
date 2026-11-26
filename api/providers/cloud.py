@@ -100,37 +100,36 @@ class ProxyCredentials:
 # Uses req_header ACL to match the exact Proxy-Authorization header value
 # instead of auth_param basic, which avoids 407 challenge responses that
 # reveal the server is a proxy. Invalid/missing auth gets TCP_RESET.
+# An authenticated request for the instance itself, a cloud metadata service,
+# a private network or Squid's cache manager gets 403. Each deny checks auth
+# first, so unauthenticated traffic never triggers the destination's DNS
+# lookup; they answer 403 because TCP_RESET is not dependable after that
+# lookup. The lines live here, not in config/squid_setup.sh, so an install
+# that mounts its own template still gets them.
 _AUTH_CONFIG = """\
 # Header-based proxy authentication (no 407 challenges)
 acl has_valid_auth req_header Proxy-Authorization ^Basic\\s+{auth_b64}$
+# Destinations a client may not reach: the instance itself, cloud metadata services and private networks
+acl octoprox_internal dst 0.0.0.0/8 127.0.0.0/8 169.254.0.0/16 168.63.129.16/32
+acl octoprox_internal dst 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10
+acl octoprox_internal dst ::/128 ::1/128 fe80::/10 fc00::/7
+http_access deny has_valid_auth manager
+http_access deny has_valid_auth octoprox_internal
 http_access allow has_valid_auth
 deny_info TCP_RESET all
 http_access deny all"""
 
-# No-auth config: allow all connections (original behavior)
-_NO_AUTH_CONFIG = """\
-# Allow all connections
-http_access allow all"""
 
-
-def build_squid_setup_script(credentials: ProxyCredentials | None = None) -> str:
+def build_squid_setup_script(credentials: ProxyCredentials) -> str:
     """The bash setup script of an instance's Squid, with its credentials baked in.
 
-    Args:
-        credentials: None lets every connection through.
+    Squid answers only requests that carry them.
     """
-    template = _load_squid_setup_template()
-
-    if credentials is not None:
-        # Squid matches the Proxy-Authorization header against the base64 of
-        # "username:password", + escaped: the one regex-special character base64 holds.
-        auth_b64 = base64.b64encode(f"{credentials.username}:{credentials.password}".encode()).decode()
-        auth_config = _AUTH_CONFIG.format(auth_b64=auth_b64.replace("+", "\\+"))
-    else:
-        auth_config = _NO_AUTH_CONFIG
-
-    script = template.replace("##OCTOPROX_AUTH_CONFIG##", auth_config)
-    return script
+    # Squid matches the Proxy-Authorization header against the base64 of
+    # "username:password", + escaped: the one regex-special character base64 holds.
+    auth_b64 = base64.b64encode(f"{credentials.username}:{credentials.password}".encode()).decode()
+    auth_config = _AUTH_CONFIG.format(auth_b64=auth_b64.replace("+", "\\+"))
+    return _load_squid_setup_template().replace("##OCTOPROX_AUTH_CONFIG##", auth_config)
 
 
 @dataclass(frozen=True)

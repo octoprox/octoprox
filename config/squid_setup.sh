@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stealth Squid Proxy Setup Script for Octoprox
-# This script installs and configures Squid as a proxy with optional authentication.
+# This script installs and configures Squid as a proxy with per-instance authentication.
 
 set -ex
 

@@ -185,7 +185,7 @@ The install-wide settings (default conflict rule and city radius, echo endpoint,
 
 Environment variables: `OCTOPROX_GEO_CACHE_DIR`, `OCTOPROX_GEO_DATABASES`, `OCTOPROX_GEO_POLICY_DEFAULTS`, `OCTOPROX_GEO_ECHO_ENABLED`, `OCTOPROX_GEO_ECHO_TRUSTED_PROXIES`, `OCTOPROX_GEO_OBSERVATION_PUBLISH_INTERVAL`, `OCTOPROX_GEO_OBSERVATION_MAX_BUFFER`, `OCTOPROX_GEO_UPDATER_INTERVAL`; the lookup ones are `OCTOPROX_GEO_LOOKUP_ENABLED`, `OCTOPROX_GEO_LOOKUP_URL`, `OCTOPROX_GEO_LOOKUP_IP_PATH`, `OCTOPROX_GEO_LOOKUP_COUNTRY_PATH` and `OCTOPROX_GEO_LOOKUP_TIMEOUT_SECONDS`.
 
-Connector config keys read by the health check: `healthcheck_url` (custom check URL; without it the attribution echo endpoint is checked), `healthcheck_ip_path` (JMESPath, or `@text`, of the exit IP in that URL's response; unset means the response carries no IP unless the URL is the echo or httpbin endpoint) and `healthcheck_country_path`.
+Connector config keys read by the health check: `healthcheck_url` (custom check URL; without it the attribution echo endpoint is checked), `healthcheck_ip_path` (JMESPath, or `@text`, of the exit IP in that URL's response; unset means the response carries no IP unless the URL is the echo or httpbin endpoint) and `healthcheck_country_path`. On a cloud connector, `healthcheck_url` must be a public URL: cloud instances refuse private addresses (see [How Octoprox Manages the Instances]({{ site.baseurl }}/aws-setup#how-octoprox-manages-the-instances)).
 
 ### WireGuard
 

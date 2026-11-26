@@ -538,13 +538,6 @@ class TestGenerateProxyCredentials:
 class TestBuildSquidSetupScript:
     """Tests for build_squid_setup_script."""
 
-    def test_no_auth_produces_allow_all(self) -> None:
-        """Test that no credentials produces an open proxy config."""
-        script = build_squid_setup_script()
-        assert "http_access allow all" in script
-        assert "req_header" not in script
-        assert "##OCTOPROX_AUTH_CONFIG##" not in script
-
     def test_with_auth_uses_req_header_acl(self) -> None:
         """Test that credentials produce req_header ACL directives."""
         script = build_squid_setup_script(TEST_CREDENTIALS)
@@ -598,9 +591,27 @@ class TestBuildSquidSetupScript:
         assert "squid.conf" in script
         assert "systemctl restart squid" in script
 
-    def test_no_credentials_produce_the_same_as_no_args(self) -> None:
-        """Test that None credentials produce the same result as no args."""
-        assert build_squid_setup_script(None) == build_squid_setup_script()
+    def test_refuses_internal_destinations_to_authenticated_clients(self) -> None:
+        """The instance, metadata services, private networks and the cache manager are denied before the allow."""
+        lines = build_squid_setup_script(TEST_CREDENTIALS).splitlines()
+        internal = " ".join(line for line in lines if line.startswith("acl octoprox_internal dst "))
+        for cidr in (
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "168.63.129.16/32",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "100.64.0.0/10",
+            "::1/128",
+            "fe80::/10",
+            "fc00::/7",
+        ):
+            assert cidr in internal.split()
+        # Squid acts on the first http_access line that matches.
+        allow = lines.index("http_access allow has_valid_auth")
+        assert lines.index("http_access deny has_valid_auth octoprox_internal") < allow
+        assert lines.index("http_access deny has_valid_auth manager") < allow
 
 
 
