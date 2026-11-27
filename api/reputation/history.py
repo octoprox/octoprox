@@ -21,9 +21,7 @@ from abc import ABC, abstractmethod
 from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from enum import StrEnum
 from itertools import accumulate, pairwise
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -31,15 +29,22 @@ from api.db.audit_repository import AuditRepository
 from api.db.repository import ConnectorRepository
 from api.db.reputation_repository import ExitReputationRepository
 from api.models.audit import AuditEntityType
-from api.models.project import ExitReputationMode
+from api.models.exit_reputation import (
+    HistoryPoint,
+    HistoryRange,
+    HistoryRule,
+    HistorySeries,
+    PlaceHistorySeries,
+    PlaceHistoryView,
+    RuleInForce,
+)
 from api.reputation.record import ConnectorChange, IpChange, place_levels
 from api.reputation.split import ReputationSplit
-from api.reputation.weight import ConnectorReputation, ReputationKind, ReputationRule
+from api.reputation.weight import ConnectorReputation, ReputationKind
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from api.models.audit import AuditEntry
     from api.models.project import Project
     from api.models.proxy import Proxy
     from api.routing.router import Router
@@ -48,110 +53,6 @@ if TYPE_CHECKING:
 _DIGITS = 4
 # Where every bucket of BucketMeans' points is counted from, as the metrics charts count theirs.
 _EPOCH = datetime(1970, 1, 1)
-# The project settings the rule is made of, as its audit entries name them.
-_MODE, _STRENGTH, _FLOOR = "exit_reputation", "exit_reputation_strength", "exit_reputation_floor"
-
-
-class HistoryRange(StrEnum):
-    """How far back the chart reaches from now."""
-
-    HOUR = "1h"
-    SIX_HOURS = "6h"
-    DAY = "24h"
-    WEEK = "7d"
-    MONTH = "30d"
-
-    @property
-    def span(self) -> timedelta:
-        return _SPANS[self]
-
-
-_SPANS = {
-    HistoryRange.HOUR: timedelta(hours=1),
-    HistoryRange.SIX_HOURS: timedelta(hours=6),
-    HistoryRange.DAY: timedelta(hours=24),
-    HistoryRange.WEEK: timedelta(days=7),
-    HistoryRange.MONTH: timedelta(days=30),
-}
-
-
-@dataclass(frozen=True, slots=True)
-class RuleInForce:
-    """The project's rule from ``at`` on: whether routing applies it (the mode avoids), and how it weighs."""
-
-    at: datetime
-    applied: bool
-    rule: ReputationRule
-
-    @classmethod
-    def rebuilt(cls, project: Project, entries: Sequence[AuditEntry], start: datetime) -> list[RuleInForce]:
-        """The rule in force at ``start``, then one per change of it after, from the project's settings now and its
-        audit ``entries`` made after ``start`` (the oldest first), undone newest first. A change that leaves the rule
-        as it was (a mode that still does not avoid) is no new rule."""
-        settings: dict[str, Any] = {
-            _MODE: project.exit_reputation.value,
-            _STRENGTH: project.exit_reputation_strength,
-            _FLOOR: project.exit_reputation_floor,
-        }
-        later: list[tuple[datetime, dict[str, Any]]] = []
-        for entry in reversed(entries):
-            before = {
-                name: change[0]
-                for name, change in entry.changes.items()
-                if name in settings and isinstance(change, list) and len(change) == 2 and change[0] is not None
-            }
-            if before:
-                later.append((entry.created_at, dict(settings)))
-                settings.update(before)
-        rules: list[RuleInForce] = []
-        for at, values in [(start, settings), *reversed(later)]:
-            rule = cls._of(at, values)
-            if not rules or (rules[-1].applied, rules[-1].rule) != (rule.applied, rule.rule):
-                rules.append(rule)
-        return rules
-
-    @classmethod
-    def _of(cls, at: datetime, settings: Mapping[str, Any]) -> RuleInForce:
-        """The rule of ``settings`` as a project stores them: a mode, a strength and a floor in percent."""
-        return cls(
-            at,
-            ExitReputationMode(settings[_MODE]).avoids,
-            ReputationRule(int(settings[_STRENGTH]), int(settings[_FLOOR]) / 100),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class HistoryPoint:
-    """One connector at one point of the chart: its own value and the level of the place a dynamic connector's factor
-    came from (None while not judged), its routed value, the requests and blocked reports a dynamic connector counted
-    since its previous move (None when unknown), and a connector with IPs' usable rows (a bucket's mean to a tenth) and
-    eligible rows."""
-
-    at: datetime
-    own: float | None
-    level: str | None
-    routed: float
-    requests: int | None = None
-    blocked: int | None = None
-    usable: float | None = None
-    eligible: int | None = None
-
-    def repeats(self, previous: HistoryPoint) -> bool:
-        """Whether the point says nothing new after ``previous``: no move counted, and the same values."""
-        return self.requests is None and self._values() == previous._values()
-
-    def _values(self) -> tuple[float | None, str | None, float, float | None, int | None]:
-        return self.own, self.level, self.routed, self.usable, self.eligible
-
-
-@dataclass(frozen=True, slots=True)
-class HistorySeries:
-    """One connector's line, and what measures it."""
-
-    connector_id: str
-    name: str
-    kind: ReputationKind
-    points: list[HistoryPoint]
 
 
 class _Track:
@@ -562,6 +463,20 @@ class FactorHistory(ABC):
         return [
             HistorySeries(line.connector_id, line.name, line.kind, points[line.connector_id]) for line in self.lines
         ]
+
+    def view(self) -> PlaceHistoryView:
+        """The chart's answer for this history: its range, the rules in force and every connector's line."""
+        return PlaceHistoryView(
+            site=self.site,
+            place=self.place,
+            range=self.range,
+            since=self.since,
+            until=self.until,
+            recorded_since=self.recorded_since,
+            bucket_seconds=self.bucket_seconds,
+            rules=[HistoryRule.of(rule) for rule in self.rules],
+            series=[PlaceHistorySeries.of(series) for series in self.series()],
+        )
 
     @abstractmethod
     def _points(self) -> dict[str, list[HistoryPoint]]:

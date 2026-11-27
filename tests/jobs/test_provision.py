@@ -16,12 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.core.roles import JobKind
 from api.db.redis import RedisClient
+from api.geo.models import META_GEO_COUNTRY
 from api.jobs.provision import ProvisionJob, ProvisionTarget
 from api.models.connector import Connector
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import ProviderRegistry
-from api.providers.sdk.strategies import META_GEO_COUNTRY, META_SESSION_ID
+from api.providers.sdk.strategies import META_SESSION_ID
 from api.services.proxies import ProxyService
 from tests.jobs.conftest import Rows, batch_of, waiting
 from tests.providers.test_registry import fail_to_build

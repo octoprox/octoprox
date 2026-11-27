@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.attention.requests import AlertChecks
 from api.core import utc_now
-from api.core.releases import LatestRelease, ReleaseNote
+from api.core.releases import LatestRelease
 from api.core.roles import JobKind
 from api.db.geo_repository import GeoDatabaseRepository
 from api.db.models import SystemMetricsModel
@@ -63,6 +63,7 @@ from api.jobs.traffic import TrafficJob
 from api.models.openvpn import OpenVpnPeer, OpenVpnSessionReading
 from api.models.project import Project
 from api.models.proxy import ProxyStatus
+from api.models.release import ReleaseNote
 from api.models.wireguard import WireGuardPeer, WireGuardPeerReading
 from api.providers.sdk.egress import EgressPolicy
 from tests.conftest import queued_job_keys

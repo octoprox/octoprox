@@ -9,68 +9,24 @@ so this module is the same for every provider; a credential of another project
 is not found.
 """
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Request
 
 from api.core.auth import RequireEditorDep
-from api.db.repository import CredentialRepository
 from api.models.credential import (
-    Credential,
     CredentialCreate,
     CredentialDetailResponse,
-    CredentialResponse,
+    CredentialListResponse,
     CredentialUpdate,
 )
-from api.routes.common import actor_of, credential_service_of, require_project, session_factory_of
+from api.routes.common import actor_of, credential_service_of
 
 router = APIRouter(prefix="/projects/{project_id}/credentials")
-
-
-class CredentialListResponse(BaseModel):
-    """Response for listing credentials."""
-    total: int
-    credentials: list[CredentialResponse]
-
-
-def _credential_to_response(credential: Credential) -> CredentialResponse:
-    """Convert a Credential to CredentialResponse."""
-    config = credential.config or {}
-    return CredentialResponse(
-        id=credential.id,
-        name=credential.name,
-        type=credential.type,
-        project_id=credential.project_id,
-        has_username=bool(config.get("username")),
-        has_password=bool(config.get("password")),
-        created_at=credential.created_at,
-        updated_at=credential.updated_at,
-    )
-
-
-def _credential_to_detail_response(credential: Credential) -> CredentialDetailResponse:
-    """Convert a Credential to CredentialDetailResponse (includes config)."""
-    return CredentialDetailResponse(
-        id=credential.id,
-        name=credential.name,
-        type=credential.type,
-        project_id=credential.project_id,
-        config=credential.config,
-        created_at=credential.created_at,
-        updated_at=credential.updated_at,
-    )
 
 
 @router.get("", response_model=CredentialListResponse)
 async def list_credentials(request: Request, project_id: str) -> CredentialListResponse:
     """List all credentials for a project, oldest first (ties by id, so every api process lists them alike)."""
-    await require_project(request, project_id)
-    async with session_factory_of(request)() as session:
-        credentials = await CredentialRepository(session).get_by_project(project_id)
-    credentials.sort(key=lambda credential: (credential.created_at, credential.id))
-    return CredentialListResponse(
-        total=len(credentials),
-        credentials=[_credential_to_response(c) for c in credentials],
-    )
+    return CredentialListResponse.of(await credential_service_of(request).of_project(project_id))
 
 
 @router.post("", response_model=CredentialDetailResponse, status_code=201)
@@ -82,17 +38,13 @@ async def create_credential(
 ) -> CredentialDetailResponse:
     """Create a new credential, checked with the vendor when its provider has a validation call."""
     credential = await credential_service_of(request).create(project_id, credential_data, actor_of(request, user))
-    return _credential_to_detail_response(credential)
+    return CredentialDetailResponse.of(credential)
 
 
 @router.get("/{credential_id}", response_model=CredentialDetailResponse)
 async def get_credential(request: Request, project_id: str, credential_id: str) -> CredentialDetailResponse:
     """Get a specific credential of the project by ID (includes config)."""
-    async with session_factory_of(request)() as session:
-        credential = await CredentialRepository(session).get_in_project(project_id, credential_id)
-    if credential is None:
-        raise HTTPException(status_code=404, detail="Credential not found")
-    return _credential_to_detail_response(credential)
+    return CredentialDetailResponse.of(await credential_service_of(request).get(project_id, credential_id))
 
 
 @router.patch("/{credential_id}", response_model=CredentialDetailResponse)
@@ -107,7 +59,7 @@ async def update_credential(
     credential = await credential_service_of(request).update(
         project_id, credential_id, credential_data, actor_of(request, user)
     )
-    return _credential_to_detail_response(credential)
+    return CredentialDetailResponse.of(credential)
 
 
 @router.delete("/{credential_id}", status_code=204)

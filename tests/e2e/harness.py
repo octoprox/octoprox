@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from api.core.stats import MetricDelta
     from api.db.redis import RedisClient
     from api.db.streams import ChangeKind
-    from api.feed.state import HealthSoft
+    from api.models.proxy import HealthSoft
     from api.models.system import StreamState, WorkStream
     from api.roles.api import ApiRuntime
     from api.roles.controller import ControllerRuntime

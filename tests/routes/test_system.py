@@ -971,6 +971,18 @@ class TestSystemHistoryAccessControl:
         assert editor_client.get(HISTORY).status_code == 403
 
 
+class TestSystemHistoryInterval:
+    """The history tells the snapshot interval this install was started with."""
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings) -> Settings:
+        test_settings.system_metrics_interval = 120
+        return test_settings
+
+    def test_the_interval_is_the_configured_one(self, authenticated_client: TestClient) -> None:
+        assert authenticated_client.get(HISTORY).json()["interval_seconds"] == 120
+
+
 class TestSystemHistory:
     def test_empty_before_the_first_snapshot(self, authenticated_client: TestClient, test_settings: Settings) -> None:
         """A fresh install must render as "collecting", not as an error."""
@@ -992,13 +1004,6 @@ class TestSystemHistory:
         assert authenticated_client.get(HISTORY, params={"range": "1h"}).json()["bucket_seconds"] is None
         assert authenticated_client.get(HISTORY, params={"range": "7d"}).json()["bucket_seconds"] == 3600
         assert authenticated_client.get(HISTORY, params={"range": "90d"}).json()["bucket_seconds"] == 86400
-
-    def test_the_interval_is_the_configured_one(
-        self, authenticated_client: TestClient, test_settings: Settings
-    ) -> None:
-        test_settings.system_metrics_interval = 120
-
-        assert authenticated_client.get(HISTORY).json()["interval_seconds"] == 120
 
     def test_returns_stored_snapshots_oldest_first(
         self, authenticated_client: TestClient, test_settings: Settings
@@ -1055,6 +1060,31 @@ class TestSystemHistory:
         assert growth["users"]["delta_bytes"] == 0
         # Biggest mover first.
         assert rows[0]["name"] == "proxies"
+
+    def test_tables_that_grew_alike_keep_the_newest_snapshot_s_order(
+        self, authenticated_client: TestClient, test_settings: Settings
+    ) -> None:
+        _clear_snapshots(test_settings)
+        now = utc_now()
+        _seed_snapshots(
+            test_settings,
+            [
+                SystemMetricsModel(
+                    timestamp=now - timedelta(minutes=40),
+                    table_sizes={"users": 50, "alerts": 70, "proxies": 100},
+                    proxy_status_counts={},
+                ),
+                SystemMetricsModel(
+                    timestamp=now - timedelta(minutes=1),
+                    table_sizes={"users": 50, "alerts": 70, "proxies": 400},
+                    proxy_status_counts={},
+                ),
+            ],
+        )
+
+        rows = authenticated_client.get(HISTORY, params={"range": "1h"}).json()["table_growth"]
+
+        assert [t["name"] for t in rows] == ["proxies", "users", "alerts"]
 
 
 def _seed_snapshots(settings: Settings, rows: list[SystemMetricsModel]) -> None:

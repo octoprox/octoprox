@@ -31,10 +31,8 @@ from api.feed.models import (
     ReputationSection,
     RuntimeSection,
     Section,
-    static_exit_ip,
 )
-from api.geo.models import LocationRules, eligible_under
-from api.geo.service import GeoService
+from api.geo.models import META_GEO_COUNTRY, LocationRules, eligible_under
 from api.models.connector import (
     DEFAULT_ROUTING_WEIGHT,
     Connector,
@@ -47,7 +45,6 @@ from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.sdk.provider import DescriptorProvider
-from api.providers.sdk.strategies import META_GEO_COUNTRY, is_dynamic_gateway
 
 if TYPE_CHECKING:
     from api.providers.registry import ProviderRegistry
@@ -195,7 +192,7 @@ class ConnectorView:
     def dynamic(self) -> bool:
         """Whether the connector serves through a dynamic gateway row, whose exit is chosen per request: exit reputation
         weighs such a connector by its record for the site, never its exit IPs."""
-        return any(is_dynamic_gateway(proxy) for proxy in self.proxies)
+        return any(proxy.is_dynamic_gateway for proxy in self.proxies)
 
     @cached_property
     def exits(self) -> dict[str, tuple[str, ...]]:
@@ -203,7 +200,7 @@ class ConnectorView:
         order: what exit reputation is joined to. Worked out on the first ask, for the life of the view."""
         exits: dict[str, list[str]] = {}
         for proxy in self.proxies:
-            if (ip := static_exit_ip(proxy)) is not None:
+            if (ip := proxy.static_exit_ip) is not None:
                 exits.setdefault(ip, []).append(proxy.id)
         return {ip: tuple(ids) for ip, ids in exits.items()}
 
@@ -234,17 +231,17 @@ class ConnectorView:
 
     def _can_serve(self, proxy: Proxy, country: str | None, rules: LocationRules, *, pinned: bool = False) -> bool:
         """Whether a row of a connector that serves ``country`` at all is one of its ``candidates``."""
-        known = None if is_dynamic_gateway(proxy) else proxy.country
+        known = None if proxy.is_dynamic_gateway else proxy.country
         if (
             proxy.status != ProxyStatus.HEALTHY
-            or GeoService.outside_declared_countries(proxy, self.declared_countries)
+            or proxy.outside_declared_countries(self.declared_countries)
             or (known is not None and known in self.excluded)
             or not eligible_under(rules, proxy.metadata)
         ):
             return False
         if not country and not pinned and self._exits_in_reserved(known):
             return False
-        if is_dynamic_gateway(proxy):
+        if proxy.is_dynamic_gateway:
             # The connector's allow-list was applied above; the row itself has no country.
             return True
         if not country:

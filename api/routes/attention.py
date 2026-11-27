@@ -9,7 +9,7 @@ too, with the lines the api answers itself when it cannot read them
 (:class:`~api.attention.service.InstallAttentionService`).
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 
 from api.core.auth import RequireEditorDep
 from api.models.attention import InstallAttention, MuteRequest, ProjectAttention, ProjectsAttention
@@ -22,10 +22,7 @@ router = APIRouter()
 async def get_project_attention(request: Request, project_id: str) -> ProjectAttention:
     """The project's lines, muted or not, in display order, with how many problems and warnings show and how many are
     muted, and when the workers last checked it; none for a project pending deletion."""
-    report = await attention_of(request).project(project_id)
-    if report is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return report
+    return await attention_of(request).project(project_id)
 
 
 @router.put("/projects/{project_id}/attention/mutes", status_code=204)

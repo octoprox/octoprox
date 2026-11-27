@@ -28,8 +28,6 @@ from api.models.location import LocationTarget
 from api.models.openvpn import OpenVpnProtocol
 from api.models.project import Project
 from api.models.proxy import Proxy
-from api.providers.sdk.strategies import META_DISCOVERED_IP, is_dynamic_gateway
-from api.reputation.site import canonical_ip
 
 # The layout of the sections below. A follower applies only a head of its own
 # schema, so a controller and gateways of different releases never read each
@@ -237,17 +235,6 @@ class ConnectorSection(BaseModel):
     # Credentials resolved (api.feed.sections.resolve_credentials), status
     # from Postgres, display-only metadata dropped, ordered by (created_at, id).
     proxies: list[Proxy] = Field(default_factory=list)
-
-
-def static_exit_ip(proxy: Proxy) -> str | None:
-    """The exit IP exit reputation knows a stored row by: where it was last seen exiting, as canonical text.
-
-    None for a row never seen exiting, and for a dynamic gateway, whose exit is chosen per request.
-    """
-    ip = proxy.metadata.get(META_DISCOVERED_IP)
-    if not isinstance(ip, str) or is_dynamic_gateway(proxy):
-        return None
-    return canonical_ip(ip)
 
 
 class RuntimeSection(BaseModel):

@@ -13,3 +13,10 @@ def utc_now() -> datetime:
     with database columns that use TIMESTAMP WITHOUT TIME ZONE.
     """
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def as_naive_utc(value: datetime | None) -> datetime | None:
+    """A time a client sent, as the tables store times: UTC without an offset. One without an offset already is."""
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)

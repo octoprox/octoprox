@@ -10,72 +10,31 @@ compression and encryption run off the event loop.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated
 
-import structlog
-from fastapi import APIRouter, Form, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Form, Request, Response, UploadFile
 
-from api.core import utc_now
-from api.core.auth import DbDep, RequireAdminDep
-from api.core.backup import BackupError, BackupFile, BackupRepository, ImportResult
-from api.core.logging import error_text
-from api.core.roles import JobKind
-from api.db.streams import ChangeKind
-from api.models.audit import INSTALL_ENTITY_ID, AuditAction, AuditEntityType
+from api.core.auth import RequireAdminDep
 from api.models.backup import ExportRequest, ImportSummary
-from api.routes.common import (
-    actor_of,
-    change_log_of,
-    geo_service_of,
-    jobs_of,
-    provider_registry_of,
-    provider_store_of,
-    redis_client_of,
-)
-
-logger = structlog.get_logger()
+from api.routes.common import actor_of, backup_service_of
 
 router = APIRouter(prefix="/backup")
 
-# The shortest passphrase an import accepts, as the export model requires.
-MIN_PASSPHRASE_LENGTH = 8
-
 
 @router.post("/export")
-async def export_backup(session: DbDep, data: ExportRequest, admin: RequireAdminDep) -> Response:
+async def export_backup(request: Request, data: ExportRequest, admin: RequireAdminDep) -> Response:
     """Export the full setup as a downloadable, passphrase-encrypted file."""
-    repository = BackupRepository(session)
-    schema_version = await repository.schema_version()
-    payload = await repository.export(data.include_metrics, data.include_database_files)
-    backup = await asyncio.to_thread(
-        BackupFile.build,
-        payload,
-        data.passphrase,
-        schema_version=schema_version,
-        include_metrics=data.include_metrics,
-        include_database_files=data.include_database_files,
-    )
-
-    filename = f"octoprox-backup-{utc_now().date().isoformat()}.opbak"
-    logger.info(
-        "Backup exported",
-        admin=admin.username,
-        include_metrics=data.include_metrics,
-        include_database_files=data.include_database_files,
-        bytes=len(backup.content),
-    )
+    backup = await backup_service_of(request).export(data, actor_of(request, admin))
     return Response(
         content=backup.content,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{backup.filename}"'},
     )
 
 
 @router.post("/import", response_model=ImportSummary)
 async def import_backup(
     request: Request,
-    session: DbDep,
     admin: RequireAdminDep,
     file: UploadFile,
     passphrase: Annotated[str, Form()],
@@ -87,85 +46,7 @@ async def import_backup(
     With ``keep_current_user`` the calling admin's account survives the wipe;
     imported users that collide with it are renamed / re-identified.
     """
-    if mode != "replace":
-        raise HTTPException(status_code=400, detail=f"Unsupported import mode: {mode}")
-    if len(passphrase) < MIN_PASSPHRASE_LENGTH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Passphrase must be at least {MIN_PASSPHRASE_LENGTH} characters.",
-        )
-
-    raw = await file.read()
-    repository = BackupRepository(session)
-
-    # 1. Compatibility first, before decryption, so an incompatible file is
-    #    refused without needing the passphrase. 2. Decrypt and validate.
-    try:
-        backup = await asyncio.to_thread(BackupFile.read, raw)
-        backup.check_compatibility(await repository.schema_version())
-        payload = await asyncio.to_thread(backup.decrypt, passphrase)
-    except BackupError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    # 3. Wipe and restore in one transaction: a failure rolls everything back.
-    try:
-        result = await repository.replace_all(
-            payload, provider_registry_of(request), keep_user_id=admin.id if keep_current_user else None
-        )
-    except BackupError as exc:
-        await session.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # In the import's transaction, so the trail it restored ends with who restored it.
-    await actor_of(request, admin).acted(
-        session,
-        AuditAction.IMPORTED,
-        AuditEntityType.BACKUP,
-        entity_id=INSTALL_ENTITY_ID,
-        name="Backup",
-        details={
-            "backup_created_at": backup.envelope.created_at,
-            "app_version": backup.envelope.app_version,
-            "includes_metrics": backup.envelope.includes_metrics,
-            "kept_current_user": result.summary.kept_current_user,
-        },
+    content = await file.read()
+    return await backup_service_of(request).restore(
+        content, passphrase, mode, keep_current_user, actor_of(request, admin)
     )
-    # Committed here rather than after the response, so this process reads
-    # the imported definitions back below.
-    await session.commit()
-    # Anything may have changed: every process reads every definition again.
-    await change_log_of(request).record(ChangeKind.ALL)
-
-    await _follow_import(request, result)
-    logger.info(
-        "Backup imported",
-        admin=admin.username,
-        **result.summary.model_dump(exclude={"user_conflicts"}),
-        user_conflicts=len(result.summary.user_conflicts),
-    )
-    return result.summary
-
-
-async def _follow_import(request: Request, result: ImportResult) -> None:
-    """What follows a committed import here: forget the removed projects' keys, ask for the removed cloud connectors'
-    scale runs, and read the imported definitions.
-
-    All best effort: the import stands, the keys left behind are never read
-    again, the scale producer publishes the removed connectors' runs once the
-    import's change entry is compiled, and the definitions refresher reads
-    what this misses when that entry reaches it.
-    """
-    if result.deleting_connector_ids:
-        # Never raises: what Redis refuses is logged and left to the producer.
-        await jobs_of(request).request_now(JobKind.SCALE, result.deleting_connector_ids)
-    if result.removed_project_ids:
-        redis = redis_client_of(request)
-        await redis.after_commit(
-            lambda: result.forget_removed_projects(redis),
-            "forget the removed projects' keys",
-            projects=len(result.removed_project_ids),
-        )
-    try:
-        await provider_store_of(request).sync_all()
-        await geo_service_of(request).resync()
-    except Exception as exc:
-        logger.warning("Imported definitions not read yet, left to the refresher", error=error_text(exc))

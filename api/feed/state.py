@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 import structlog
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from api.core import utc_now
 from api.core.stats import MetricDelta
@@ -25,26 +25,12 @@ from api.db.redis import (
     TRAFFIC_BLOCKED_KEY,
     TRAFFIC_PENDING_KEY,
 )
+from api.models.proxy import HealthSoft
 
 if TYPE_CHECKING:
     from api.db.redis import EntityWindows, RedisClient
 
 logger = structlog.get_logger()
-
-
-class HealthSoft(BaseModel):
-    """A proxy's soft health between checks, what the next check builds on and the api shows; the status is a Postgres column.
-
-    Stored as the hash ``PROXY_HEALTH_KEY``, one field per model field as
-    ``model_dump(mode="json")``, expiring after ``PROXY_HEALTH_TTL_SECONDS``.
-    """
-
-    # Failed checks in a row; 0 after a success.
-    failures: int = 0
-    # How long the last check took, in milliseconds.
-    latency_ms: float = 0.0
-    # When the last check ran (naive UTC).
-    checked_at: datetime
 
 
 class RuntimeStateReader:

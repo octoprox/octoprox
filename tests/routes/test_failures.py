@@ -13,9 +13,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
+import pytest
 from starlette.testclient import TestClient
 
 from api.core import utc_now
+from api.core.config import Settings
 from api.core.stats import FailureExample
 from api.db.models import FailureMetricsModel
 from api.db.redis import RedisClient
@@ -104,19 +106,6 @@ class TestListFailures:
         assert data["enabled"] is True
         assert data["max_entries"] > 0
 
-    def test_the_log_settings_are_this_installs(
-        self, authenticated_client: TestClient, created_project: dict[str, Any], test_settings: Any,
-    ) -> None:
-        test_settings.failure_log_enabled = False
-        test_settings.failure_log_max_entries = 77
-        test_settings.failure_log_retention_hours = 5
-        url = f"/api/v1/projects/{created_project['id']}/failures"
-
-        data = authenticated_client.get(url).json()
-
-        assert (data["enabled"], data["max_entries"], data["retention_hours"]) == (False, 77, 5)
-        assert authenticated_client.get(f"{url}/summary").json()["enabled"] is False
-
     def test_unknown_project(self, authenticated_client: TestClient) -> None:
         assert authenticated_client.get("/api/v1/projects/nope/failures").status_code == 404
 
@@ -196,6 +185,27 @@ class TestListFailures:
         url = f"/api/v1/projects/{created_project['id']}/failures"
         assert authenticated_client.get(url, params={"count": 0}).status_code == 422
         assert authenticated_client.get(url, params={"count": 1001}).status_code == 422
+
+
+class TestLogSettings:
+    """The answers tell the failure log's settings, as this install was started with them."""
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings) -> Settings:
+        test_settings.failure_log_enabled = False
+        test_settings.failure_log_max_entries = 77
+        test_settings.failure_log_retention_hours = 5
+        return test_settings
+
+    def test_the_log_settings_are_this_installs(
+        self, authenticated_client: TestClient, created_project: dict[str, Any],
+    ) -> None:
+        url = f"/api/v1/projects/{created_project['id']}/failures"
+
+        data = authenticated_client.get(url).json()
+
+        assert (data["enabled"], data["max_entries"], data["retention_hours"]) == (False, 77, 5)
+        assert authenticated_client.get(f"{url}/summary").json()["enabled"] is False
 
 
 class TestHead:

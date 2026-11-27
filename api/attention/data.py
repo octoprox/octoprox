@@ -40,11 +40,11 @@ if TYPE_CHECKING:
     from api.db.session import SessionFactory
     from api.feed.preview import RoutingPreview
     from api.models.connector import Connector, TrafficUsage
-    from api.models.project import Project
+    from api.models.project import PoolCounts, Project
     from api.providers.registry import ProviderRegistry
     from api.reputation.record import ConnectorSiteReputation
     from api.routing.router import Router
-    from api.services.read_model import PoolCounts, Pools, RuntimeView
+    from api.services.read_model import Pools, RuntimeView
 
 logger = structlog.get_logger()
 

@@ -45,6 +45,7 @@ from api.db.models import (
     ExitIpReputationModel,
     ProjectModel,
 )
+from api.models.exit_reputation import ReputationSummary
 from api.models.project import ExitReputationMode
 from api.reputation.record import (
     MAX_EXIT_SITES,
@@ -68,18 +69,6 @@ class ReputationSort(StrEnum):
 
     LAST_SEEN = "last_seen"
     REPORTS = "reports"
-
-
-class ReputationSummary(NamedTuple):
-    """One IP's records in a project over every site: its reports, the sites it has a record for, and those avoiding
-    it now with the latest of their ends."""
-
-    ip: str
-    good_reports: int
-    bad_reports: int
-    sites: int
-    avoided_sites: int
-    avoided_until: datetime | None
 
 
 class Recording(NamedTuple):

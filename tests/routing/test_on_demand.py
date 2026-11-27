@@ -30,7 +30,7 @@ from api.db.repository import (
 )
 from api.db.streams import ChangeLog, StreamEntry
 from api.feed.compiler import FullFeedCompiler
-from api.geo.models import GeoSettings
+from api.geo.models import META_GEO_COUNTRY, GeoSettings
 from api.geo.settings import GeoSettingsStore
 from api.jobs.job import JobBatch
 from api.jobs.provision import ProvisionJob
@@ -41,7 +41,7 @@ from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.providers.registry import ProviderRegistry, build_registry
-from api.providers.sdk.strategies import META_GEO_COUNTRY, META_SESSION_ID
+from api.providers.sdk.strategies import META_SESSION_ID
 from api.providers.store import ProviderStore
 from api.routing.ondemand import FeedOnDemand
 from api.routing.router import Router

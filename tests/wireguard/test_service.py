@@ -40,6 +40,7 @@ from api.models.wireguard import (
     WireGuardPeerUpdate,
     WireGuardServerSettingsDoc,
 )
+from api.services.errors import NotFoundError
 from api.wireguard import keys
 from api.wireguard.service import WireGuardService, defaults_from_config, seed_tunnel_settings
 
@@ -261,7 +262,7 @@ class TestDevices:
         second = await service.add_peer(project.id, WireGuardPeerCreate(name="b"), ACTOR)
         # The gateway (.1) is skipped; each device takes the lowest free host.
         assert (first.address, second.address) == ("10.66.0.2", "10.66.0.3")
-        assert await service.remove_peer(project.id, first.id, ACTOR)
+        await service.remove_peer(project.id, first.id, ACTOR)
         assert (await service.add_peer(project.id, WireGuardPeerCreate(name="c"), ACTOR)).address == "10.66.0.2"
         for name in ("d", "e", "f"):
             await service.add_peer(project.id, WireGuardPeerCreate(name=name), ACTOR)
@@ -302,18 +303,23 @@ class TestDevices:
         updated = await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(name=None, enabled=False, session_id=""), ACTOR)
         assert updated is not None and (updated.name, updated.enabled, updated.session_id, updated.country) == ("tv", False, None, "DE")
         assert await announced(redis_client) == [("wireguard", tv.id)]
-        assert (await service.peer(project.id, tv.id)).enabled is False  # type: ignore[union-attr]
+        assert (await service.peer(project.id, tv.id)).enabled is False
 
         with pytest.raises(TunnelValidationError, match="country"):
             await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(country="", city="Berlin"), ACTOR)
         with pytest.raises(TunnelValidationError, match="named 'console' already exists"):
             await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(name="console"), ACTOR)
         elsewhere = await _project(db_session, "Kitchen")
-        assert await service.update_peer(elsewhere.id, tv.id, WireGuardPeerUpdate(enabled=True), ACTOR) is None
-        assert await service.peer(elsewhere.id, tv.id) is None
-        assert await service.rotate_peer_keys(elsewhere.id, tv.id, ACTOR) is None
-        assert await service.remove_peer(elsewhere.id, tv.id, ACTOR) is False
-        assert await service.client_config(elsewhere.id, tv.id) is None
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.update_peer(elsewhere.id, tv.id, WireGuardPeerUpdate(enabled=True), ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.peer(elsewhere.id, tv.id)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.rotate_peer_keys(elsewhere.id, tv.id, ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.remove_peer(elsewhere.id, tv.id, ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.client_config(elsewhere.id, tv.id)
         # Refused or not the project's: nothing more was announced.
         assert await announced(redis_client) == [("wireguard", tv.id)]
 
@@ -324,8 +330,8 @@ class TestDevices:
         rotated = await service.rotate_peer_keys(project.id, with_psk.id, ACTOR)
         assert rotated is not None and rotated.public_key != with_psk.public_key
         assert rotated.preshared_key is not None and rotated.preshared_key != with_psk.preshared_key
-        assert (await service.rotate_peer_keys(project.id, without.id, ACTOR)).preshared_key is None  # type: ignore[union-attr]
-        assert (await service.peer(project.id, with_psk.id)).public_key == rotated.public_key  # type: ignore[union-attr]
+        assert (await service.rotate_peer_keys(project.id, without.id, ACTOR)).preshared_key is None
+        assert (await service.peer(project.id, with_psk.id)).public_key == rotated.public_key
 
     async def test_removing_drops_the_row_and_the_unflushed_window(
         self, db_session_factory: Factory, redis_client: RedisClient, project: Project
@@ -334,8 +340,9 @@ class TestDevices:
         tv = await service.add_peer(project.id, WireGuardPeerCreate(name="tv"), ACTOR)
         key = TUNNEL_PEER_METRICS_KEY.format(peer_id=tv.id)
         await redis_client.client.hset(key, mapping={"request_count": "3"})
-        assert await service.remove_peer(project.id, tv.id, ACTOR) is True
-        assert await service.peer(project.id, tv.id) is None
+        await service.remove_peer(project.id, tv.id, ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.peer(project.id, tv.id)
         assert not await redis_client.client.exists(key)
 
     async def test_a_removal_stands_when_the_window_cannot_be_dropped(
@@ -349,8 +356,9 @@ class TestDevices:
 
         monkeypatch.setattr(redis_client, "delete_tunnel_peer_window", down)
         with structlog.testing.capture_logs() as logs:
-            assert await service.remove_peer(project.id, tv.id, ACTOR) is True
-        assert await service.peer(project.id, tv.id) is None
+            await service.remove_peer(project.id, tv.id, ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.peer(project.id, tv.id)
         assert [log["step"] for log in logs if log["event"] == "Redis step after a write failed"] == [
             "drop a deleted device's metric window"
         ]
@@ -520,7 +528,12 @@ class TestChangeEntries:
         service: WireGuardService
 
         async def look(ref: str) -> object:
-            return await service.peer(project.id, ref) if ref else (await service.settings()).public_key
+            if not ref:
+                return (await service.settings()).public_key
+            try:
+                return await service.peer(project.id, ref)
+            except NotFoundError:
+                return None
 
         seen: list[object] = []
 
@@ -576,7 +589,7 @@ class TestAuditLog:
         await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(enabled=False), ACTOR)
         rotated = await service.rotate_peer_keys(project.id, tv.id, ACTOR)
         assert rotated is not None
-        assert await service.remove_peer(project.id, tv.id, ACTOR)
+        await service.remove_peer(project.id, tv.id, ACTOR)
 
         entries = await recorded(db_session_factory, AuditEntityType.WIREGUARD_DEVICE, tv.id)
         assert [(e.action, e.entity_name, e.project_id, e.actor) for e in entries] == [
@@ -624,9 +637,12 @@ class TestAuditLog:
             await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(name="console"), ACTOR)
         with pytest.raises(TunnelValidationError):
             await service.update_peer(project.id, tv.id, WireGuardPeerUpdate(country="", city="Berlin"), ACTOR)
-        assert await service.update_peer(elsewhere.id, tv.id, WireGuardPeerUpdate(enabled=False), ACTOR) is None
-        assert await service.rotate_peer_keys(elsewhere.id, tv.id, ACTOR) is None
-        assert await service.remove_peer(elsewhere.id, tv.id, ACTOR) is False
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.update_peer(elsewhere.id, tv.id, WireGuardPeerUpdate(enabled=False), ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.rotate_peer_keys(elsewhere.id, tv.id, ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.remove_peer(elsewhere.id, tv.id, ACTOR)
 
         assert [e.action for e in await recorded(db_session_factory, AuditEntityType.WIREGUARD_DEVICE, tv.id)] == ["created"]
         assert await entry_count(db_session_factory) == 2
@@ -648,7 +664,7 @@ class TestAuditLog:
 
         monkeypatch.setattr(WireGuardPeerRepository, "delete", deleted_first_elsewhere)
 
-        assert await service.remove_peer(project.id, tv.id, ACTOR) is True
+        await service.remove_peer(project.id, tv.id, ACTOR)
         assert [e.action for e in await recorded(db_session_factory, AuditEntityType.WIREGUARD_DEVICE, tv.id)] == ["created"]
 
     async def test_a_change_that_cannot_be_recorded_is_not_made(
@@ -702,7 +718,7 @@ class TestAuditLog:
             rotated = await service.rotate_peer_keys(project.id, device.id, ACTOR)
             assert rotated is not None
             devices.append(rotated)
-            assert await service.remove_peer(project.id, device.id, ACTOR)
+            await service.remove_peer(project.id, device.id, ACTOR)
 
         # A device that brought its own key is given one by a rotation, and it goes with the device.
         brought_entries = await recorded(db_session_factory, AuditEntityType.WIREGUARD_DEVICE, brought.id)

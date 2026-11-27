@@ -9,27 +9,25 @@ read from the alerts the workers store (:class:`~api.attention.history.AlertHist
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated, Literal
 
-import structlog
 from fastapi import APIRouter, Query, Request
 
-from api.core.auth import DbDep, RequireAdminDep, RequireEditorDep
+from api.attention.history import DEFAULT_ALERT_LIMIT, MAX_ALERT_LIMIT
+from api.core.auth import RequireAdminDep, RequireEditorDep
 from api.db.alert_repository import AlertFilters
-from api.db.audit_repository import SystemSettingsRepository
 from api.models.alerts import AlertEntry, AlertPage, AlertSettingsResponse, AlertSettingsUpdate
 from api.models.attention import Severity
 from api.models.audit import InstallAlertRetention, InstallAlertRetentionUpdate
-from api.routes.common import actor_of, alert_history_of, alert_settings_of
-
-logger = structlog.get_logger()
+from api.routes.common import (
+    actor_of,
+    alert_history_of,
+    alert_settings_of,
+    system_settings_service_of,
+)
 
 router = APIRouter()
-
-# A page when the caller does not say, and the most one may ask for.
-DEFAULT_ALERT_LIMIT = 50
-MAX_ALERT_LIMIT = 200
 
 type _Status = Literal["open", "resolved", "all"]
 _StatusQuery = Annotated[_Status, Query(description="open (muted and covered included), resolved, or all")]
@@ -58,10 +56,8 @@ async def list_project_alerts(
 ) -> AlertPage:
     """A page of the project's alerts, newest first, with the open and resolved counts under the filters and how many
     opened after ``until``; the next page is read ``before`` the last alert shown."""
-    filters = _filters(status, severity, kind, q, since)
-    return await alert_history_of(request).page(
-        project_id, filters, limit=limit, before=before, until=_naive_utc(until)
-    )
+    filters = AlertFilters.of(status, severity, kind, q, since)
+    return await alert_history_of(request).page(project_id, filters, limit=limit, before=before, until=until)
 
 
 @router.get("/projects/{project_id}/alerts/{alert_id}", response_model=AlertEntry)
@@ -98,31 +94,24 @@ async def list_install_alerts(
     before: _BeforeQuery = None,
 ) -> AlertPage:
     """A page of the install's alerts (admin), newest first, as a project's list reads."""
-    filters = _filters(status, severity, kind, None, since)
-    return await alert_history_of(request).page(None, filters, limit=limit, before=before, until=_naive_utc(until))
+    filters = AlertFilters.of(status, severity, kind, None, since)
+    return await alert_history_of(request).page(None, filters, limit=limit, before=before, until=until)
 
 
 @router.get("/alerts/install/retention", response_model=InstallAlertRetention)
-async def get_install_retention(session: DbDep, _admin: RequireAdminDep) -> InstallAlertRetention:
+async def get_install_retention(request: Request, _admin: RequireAdminDep) -> InstallAlertRetention:
     """How many days the install's resolved alerts are kept (admin); 0 keeps them forever."""
-    return (await SystemSettingsRepository(session).get()).install_alert_retention()
+    return (await system_settings_service_of(request).get()).install_alert_retention()
 
 
 @router.put("/alerts/install/retention", response_model=InstallAlertRetention)
 async def put_install_retention(
-    request: Request, session: DbDep, body: InstallAlertRetentionUpdate, admin: RequireAdminDep
+    request: Request, body: InstallAlertRetentionUpdate, admin: RequireAdminDep
 ) -> InstallAlertRetention:
     """Set how many days the install's resolved alerts are kept (admin), recorded on System settings; the hourly
     compaction applies it."""
-    repository = SystemSettingsRepository(session)
-    before = await repository.get()
-    after = await repository.set_install_alert_retention(body.days)
-    # Only the column this save wrote: the row it returns can carry another request's save.
-    changed = before.model_copy(update={"install_alert_retention_days": after.install_alert_retention_days})
-    await actor_of(request, admin).updated(session, before, changed)
-    await session.commit()
-    logger.info("Install alert retention changed", days=body.days, admin=admin.username)
-    return after.install_alert_retention()
+    saved = await system_settings_service_of(request).set_install_alert_retention(body.days, actor_of(request, admin))
+    return saved.install_alert_retention()
 
 
 # After /alerts/install/retention, so it is never read as an alert's id.
@@ -130,22 +119,3 @@ async def put_install_retention(
 async def get_install_alert(request: Request, _admin: RequireAdminDep, alert_id: str) -> AlertEntry:
     """One of the install's alerts (admin)."""
     return await alert_history_of(request).one(None, alert_id)
-
-
-def _filters(
-    status: _Status, severity: Severity | None, kind: str | None, q: str | None, since: datetime | None
-) -> AlertFilters:
-    return AlertFilters(
-        status=None if status == "all" else status,
-        severity=severity,
-        kind=kind,
-        q=q,
-        since=_naive_utc(since),
-    )
-
-
-def _naive_utc(value: datetime | None) -> datetime | None:
-    """A time a client sent, as the stored times are: naive UTC."""
-    if value is None or value.tzinfo is None:
-        return value
-    return value.astimezone(UTC).replace(tzinfo=None)

@@ -3,19 +3,19 @@
 
 """Authentication routes for Octoprox."""
 
-from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, NoReturn
+from typing import Annotated, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from jose import JWTError, jwt  # type: ignore[import-untyped]
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core import utc_now
 from api.core.api_tokens import looks_like_token
+from api.core.auth import user_from_api_token
 from api.core.config import settings
 from api.core.password import verify_password
+from api.core.session_tokens import create_jwt, verify_jwt
 from api.db.repository import UserRepository
 from api.db.session import get_db
 from api.models.user import SetPasswordRequest, User
@@ -24,8 +24,6 @@ from api.routes.common import audit_log_of
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/auth")
-
-ALGORITHM = "HS256"
 
 # What a refused password login answers, whichever check refused it.
 INVALID_LOGIN = "Invalid username or password"
@@ -56,15 +54,6 @@ class AuthStatus(BaseModel):
     theme_preference: str | None = None
 
 
-def create_jwt(payload: dict[str, Any], secret: str, expiry_hours: int) -> str:
-    """Create a JWT token."""
-    to_encode = payload.copy()
-    expire = datetime.now(UTC) + timedelta(hours=expiry_hours)
-    to_encode.update({"exp": expire})
-    encoded: str = jwt.encode(to_encode, secret, algorithm=ALGORITHM)
-    return encoded
-
-
 def issue_session_token(user: User) -> str:
     """The session JWT for a user who has just proved who they are, by whatever means.
 
@@ -76,15 +65,6 @@ def issue_session_token(user: User) -> str:
         secret=settings.jwt_secret,
         expiry_hours=settings.jwt_expiry_hours,
     )
-
-
-def verify_jwt(token: str, secret: str) -> dict[str, Any] | None:
-    """Verify a JWT token and return the payload."""
-    try:
-        payload: dict[str, Any] = jwt.decode(token, secret, algorithms=[ALGORITHM])
-        return payload
-    except JWTError:
-        return None
 
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
@@ -156,9 +136,6 @@ async def auth_status(request: Request, session: DbDep) -> AuthStatus:
     role: str | None
     user_id: str | None
     if looks_like_token(token):
-        # api.core.auth imports verify_jwt from this module, so the import goes this way lazily.
-        from api.core.auth import user_from_api_token
-
         try:
             current = await user_from_api_token(request, session, token)
         except HTTPException:

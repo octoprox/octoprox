@@ -4,7 +4,7 @@
 """Repository layer for database operations."""
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -68,33 +68,30 @@ from api.db.models import (
     WireGuardPeerModel,
 )
 from api.db.redis import PROJECT_WINDOWS, PROXY_WINDOWS, TUNNEL_PEER_WINDOWS, TotalledWindows
-from api.geo.models import META_LOCATION_CHECKED_AT, ConflictRule, ContradictedAction, UnknownAction
+from api.geo.models import (
+    META_DYNAMIC_SESSIONS,
+    META_LOCATION_CHECKED_AT,
+    ConflictRule,
+    ContradictedAction,
+    UnknownAction,
+)
 from api.models.alerts import AlertSettings
 from api.models.connector import Connector
 from api.models.credential import Credential
-from api.models.project import ExitReputationMode, MitmBrowser, MitmEngine, MitmMode, Project
+from api.models.project import (
+    ExitReputationMode,
+    MitmBrowser,
+    MitmEngine,
+    MitmMode,
+    Project,
+    ProjectCounts,
+)
 from api.models.provider import ProviderRecord
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.models.user import User, UserKind, UserRole
-from api.providers.sdk.strategies import META_DYNAMIC_SESSIONS
 
 # The proxy rows a streamed read builds between awaits (ProxyRepository.streamed): about 15 ms of the event loop each.
 STREAM_PIECE = 1000
-
-
-@dataclass
-class ProjectCounts:
-    """What one project holds, as the projects list shows it (``ProjectRepository.get_counts``)."""
-
-    credentials: int = 0
-    connectors: int = 0
-    # Proxies per status (ProxyStatus values); a status no proxy has is absent.
-    proxies_by_status: dict[str, int] = field(default_factory=dict)
-
-    @property
-    def proxies(self) -> int:
-        """Every proxy of the project, whatever its status."""
-        return sum(self.proxies_by_status.values())
 
 
 @dataclass(frozen=True)

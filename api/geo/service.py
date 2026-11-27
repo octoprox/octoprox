@@ -23,10 +23,9 @@ from api.geo.models import (
     META_CITY,
     META_CITY_SOURCE,
     META_CITY_VERDICT,
+    META_COUNTRY,
     META_COUNTRY_SOURCE,
-    META_ENDPOINT_CITY,
-    META_ENDPOINT_COUNTRY,
-    META_ENDPOINT_STATE,
+    META_DISCOVERED_IP,
     META_LOCATION,
     META_LOCATION_CANDIDATES,
     META_LOCATION_CHECKED_AT,
@@ -35,9 +34,7 @@ from api.geo.models import (
     META_STATE,
     META_STATE_SOURCE,
     META_STATE_VERDICT,
-    META_VENDOR_CITY,
     META_VENDOR_COUNTRY,
-    META_VENDOR_STATE,
     ContradictedAction,
     ExitJudgement,
     GeoSettings,
@@ -49,7 +46,6 @@ from api.geo.models import (
     Resolution,
     SourcePolicy,
     UnknownAction,
-    normalize_country,
 )
 from api.geo.observations import ObservationRecorder
 from api.geo.readers import is_ip
@@ -60,13 +56,6 @@ from api.models.location import LocationTarget
 from api.models.proxy import Proxy
 from api.providers.sdk.descriptor import IpDiscoverySpec
 from api.providers.sdk.sources import IpDiscoverer
-from api.providers.sdk.strategies import (
-    META_COUNTRY,
-    META_DISCOVERED_IP,
-    META_GEO_CITY,
-    META_GEO_COUNTRY,
-    META_GEO_STATE,
-)
 
 logger = structlog.get_logger()
 
@@ -209,52 +198,6 @@ class GeoService:
 
     # --- applying to proxies -------------------------------------------------------
 
-    @staticmethod
-    def claimed_country_of(proxy: Proxy) -> str | None:
-        """The vendor's claim for a proxy: its recorded claim, else the geo it was provisioned for."""
-        for key in (META_VENDOR_COUNTRY, META_GEO_COUNTRY):
-            code = normalize_country(proxy.metadata.get(key))
-            if code:
-                return code
-        return None
-
-    @classmethod
-    def outside_declared_countries(cls, proxy: Proxy, declared: Sequence[str]) -> bool:
-        """Whether a row the vendor placed in a declared country now resolves outside the connector's list: routing never uses it.
-
-        A row that made no claim, or whose country an operator pinned, is never outside it here.
-        """
-        if proxy.metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE:
-            return False
-        return bool(declared) and proxy.country is not None and proxy.country not in declared and cls.claimed_country_of(proxy) is not None
-
-    @classmethod
-    def claimed_place_of(cls, proxy: Proxy) -> LocationTarget | None:
-        """Everything promised about a proxy's exit, per level: what attribution judges and preflight verifies against.
-
-        The vendor's word or the slot's provisioned place, else what an operator pinned, each normalised when written.
-        """
-        manual = proxy.manual_location
-        metadata = proxy.metadata
-        country = cls.claimed_country_of(proxy)
-        if country is None and metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE:
-            country = metadata.get(META_COUNTRY)
-        return LocationTarget(
-            country=country or None,
-            state=metadata.get(META_VENDOR_STATE) or metadata.get(META_GEO_STATE) or manual.get("state_code") or None,
-            city=metadata.get(META_VENDOR_CITY) or metadata.get(META_GEO_CITY) or manual.get("city") or None,
-        ) or None
-
-    @staticmethod
-    def endpoint_place_of(proxy: Proxy) -> LocationTarget | None:
-        """What a third-party endpoint last reported about the proxy's exit, per level."""
-        metadata = proxy.metadata
-        return LocationTarget(
-            country=metadata.get(META_ENDPOINT_COUNTRY) or None,
-            state=metadata.get(META_ENDPOINT_STATE) or None,
-            city=metadata.get(META_ENDPOINT_CITY) or None,
-        ) or None
-
     def apply_observation(
         self,
         proxy: Proxy,
@@ -344,7 +287,7 @@ class GeoService:
         For a dynamic-sessions gateway row and for an exit the row already carries: accuracy and unique exits still learn of it.
         """
         resolution = self.resolve_ip(
-            ip, policy=policy, claimed=self.claimed_place_of(proxy), endpoint=endpoint, candidates=candidates
+            ip, policy=policy, claimed=proxy.claimed_place, endpoint=endpoint, candidates=candidates
         )
         self.record(
             self._observation(
@@ -406,11 +349,11 @@ class GeoService:
             checked_at: when the exit was seen, naive UTC, which becomes the row's ``location_checked_at``; None keeps the stamp.
         """
         policy = policy or self.default_policy
-        vendor_country = self.claimed_country_of(proxy)
+        vendor_country = proxy.claimed_country
         manual = proxy.metadata.get(META_COUNTRY_SOURCE) == MANUAL_SOURCE
         pinned = proxy.manual_location
         resolution = self.resolve_ip(
-            ip, policy=policy, claimed=self.claimed_place_of(proxy), endpoint=endpoint, candidates=candidates
+            ip, policy=policy, claimed=proxy.claimed_place, endpoint=endpoint, candidates=candidates
         )
         contradicted_on_claim = policy.contradicted == ContradictedAction.VENDOR
         open_on_claim = policy.unknown == UnknownAction.VENDOR

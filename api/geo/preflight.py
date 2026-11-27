@@ -25,6 +25,8 @@ from api.core.tasks import HeldTasks
 from api.db.redis import GEO_PREFLIGHT_KEY, RedisClient
 from api.geo.attributor import ProxyAttributor
 from api.geo.models import (
+    META_GEO_CITY,
+    META_GEO_STATE,
     ContradictedAction,
     IpObservation,
     LocationCandidate,
@@ -40,12 +42,8 @@ from api.models.proxy import Proxy
 from api.providers.sdk.descriptor import DEFAULT_EXIT_SAMPLE_PERCENT
 from api.providers.sdk.strategies import (
     META_EXIT_SAMPLE_PERCENT,
-    META_GEO_CITY,
-    META_GEO_STATE,
     META_SESSION_ID,
     META_SESSION_SECONDS,
-    is_dynamic_gateway,
-    session_generation,
 )
 from api.strategies.sticky import STICKY_BINDING_TTL_SECONDS
 
@@ -300,9 +298,9 @@ class PreflightChecker:
         country = target.country if target else None
         if country:
             return LocationTarget(country=country, state=target.state if target else None, city=target.city if target else None), REQUIRED_BY_REQUEST
-        if not is_dynamic_gateway(proxy):
+        if not proxy.is_dynamic_gateway:
             return None, None
-        country = GeoService.claimed_country_of(proxy)
+        country = proxy.claimed_country
         if country is None:
             # A state or city is meaningless without the country; nothing to verify.
             return None, None
@@ -321,7 +319,7 @@ class PreflightChecker:
         """
         if not project.location_preflight:
             return False
-        if is_dynamic_gateway(proxy):
+        if proxy.is_dynamic_gateway:
             return True
         if not proxy.metadata.get(META_SESSION_ID):
             return False
@@ -364,7 +362,7 @@ class PreflightChecker:
             The upstream's error (:data:`~api.providers.sdk.sources.UPSTREAM_ERRORS`) when it failed the echo.
         """
         expected, required_by = self.requirement(requested, proxy)
-        dynamic = is_dynamic_gateway(proxy)
+        dynamic = proxy.is_dynamic_gateway
         if expected is None and not dynamic:
             return SKIP
 
@@ -389,7 +387,7 @@ class PreflightChecker:
         elif rotating:
             key = None
         cached = await self._cached(key) if key else None
-        generation = session_generation(proxy)
+        generation = proxy.session_generation
         # A pooled slot's key names no requirement, and the same slot may serve
         # a request that asked for a place and one that rode on the vendor's
         # promise, which ``acceptable`` judges differently; a verdict is reused

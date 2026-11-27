@@ -22,6 +22,9 @@ from api.db.repository import (
 from api.geo import attributor as attributor_module
 from api.geo.attributor import ProxyAttributor
 from api.geo.models import (
+    META_DISCOVERED_IP,
+    META_DYNAMIC_SESSIONS,
+    META_GEO_COUNTRY,
     META_LOCATION_CHECKED_AT,
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
@@ -46,12 +49,7 @@ from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyProtocol
 from api.providers.sdk.sources import IpDiscoverer
-from api.providers.sdk.strategies import (
-    META_DISCOVERED_IP,
-    META_DYNAMIC_SESSIONS,
-    META_GEO_COUNTRY,
-    META_SESSION_ID,
-)
+from api.providers.sdk.strategies import META_SESSION_ID
 from tests.geo.doubles import BatchStore, Retired, Sightings
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 

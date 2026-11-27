@@ -18,16 +18,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from api.models.audit import AuditEntry
+from api.models.exit_reputation import HistoryPoint, HistoryRange, RuleInForce
 from api.models.project import ExitReputationMode, Project
-from api.reputation.history import (
-    ExactSteps,
-    FactorHistory,
-    HistoryPoint,
-    HistoryRange,
-    HourlyMeans,
-    RuleInForce,
-    ThreeHourMeans,
-)
+from api.reputation.history import ExactSteps, FactorHistory, HourlyMeans, ThreeHourMeans
 from api.reputation.record import ConnectorChange, ConnectorSiteKey, ExitIpKey, IpChange
 from api.reputation.weight import ReputationKind, ReputationRule
 

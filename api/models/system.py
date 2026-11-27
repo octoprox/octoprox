@@ -9,6 +9,7 @@ it; :class:`SystemSettings` is what an admin set for the whole install.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -211,6 +212,10 @@ class GatewaySnapshot(BaseModel):
     mitm_captures_dropped: int
     # The tunnel endpoints this gateway runs, one per protocol it terminates.
     tunnels: list[TunnelEndpointState]
+
+
+# Every live gateway's part of its last heartbeat, by instance id in order; none when the heartbeats cannot be read.
+GatewaySnapshots = Callable[[], Awaitable[dict[str, GatewaySnapshot]]]
 
 
 class ControllerSnapshot(BaseModel):

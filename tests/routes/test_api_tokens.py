@@ -13,8 +13,9 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import ORMExecuteState, Session
 from starlette.testclient import TestClient
 
@@ -22,8 +23,8 @@ import api.core.auth
 import api.models.auth
 from api.core import utc_now
 from api.core.api_tokens import TOKEN_PREFIX
+from api.core.auth import CurrentUser
 from api.db.auth_repository import ApiTokenRepository
-from api.db.repository import UserRepository
 from api.models.auth import ApiToken, TokenUsage
 from api.models.user import User
 from tests.conftest import on_app_loop
@@ -305,19 +306,19 @@ class TestTheRequestsSession:
         headers = _login(async_client, test_settings)
         created = async_client.post("/api/v1/users/me/tokens", json={"name": "lean"}, headers=headers).json()
         token_headers = {"Authorization": f"Bearer {created['token']}"}
-        read = UserRepository.get_by_id
+        resolve = api.core.auth.user_from_api_token
         at_endpoint: list[tuple[list[Statement], bool]] = []
 
         with statements_by_session() as statements, monkeypatch.context() as patched:
 
-            async def profile_read(self: UserRepository, user_id: str) -> User | None:
-                """The first statement of /users/me: notes what auth ran on the session and whether it holds a
-                transaction."""
-                session = self._session
+            async def resolved(request: Request, session: AsyncSession, bearer: str) -> CurrentUser:
+                """Token auth as the endpoint is handed the request: notes what auth ran on the request's session and
+                whether it still holds a transaction."""
+                user = await resolve(request, session, bearer)
                 at_endpoint.append((list(statements[session.sync_session]), session.in_transaction()))
-                return await read(self, user_id)
+                return user
 
-            patched.setattr(UserRepository, "get_by_id", profile_read)
+            patched.setattr(api.core.auth, "user_from_api_token", resolved)
             # The first use, a call within the minute, and a call once the stamp is due.
             assert async_client.get("/api/v1/users/me", headers=token_headers).status_code == 200
             assert async_client.get("/api/v1/users/me", headers=token_headers).status_code == 200

@@ -4,7 +4,7 @@ The Traffic split card (`web/src/components/TrafficSplit.tsx`, a card on
 the Overview and Connectors pages) lets a user pick a site and a
 requested place: "Requests to [google.com] from [Australia]". Everything
 in the card follows those pickers except the Observed column.
-`observed_share` from `get_traffic_split` in `api/routes/metrics.py` is
+`observed_share` from `TrafficSplitService.split` (`api/services/traffic_split.py`) is
 each connector's share of all the project's requests over the picked
 range, every site and every place, summed from `connector_metrics` by
 `MetricsRepository.get_connector_totals_since` (`api/db/repository.py`).

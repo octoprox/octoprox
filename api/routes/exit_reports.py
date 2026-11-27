@@ -9,12 +9,11 @@ takes them without Postgres, its project from the process's project map; the wor
 project's exit reputation records.
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 
 from api.core.auth import CurrentUserDep
 from api.models.exit_reports import ExitReportsRequest, ExitReportsResponse
-from api.reputation.reports import ExitReportIntake, ExitReportsUnavailableError
-from api.routes.common import UNAVAILABLE_RETRY_AFTER_SECONDS, api_runtime_of
+from api.routes.common import exit_report_service_of
 
 router = APIRouter(prefix="/projects/{project_id}/exit-reports")
 
@@ -29,18 +28,4 @@ async def send_exit_reports(
     404 for a project this process's project map does not hold, 409 while its exit reputation is off, and 503 when
     Redis did not answer, after which the reports are sent again.
     """
-    runtime = api_runtime_of(request)
-    project = runtime.project_map.get(project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if not project.exit_reputation.records:
-        raise HTTPException(status_code=409, detail="Exit reputation is off for this project")
-    intake = ExitReportIntake(runtime.redis_client)
-    try:
-        return await intake.take(project, body.reports, reporter_id=user.id, token_id=user.token_id)
-    except ExitReportsUnavailableError:
-        raise HTTPException(
-            status_code=503,
-            detail="Redis cannot be reached, so the reports were not taken; send them again shortly",
-            headers={"Retry-After": str(UNAVAILABLE_RETRY_AFTER_SECONDS)},
-        ) from None
+    return await exit_report_service_of(request).take(project_id, body.reports, user)

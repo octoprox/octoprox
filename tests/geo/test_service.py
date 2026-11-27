@@ -11,7 +11,10 @@ import pytest
 from api.core.config import Settings
 from api.geo.models import (
     MANUAL_SOURCE,
+    META_COUNTRY,
     META_COUNTRY_SOURCE,
+    META_DISCOVERED_IP,
+    META_GEO_COUNTRY,
     META_LOCATION,
     META_LOCATION_CANDIDATES,
     META_LOCATION_CHECKED_AT,
@@ -31,7 +34,6 @@ from api.geo.settings import GeoSettingsStore
 from api.geo.store import GeoDatabaseStore
 from api.models.location import LocationTarget
 from api.models.proxy import Proxy
-from api.providers.sdk.strategies import META_COUNTRY, META_DISCOVERED_IP, META_GEO_COUNTRY
 from tests.geo.test_places import write_geonames
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 
@@ -228,14 +230,14 @@ class TestEchoSpec:
 
 
 class TestPlaceClaims:
-    def test_claimed_place_of(self) -> None:
-        assert GeoService.claimed_place_of(_proxy()) is None
-        assert GeoService.claimed_place_of(_proxy(geo="US", geo_state="CA", geo_city="los_angeles")) == LocationTarget(country="US", state="CA", city="los_angeles")
-        assert GeoService.claimed_place_of(_proxy(manual_location={"state_code": "NY", "city": "buffalo"})) == LocationTarget(state="NY", city="buffalo")
+    def test_claimed_and_endpoint_place(self) -> None:
+        assert _proxy().claimed_place is None
+        assert _proxy(geo="US", geo_state="CA", geo_city="los_angeles").claimed_place == LocationTarget(country="US", state="CA", city="los_angeles")
+        assert _proxy(manual_location={"state_code": "NY", "city": "buffalo"}).claimed_place == LocationTarget(state="NY", city="buffalo")
         # What the vendor's list or discovery endpoint said outranks a pin at the same level.
-        assert GeoService.claimed_place_of(_proxy(vendor_country="US", vendor_city="austin", manual_location={"city": "dallas"})) == LocationTarget(country="US", city="austin")
-        assert GeoService.endpoint_place_of(_proxy(endpoint_country="GB", endpoint_city="london")) == LocationTarget(country="GB", city="london")
-        assert GeoService.endpoint_place_of(_proxy()) is None
+        assert _proxy(vendor_country="US", vendor_city="austin", manual_location={"city": "dallas"}).claimed_place == LocationTarget(country="US", city="austin")
+        assert _proxy(endpoint_country="GB", endpoint_city="london").endpoint_place == LocationTarget(country="GB", city="london")
+        assert _proxy().endpoint_place is None
 
     async def test_manual_place_is_verified_and_kept(self, geo_service: GeoService) -> None:
         proxy = _proxy(manual_location={"state_code": "SCT", "city": "london"})

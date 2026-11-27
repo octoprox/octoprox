@@ -1,13 +1,15 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The install-wide attribution settings row, cached per process, seeded from the config file on a fresh install.
+"""The install-wide attribution settings row, cached per process, seeded from the config file on a fresh install, and the
+admin API over it.
 
 The api and workers read it again on its change entry, the controller adopts its compile's copy and a gateway the feed's.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -15,11 +17,20 @@ from pydantic import ValidationError
 
 from api.core.config import Settings
 from api.db.geo_repository import GeoSettingsRepository
+from api.db.repository import ProjectRepository
 from api.db.session import SessionFactory
-from api.geo.models import GeoSettings, SourcePolicy
+from api.db.streams import ChangeKind
+from api.geo.models import GeoDatabaseKind, GeoSettings, SourcePolicy, normalize_country
+from api.geo.readers import is_ip
+from api.models.geo import GeoSettingsResponse, LookupCandidate, LookupRequest, LookupResponse
+from api.models.location import LocationTarget
+from api.services.errors import InputRejectedError, NotFoundError
 
 if TYPE_CHECKING:
     from api.core.audit import Actor
+    from api.db.streams import ChangeLog
+    from api.geo.reattribution import ReattributionService
+    from api.geo.service import GeoService
 
 logger = structlog.get_logger()
 
@@ -112,3 +123,90 @@ class GeoSettingsStore:
         self._from_database = True
         logger.info("Geo settings saved", updated_by=actor.name, conflict_rule=settings.default_conflict_rule.value)
         return settings
+
+
+class GeoSettingsService:
+    """The attribution settings as admins read and replace them, and a lookup of one IP under them.
+
+    Args:
+        geo: This process's attribution: its settings and database stores, and the lookups.
+        echo_enabled: Whether this install answers echo requests (``geo_echo_enabled``), shown beside the settings.
+        echo_trusted_proxies: The proxies echo takes a forwarded client address from (``geo_echo_trusted_proxies``).
+    """
+
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        *,
+        geo: GeoService,
+        changes: ChangeLog,
+        reattribution: ReattributionService,
+        echo_enabled: bool,
+        echo_trusted_proxies: Sequence[str],
+    ) -> None:
+        self._session_factory = session_factory
+        self._geo = geo
+        self._changes = changes
+        self._reattribution = reattribution
+        self._echo_enabled = echo_enabled
+        self._echo_trusted_proxies = tuple(echo_trusted_proxies)
+
+    async def get(self) -> GeoSettingsResponse:
+        """The attribution policy as stored, read and adopted first, and the databases this api process has open;
+        while Postgres cannot be read, the settings in memory."""
+        await self._geo.settings_store.load()
+        return self._answer()
+
+    async def replace(self, settings: GeoSettings, actor: Actor) -> GeoSettingsResponse:
+        """Replace the install-wide attribution settings, which every process adopts on their change entry; a change
+        to the policy projects inherit (the conflict rule and the city radius) re-judges every proxy."""
+        store = self._geo.settings_store
+        # Compared with the stored row, read first: this process's copy may lag a
+        # save made through another api, and comparing with it could skip the
+        # re-judging this save calls for.
+        await store.load()
+        inherited = store.settings.default_policy
+        await store.save(settings, actor)
+        await self._changes.record(ChangeKind.GEO_SETTINGS)
+        if settings.default_policy != inherited:
+            await self._reattribution.request_all("default policy changed")
+        return self._answer()
+
+    async def lookup(self, query: LookupRequest) -> LookupResponse:
+        """Resolve one IP with the databases this api process has open, optionally against a vendor claim, under the
+        install's policy or a project's. An IP or a claimed country that is not one is refused before the project is
+        looked up."""
+        ip = query.ip.strip()
+        if not is_ip(ip):
+            raise InputRejectedError("Not a valid IP address")
+        claimed_country = normalize_country(query.claimed_country) if query.claimed_country else None
+        if query.claimed_country and claimed_country is None:
+            raise InputRejectedError("claimed_country must be a two-letter ISO code")
+        claimed = LocationTarget.reported(claimed_country, query.claimed_state, query.claimed_city)
+        policy = self._geo.default_policy
+        if query.project_id:
+            async with self._session_factory() as session:
+                project = await ProjectRepository(session).get_by_id(query.project_id)
+            if project is None:
+                raise NotFoundError("Project not found")
+            policy = project.source_policy(policy)
+        resolution = self._geo.explain(ip, claimed, policy)
+        return LookupResponse(
+            ip=ip,
+            resolution=resolution,
+            policy=policy,
+            candidates=[LookupCandidate.of(c) for c in resolution.candidates],
+            # IP databases only: a GeoNames file answers no IP.
+            databases_loaded=sum(1 for d in self._geo.database_store.loaded if d.kind != GeoDatabaseKind.PLACES),
+        )
+
+    def _answer(self) -> GeoSettingsResponse:
+        """The settings in force here, with the echo settings and the databases this process has open."""
+        store = self._geo.settings_store
+        return GeoSettingsResponse(
+            settings=store.settings,
+            from_database=store.from_database,
+            echo_enabled=self._echo_enabled,
+            echo_trusted_proxies=list(self._echo_trusted_proxies),
+            databases_loaded=self._geo.database_store.loaded,
+        )

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import delete, select
@@ -156,6 +157,20 @@ class TestProjectAlerts:
 
         for bad in ({"status": "closed"}, {"severity": "fatal"}, {"limit": 201}, {"q": ""}, {"kind": "k" * 49}):
             assert authenticated_client.get(_url(project_id, "/alerts"), params=bad).status_code == 422, bad
+
+    def test_a_zoned_until_reads_as_utc_and_comes_back_without_its_zone(
+        self, authenticated_client: TestClient, history: tuple[str, datetime]
+    ) -> None:
+        project_id, start = history
+        until = start + timedelta(minutes=1)
+
+        held = authenticated_client.get(
+            _url(project_id, "/alerts"), params={"until": (until + timedelta(hours=2)).isoformat() + "+02:00"}
+        ).json()
+
+        assert ([alert["key"] for alert in held["alerts"]], held["until"], held["newer"]) == (
+            ["vendor_login:b", "vendor_login:a"], until.isoformat(), 1
+        )
 
     def test_one_alert_and_the_404s(self, authenticated_client: TestClient, history: tuple[str, datetime]) -> None:
         project_id, _start = history
@@ -321,3 +336,24 @@ class TestInstallAlerts:
         assert entries[0]["changes"] == {"install_alert_retention_days": [90, 30]}
         # The audit log's retention is left as it was.
         assert authenticated_client.get("/api/v1/audit/retention").json() == {"days": 365}
+
+    def test_a_retention_save_is_recorded_as_its_admin_and_logged(self, authenticated_client: TestClient) -> None:
+        kept = authenticated_client.get("/api/v1/alerts/install/retention").json()["days"]
+        days = kept % 1000 + 1
+
+        with patch("api.services.system_settings.logger") as log:
+            response = authenticated_client.put("/api/v1/alerts/install/retention", json={"days": days})
+
+        assert (response.status_code, response.json()) == (200, {"days": days})
+        entry = authenticated_client.get("/api/v1/audit/system_settings/1").json()["entries"][0]
+        assert {key: entry[key] for key in ("action", "entity_name", "actor_id", "actor", "changes", "details")} == {
+            "action": "updated",
+            "entity_name": "System settings",
+            "actor_id": "test-admin-id",
+            "actor": "testadmin",
+            "changes": {"install_alert_retention_days": [kept, days]},
+            "details": {},
+        }
+        assert entry["request_id"] == response.headers["x-request-id"]
+        log.info.assert_called_once_with("Install alert retention changed", days=days, admin="testadmin")
+        assert authenticated_client.put("/api/v1/alerts/install/retention", json={"days": kept}).status_code == 200

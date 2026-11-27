@@ -141,6 +141,72 @@ class TestMitmEndpoints:
         all_ids = [r["id"] for r in page1["records"] + page2["records"] + page3["records"]]
         assert len(all_ids) == len(set(all_ids))
 
+    async def test_a_capture_with_its_tls_details_and_the_cursor_of_a_page(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        redis_client: RedisClient,
+    ) -> None:
+        """Every field a gateway writes, typed; a page with more after it ends at its last record's id."""
+        project_id = created_project["id"]
+        hello = {
+            "version": "TLS 1.2", "supported_versions": ["TLS 1.3"], "cipher_suites": [{"id": "0x1301", "name": "AES"}],
+            "extensions": [{"type": 0}], "sni": "example.com", "alpn": ["h2"], "supported_groups": [{"id": 29}],
+            "signature_algorithms": [{"id": "0x0403"}], "ec_point_formats": [0], "ja3": "a", "ja3_full": "b",
+            "ja4": "c", "ja4_r": "d",
+        }
+        await redis_client.record_mitm_request(project_id, _make_fields(0))
+        await redis_client.record_mitm_request(project_id, _make_fields(
+            1,
+            upstream_headers=json.dumps([["user-agent", "Chrome"]]),
+            tls_version="TLSv1.3",
+            tls_cipher="TLS_AES_128_GCM_SHA256",
+            tls_key_bits="128",
+            tls_shared_ciphers="TLS_AES_128_GCM_SHA256,TLS_AES_256_GCM_SHA384",
+            tls_client_hello=json.dumps(hello),
+        ))
+
+        page = authenticated_client.get(f"/api/v1/projects/{project_id}/mitm/requests", params={"count": 1}).json()
+
+        [record] = page["records"]
+        assert page["next_cursor"] == record["id"]
+        assert record == {
+            "id": record["id"],
+            "timestamp": "2026-01-15T10:00:01",
+            "method": "GET",
+            "url": "https://example.com/path/1",
+            "request_headers": [["host", "example.com"]],
+            "upstream_headers": [["user-agent", "Chrome"]],
+            "request_body_size": 0,
+            "request_content_type": "",
+            "status_code": 200,
+            "response_headers": [["content-type", "text/html"]],
+            "response_body_size": 1024,
+            "response_content_type": "text/html",
+            "target_host": "example.com",
+            "proxy_url": "http://proxy:8080",
+            "mitm_mode": "match_ua",
+            "mitm_engine": "curl_cffi",
+            "mitm_browser": "",
+            "latency_ms": 42.5,
+            "tls_version": "TLSv1.3",
+            "tls_cipher": "TLS_AES_128_GCM_SHA256",
+            "tls_key_bits": 128,
+            "tls_shared_ciphers": ["TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384"],
+            "tls_client_hello": {
+                **hello, "compression_methods": [], "session_id_length": 0, "record_layer_version": "",
+                "key_share_groups": [], "compress_certificate": [], "alps_protocols": [], "psk_key_exchange_modes": [],
+            },
+        }
+        older = authenticated_client.get(
+            f"/api/v1/projects/{project_id}/mitm/requests", params={"count": 1, "cursor": page["next_cursor"]}
+        ).json()
+        assert older["next_cursor"] is None
+        assert (older["records"][0]["upstream_headers"], older["records"][0]["tls_key_bits"]) == ([], 0)
+        assert (older["records"][0]["tls_shared_ciphers"], older["records"][0]["tls_client_hello"]) == ([], None)
+        response = authenticated_client.get("/api/v1/projects/nonexistent/mitm/requests")
+        assert (response.status_code, response.json()) == (404, {"detail": "Project not found"})
+
     async def test_clear_mitm_requests(
         self,
         authenticated_client: TestClient,

@@ -7,7 +7,9 @@ Where the pass itself matters the worker's job runs the queued key here; what a 
 stream, and gateways from the heartbeats the tests advertise the way a gateway would.
 """
 
+import hashlib
 from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -705,6 +707,19 @@ class TestDatabases:
         assert response.status_code == 200
         assert response.json()["kind"] == "country" and response.json()["vendor"] == "maxmind"
 
+    def test_inspect_reports_every_field_in_order(self, authenticated_client: TestClient, tmp_path: Path) -> None:
+        path = write_mmdb(tmp_path / "GeoLite2-Country.mmdb", "GeoLite2-Country", {"1.0.0.0/24": MAXMIND_RECORD})
+        with path.open("rb") as handle:
+            body = authenticated_client.post("/api/v1/geo/databases/inspect", files={"file": (path.name, handle)}).json()
+
+        assert list(body) == [
+            "format", "database_type", "vendor", "kind", "build_epoch", "record_count", "ip_version", "languages",
+            "description", "size_bytes", "sha256", "attribution",
+        ]
+        assert (body["format"], body["database_type"], body["size_bytes"], body["sha256"]) == (
+            "mmdb", "GeoLite2-Country", path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+
     def test_editor_cannot_upload(self, editor_client: TestClient, tmp_path: Path) -> None:
         path = write_mmdb(tmp_path / "c.mmdb", "GeoLite2-Country", {"1.0.0.0/24": MAXMIND_RECORD})
         assert _upload(editor_client, path).status_code == 403
@@ -889,10 +904,10 @@ class TestDeleteOfAnOpenDatabase:
         return test_settings
 
     @pytest.fixture(autouse=True)
-    def unheard(self, monkeypatch: pytest.MonkeyPatch) -> Unheard:
+    def unheard(self, authenticated_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Unheard:
         """The geo routes announce their writes here instead: this api's refresher never hears of them."""
         log = Unheard()
-        monkeypatch.setattr("api.routes.geo.change_log_of", lambda request: log)
+        monkeypatch.setattr(api_runtime(authenticated_client).changes, "record", log.record)
         return log
 
     def test_a_config_file_database_is_refused(self, authenticated_client: TestClient, configured: Path) -> None:
@@ -928,6 +943,23 @@ class TestDeleteOfAnOpenDatabase:
         again = authenticated_client.delete(f"/api/v1/geo/databases/{database_id}")
 
         assert again.status_code == 404 and again.json()["detail"] == "Database not found"
+
+    def test_a_config_file_database_is_listed_in_lookup_order_and_counted(
+        self, authenticated_client: TestClient, configured: Path, tmp_path: Path
+    ) -> None:
+        client = authenticated_client
+        database_id = path_database_id(str(configured))
+        first = _upload(client, _city_database(tmp_path, "first"), priority=1).json()
+        last = _upload(client, _city_database(tmp_path, "last"), priority=10000).json()
+
+        listed = client.get("/api/v1/geo/databases").json()["databases"]
+        ids = [row["id"] for row in listed]
+        assert ids.index(first["id"]) < ids.index(database_id) < ids.index(last["id"])
+        config = next(row for row in listed if row["id"] == database_id)
+        assert (config["source"], config["enabled"], config["has_file"], config["loaded_here"]) == ("path", True, True, True)
+        assert client.get("/api/v1/geo/status").json()["databases_total"] == len(listed)
+        for row in (first, last):
+            assert client.delete(f"/api/v1/geo/databases/{row['id']}").status_code == 204
 
 
 class TestGateways:
@@ -1021,7 +1053,7 @@ class TestGateways:
             api_runtime(authenticated_client), "instance_snapshots", AsyncMock(side_effect=TimeoutError)
         )
 
-        with patch("api.routes.geo.logger") as log:
+        with patch("api.roles.api.logger") as log:
             status = authenticated_client.get("/api/v1/geo/status")
 
         assert status.status_code == 200 and status.json()["gateways"] == []
@@ -1366,3 +1398,120 @@ class TestObservationsAndStatus:
             ).status_code
             == 400
         )
+
+
+class TestRefusalsAndLimits:
+    """Each refusal's exact detail, the 504s of reads past the time limit, and the pages and windows clamped."""
+
+    @staticmethod
+    def _answer(response: httpx.Response) -> tuple[int, Any]:
+        return response.status_code, response.json()
+
+    def test_refusals_answer_with_their_details(
+        self, authenticated_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        client, answer = authenticated_client, self._answer
+        _clear(client)
+        assert answer(client.post("/api/v1/geo/lookup", json={"ip": " nope "})) == (
+            400, {"detail": "Not a valid IP address"}
+        )
+        assert answer(client.post("/api/v1/geo/lookup", json={"ip": GB_IP, "claimed_country": "USA"})) == (
+            400, {"detail": "claimed_country must be a two-letter ISO code"}
+        )
+        assert answer(client.post("/api/v1/geo/lookup", json={"ip": GB_IP, "project_id": "missing"})) == (
+            404, {"detail": "Project not found"}
+        )
+        missing = (404, {"detail": "Database not found"})
+        assert answer(client.patch("/api/v1/geo/databases/missing", json={"name": "x"})) == missing
+        assert answer(client.post("/api/v1/geo/databases/missing/refresh")) == missing
+        assert answer(client.delete("/api/v1/geo/databases/missing")) == missing
+        uploaded = _upload(client, _city_database(tmp_path)).json()
+        assert answer(client.post(f"/api/v1/geo/databases/{uploaded['id']}/refresh")) == (
+            400, {"detail": "This database has no download URL"}
+        )
+        assert answer(client.post("/api/v1/geo/reattribute", json={"connector_id": "missing"})) == (
+            404, {"detail": "Connector not found"}
+        )
+        empty = tmp_path / "empty.mmdb"
+        empty.write_bytes(b"")
+        assert answer(_upload(client, empty)) == (400, {"detail": "Empty file"})
+        junk = tmp_path / "junk.mmdb"
+        junk.write_bytes(b"not a database" * 50)
+        refused = _upload(client, junk)
+        with junk.open("rb") as handle:
+            inspected = client.post("/api/v1/geo/databases/inspect", files={"file": (junk.name, handle)})
+        assert (refused.status_code, inspected.status_code) == (422, 422)
+        assert refused.json() == {"detail": f"Not a readable IP database: {inspected.json()['detail']}"}
+
+        async def download(record: object, guard: object) -> bytes:
+            raise DownloadError("the vendor is down")
+
+        monkeypatch.setattr("api.geo.updater.download", download)
+        added = client.post(
+            "/api/v1/geo/databases/from-url", json={"name": "vendor", "update_url": "https://vendor.example/db.mmdb"}
+        )
+        assert answer(added) == (400, {"detail": "Download failed: the vendor is down"})
+        row = next(row for row in client.get("/api/v1/geo/databases").json()["databases"] if row["source"] == "url")
+        assert answer(client.post(f"/api/v1/geo/databases/{row['id']}/refresh")) == (
+            502, {"detail": "the vendor is down"}
+        )
+
+        async def refused_publish(*args: object) -> int:
+            raise RedisConnectionError("Connection refused")
+
+        monkeypatch.setattr(api_runtime(client).jobs, "publish", refused_publish)
+        queued = client.post("/api/v1/geo/reattribute", json={})
+        assert answer(queued) == (503, {"detail": "The job queue cannot be reached; try again"})
+        assert queued.headers["Retry-After"] == "5"
+        _clear(client)
+
+    def test_reads_past_the_time_limit_answer_504_with_what_to_narrow(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, answer = authenticated_client, self._answer
+
+        async def timed_out(*args: object, **kwargs: object) -> None:
+            return None
+
+        for read in ("recent", "count_matching", "count_exit_ips", "exit_sharing"):
+            monkeypatch.setattr(ObservationRepository, read, timed_out)
+
+        assert answer(client.get("/api/v1/geo/observations")) == (
+            504,
+            {
+                "detail": "Reading the log took longer than 30 s. If these filters match only older rows, set Until to"
+                " around then."
+            },
+        )
+        counting = (504, {"detail": "Counting took longer than 30 s. Narrow the filters first."})
+        assert answer(client.get("/api/v1/geo/observations/count")) == counting
+        assert answer(client.get("/api/v1/geo/exits/ips/count")) == counting
+        assert answer(client.get("/api/v1/geo/exits/sharing", params={"project_id": created_project["id"]})) == (
+            504, {"detail": "Comparing the exits took longer than 30 s. Pick a shorter window."}
+        )
+
+    def test_pages_and_windows_are_clamped(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        client = authenticated_client
+        page = client.get("/api/v1/geo/observations", params={"limit": 5000, "offset": -3}).json()
+        assert (page["limit"], page["offset"]) == (1000, 0)
+        assert client.get("/api/v1/geo/observations", params={"limit": 0}).json()["limit"] == 1
+        ips = client.get("/api/v1/geo/exits/ips", params={"limit": 5000, "offset": -3}).json()
+        assert (ips["limit"], ips["offset"]) == (1000, 0)
+        assert client.get("/api/v1/geo/exits/ips", params={"limit": 0}).json()["limit"] == 1
+
+        def since(path: str, **params: Any) -> datetime:
+            return datetime.fromisoformat(client.get(path, params=params).json()["since"])
+
+        before = utc_now()
+        shortest = [
+            since("/api/v1/geo/accuracy", days=0),
+            since("/api/v1/geo/exits", days=-5),
+            since("/api/v1/geo/exits/sharing", project_id=created_project["id"], days=0),
+        ]
+        longest = since("/api/v1/geo/exits", days=99999)
+        after = utc_now()
+        for moment in shortest:
+            assert before - timedelta(days=1) <= moment <= after - timedelta(days=1)
+        assert before - timedelta(days=3650) <= longest <= after - timedelta(days=3650)

@@ -23,6 +23,7 @@ from api.models.audit import MASK
 from api.models.openvpn import OpenVpnPeer, OpenVpnSessionReading
 from tests.conftest import api_runtime, on_app_loop
 from tests.routes.gateway_heartbeats import advertise_gateway, withdraw_gateway
+from tests.routes.test_wireguard import SNAPSHOT_FIELDS, device_routes, save_aged_history
 
 SETTINGS = "/api/v1/openvpn/settings"
 
@@ -325,6 +326,49 @@ class TestPeers:
         assert authenticated_client.get(f"{url}/metrics/history").status_code == 404
         assert authenticated_client.delete(url).status_code == 404
         assert authenticated_client.get(f"{_peers_url(created_project)}/{peer['id']}").json()["serial"] == peer["serial"]
+
+    def test_not_found_details(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
+        """A missing project is named first on every device route, before the device and before what the body asks."""
+        url = _peers_url(created_project)
+        peer = authenticated_client.post(url, json={"name": "tv"}).json()
+        missing = "/api/v1/projects/nope/openvpn/peers"
+        for response in (
+            authenticated_client.get(missing),
+            authenticated_client.post(missing, json={"name": "tv"}),
+            *device_routes(authenticated_client, f"{missing}/{peer['id']}", "rotate-certificate"),
+            *device_routes(authenticated_client, f"{missing}/nope", "rotate-certificate"),
+        ):
+            assert (response.status_code, response.json()) == (404, {"detail": "Project not found"})
+        for response in device_routes(authenticated_client, f"{url}/nope", "rotate-certificate"):
+            assert (response.status_code, response.json()) == (404, {"detail": "Peer not found"})
+        deleted = authenticated_client.delete(f"{url}/{peer['id']}")
+        assert (deleted.status_code, deleted.content) == (204, b"")
+
+    def test_history_comes_oldest_first(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
+        """Raw one-minute rows up to a day, hourly buckets past it; either way the oldest first, and only the device's."""
+        url = _peers_url(created_project)
+        tv = authenticated_client.post(url, json={"name": "tv"}).json()
+        console = authenticated_client.post(url, json={"name": "console"}).json()
+        on_app_loop(
+            authenticated_client, save_aged_history, api_runtime(authenticated_client).session_factory,
+            "openvpn", created_project["id"], tv["id"], console["id"],
+        )
+
+        raw = authenticated_client.get(f"{url}/{tv['id']}/metrics/history", params={"range": "6h"}).json()["snapshots"]
+        bucketed = authenticated_client.get(f"{url}/{tv['id']}/metrics/history", params={"range": "7d"}).json()["snapshots"]
+
+        assert [{k: v for k, v in s.items() if k != "timestamp"} for s in raw] == [
+            {"request_count": 2, "success_count": 2, "failure_count": 0, "avg_latency_ms": 10.0, "bytes_sent": 2,
+             "bytes_received": 20, "connections_by_address": 0, "encrypted_dns_blocked": 1},
+            {"request_count": 10, "success_count": 8, "failure_count": 2, "avg_latency_ms": 10.0, "bytes_sent": 10,
+             "bytes_received": 100, "connections_by_address": 2, "encrypted_dns_blocked": 1},
+        ]
+        assert [list(s) for s in raw] == [SNAPSHOT_FIELDS, SNAPSHOT_FIELDS]
+        assert [(s["request_count"], s["connections_by_address"]) for s in bucketed] == [(100, 0), (4, 1), (2, 0), (10, 2)]
+        for snapshots in (raw, bucketed):
+            assert [s["timestamp"] for s in snapshots] == sorted(s["timestamp"] for s in snapshots)
+        for peer in (tv, console):
+            assert authenticated_client.delete(f"{url}/{peer['id']}").status_code == 204
 
     def test_deleting_the_project_removes_its_peers(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
         url = _peers_url(created_project)

@@ -229,6 +229,14 @@ class MetricDelta(WindowCounts):
         self.bytes_received += other.bytes_received
 
 
+def success_rate(counters: MetricDelta) -> float:
+    """The share of counted requests that succeeded, 0-100; 0 when none were counted.
+
+    The one rule every page's success rate follows (a project's metrics, a proxy's row).
+    """
+    return counters.success_count / counters.request_count * 100 if counters.request_count else 0.0
+
+
 # The column a project's or connector's history row keeps each step's average in.
 STEP_COLUMNS: dict[Step, str] = {step: f"avg_{step.value}_ms" for step in Step}
 # The field of a StepMetricDelta each step's sum is kept in.

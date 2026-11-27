@@ -9,6 +9,7 @@ keyboard, and the user row with that verified email is who signs in. Nobody
 self-registers. See docs/sso.md.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import ClassVar
@@ -109,6 +110,22 @@ class AuthProviderResponse(BaseModel):
     updated_by: str | None
     updated_at: datetime
 
+    @classmethod
+    def of(cls, config: AuthProviderConfig, redirect_uri: str) -> "AuthProviderResponse":
+        """A provider's client as the admin page shows it, with the callback URL to register."""
+        return cls(
+            kind=config.kind,
+            label=PROVIDER_LABELS[config.kind],
+            enabled=config.enabled,
+            client_id=config.client_id,
+            has_client_secret=bool(config.client_secret),
+            tenant_id=config.tenant_id,
+            redirect_uri=redirect_uri,
+            configured=config.configured,
+            updated_by=config.updated_by,
+            updated_at=config.updated_at,
+        )
+
 
 class AuthProviderListResponse(BaseModel):
     providers: list[AuthProviderResponse]
@@ -151,9 +168,26 @@ class AuthIdentityResponse(BaseModel):
     created_at: datetime
     last_login_at: datetime | None
 
+    @classmethod
+    def of(cls, identity: AuthIdentity) -> "AuthIdentityResponse":
+        """A linked provider account, labelled as the sign-in buttons are."""
+        return cls(
+            id=identity.id,
+            provider=identity.provider,
+            label=PROVIDER_LABELS[identity.provider],
+            email=identity.email,
+            created_at=identity.created_at,
+            last_login_at=identity.last_login_at,
+        )
+
 
 class AuthIdentityListResponse(BaseModel):
     identities: list[AuthIdentityResponse]
+
+    @classmethod
+    def of(cls, identities: list[AuthIdentity]) -> "AuthIdentityListResponse":
+        """The linked provider accounts, in the order given."""
+        return cls(identities=[AuthIdentityResponse.of(identity) for identity in identities])
 
 
 class ApiToken(BaseModel):
@@ -195,6 +229,14 @@ class ApiTokenCreate(BaseModel):
         return v
 
 
+@dataclass(frozen=True)
+class IssuedToken:
+    """A token just issued, with its secret: the only time the secret exists outside the caller's hands."""
+
+    token: ApiToken
+    secret: str
+
+
 class ApiTokenResponse(BaseModel):
     id: str
     name: str
@@ -205,6 +247,20 @@ class ApiTokenResponse(BaseModel):
     created_at: datetime
     expired: bool
 
+    @classmethod
+    def of(cls, token: ApiToken) -> "ApiTokenResponse":
+        """A token as listed: its prefix and stamps, never the secret or its hash."""
+        return cls(
+            id=token.id,
+            name=token.name,
+            token_prefix=token.token_prefix,
+            created_by=token.created_by,
+            expires_at=token.expires_at,
+            last_used_at=token.last_used_at,
+            created_at=token.created_at,
+            expired=token.expired,
+        )
+
 
 class ApiTokenCreatedResponse(BaseModel):
     """The one response that carries the secret. It cannot be fetched again."""
@@ -212,6 +268,16 @@ class ApiTokenCreatedResponse(BaseModel):
     token: str
     api_token: ApiTokenResponse
 
+    @classmethod
+    def of(cls, issued: IssuedToken) -> "ApiTokenCreatedResponse":
+        """A token just issued, with its secret."""
+        return cls(token=issued.secret, api_token=ApiTokenResponse.of(issued.token))
+
 
 class ApiTokenListResponse(BaseModel):
     tokens: list[ApiTokenResponse]
+
+    @classmethod
+    def of(cls, tokens: list[ApiToken]) -> "ApiTokenListResponse":
+        """The tokens as listed, in the order given."""
+        return cls(tokens=[ApiTokenResponse.of(token) for token in tokens])

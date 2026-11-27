@@ -134,6 +134,46 @@ class TestProviderSettings:
         assert authenticated_client.put(f"{PROVIDERS}/microsoft", json=body).status_code == 200
         _disable_all(authenticated_client)
 
+    def test_each_refused_save_names_what_is_missing(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        _forget(client, "microsoft")
+        common = {"enabled": False, "client_id": "", "client_secret": "", "tenant_id": "Organizations"}
+        no_tenant = {"enabled": True, "client_id": "cid", "client_secret": "sec", "tenant_id": ""}
+        no_client = {"enabled": True, "client_id": "", "client_secret": "", "tenant_id": "11111111-2222-3333-4444-555555555555"}
+
+        answers = [client.put(f"{PROVIDERS}/microsoft", json=doc) for doc in (common, no_tenant, no_client)]
+        github = client.put(f"{PROVIDERS}/github", json={"enabled": True, "client_id": "cid", "client_secret": ""})
+
+        assert [(r.status_code, r.json()) for r in (*answers, github)] == [
+            (400, {"detail": "Name the tenant whose accounts may sign in; 'common', 'organizations' and 'consumers' would admit any Microsoft account"}),
+            (400, {"detail": "Microsoft sign-in needs a tenant ID before it can be enabled"}),
+            (400, {"detail": "Microsoft sign-in needs a client ID and secret before it can be enabled"}),
+            (400, {"detail": "GitHub sign-in needs a client ID and secret before it can be enabled"}),
+        ]
+        assert client.get(PROVIDERS).json()["providers"][1]["updated_by"] is None
+
+    def test_a_save_answers_the_provider_as_listed(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        _forget(client, "github")
+
+        saved = client.put(f"{PROVIDERS}/github", json={"enabled": True, "client_id": "gh", "client_secret": "s", "tenant_id": "t"})
+
+        assert saved.status_code == 200, saved.text
+        body = saved.json()
+        assert {key: value for key, value in body.items() if key != "updated_at"} == {
+            "kind": "github",
+            "label": "GitHub",
+            "enabled": True,
+            "client_id": "gh",
+            "has_client_secret": True,
+            "tenant_id": "",
+            "redirect_uri": "http://testserver/api/v1/auth/sso/github/callback",
+            "configured": True,
+            "updated_by": "testadmin",
+        }
+        assert client.get(PROVIDERS).json()["providers"][2] == body
+        _disable_all(client)
+
     def test_unknown_kind(self, authenticated_client: TestClient) -> None:
         assert authenticated_client.get(f"{PUBLIC}/okta/start").status_code == 422
         assert authenticated_client.put(f"{PROVIDERS}/okta", json={"enabled": False}).status_code == 422

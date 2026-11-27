@@ -17,14 +17,28 @@ import copy
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from enum import StrEnum
 from functools import cached_property
 from itertools import takewhile
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from api.db.reputation_repository import ExitReputationRepository
-from api.models.location import COUNTRY_NAMES, LocationTarget, state_name_slug
+from api.models.exit_reputation import (
+    ConnectorShare,
+    ConnectorTile,
+    HardestHit,
+    PlaceCell,
+    PlaceLevel,
+    PlaceLowest,
+    ReputationSite,
+    SiteConnector,
+    SitePlace,
+    SitePlacesView,
+    SiteSummary,
+    TileCounts,
+    place_label,
+)
+from api.models.location import LocationTarget
 from api.reputation.record import ConnectorSiteReputation, ReputationPolicy, place_levels
 from api.reputation.weight import ConnectorReputation, PlaceState, ReputationRule
 from api.routing.router import RequestReputation
@@ -38,10 +52,6 @@ if TYPE_CHECKING:
     from api.routing.snapshot import ConnectorView
     from api.strategies import ProxyGroup
 
-# How the place of a request naming none reads.
-NO_PLACE_LABEL = "No place named"
-# Under this a connector's value counts as heavily lowered on its tile.
-HEAVILY_LOWERED = 0.5
 # At most this many eligible rows at a state or a city, a connector with IPs is never the hardest hit there.
 THIN_ROWS = 2
 
@@ -63,80 +73,6 @@ def place_key(text: str | None) -> str:
         return ""
     target = place_target(text.strip())
     return target.key if target is not None else ""
-
-
-def place_label(place: str) -> str:
-    """How a requested place reads: a country by its name ("United States"), a state with its country ("New York,
-    United States", or "ENG, United Kingdom" without a name on record), a city with its state, else its country
-    ("New York, NY", "London, United Kingdom"). A code with no name on record reads as itself."""
-    if not place:
-        return NO_PLACE_LABEL
-    country, _, below = place.partition("/")
-    country_name = COUNTRY_NAMES.get(country, country)
-    if not below:
-        return country_name
-    state, _, city = below.partition("/")
-    if city:
-        return f"{_words(city)}, {state or country_name}"
-    name = state_name_slug(country, state)
-    return f"{_words(name) if name else state}, {country_name}"
-
-
-def _words(slug: str) -> str:
-    """A place slug as words: "new_york" reads "New York"."""
-    return " ".join(word.capitalize() for word in slug.split("_") if word)
-
-
-class PlaceLevel(StrEnum):
-    """How fine a requested place is."""
-
-    NONE = "none"
-    COUNTRY = "country"
-    STATE = "state"
-    CITY = "city"
-
-    @property
-    def depth(self) -> int:
-        """How many levels the place names, by declaration order: 0 for no place, 3 for a city."""
-        return list(PlaceLevel).index(self)
-
-    @classmethod
-    def of(cls, place: str) -> PlaceLevel:
-        """The level ``place`` (a ``LocationTarget`` key) names."""
-        if not place:
-            return cls.NONE
-        _country, _, below = place.partition("/")
-        if not below:
-            return cls.COUNTRY
-        return cls.CITY if below.partition("/")[2] else cls.STATE
-
-
-@dataclass(frozen=True, slots=True)
-class ConnectorShare:
-    """One connector's part of a site's requests from a place: its reputation there and where it stands, the recent
-    counts the traffic split shows beside it (decayed to now), the record of the place's own evidence, and its share in
-    percent configured, effective (by reputation only where the project avoids) and as Avoid would make it."""
-
-    reputation: ConnectorReputation
-    state: PlaceState
-    blocked: int | None
-    requests: int | None
-    own: ConnectorSiteReputation | None
-    own_factor: float | None
-    effective_weight: float
-    effective_share: float
-    configured_share: float
-    avoid_share: float
-
-    @property
-    def takes(self) -> bool:
-        """Whether routing lets the connector take the requests."""
-        return self.state is not PlaceState.TAKES_NONE
-
-    @property
-    def lowered(self) -> bool:
-        """Whether its own value there takes its weight under the configured one; an inherited one never counts."""
-        return self.state is PlaceState.OWN and self.reputation.lowers
 
 
 class ReputationSplit:
@@ -481,54 +417,6 @@ class PlaceRow:
         )
 
 
-@dataclass(slots=True)
-class ConnectorTile:
-    """One connector across a site's places: its own values per level, lowered (under 1) of those measured, and its
-    listed places by where it stands; takes-none places are not counted."""
-
-    lowered_countries: int = 0
-    countries: int = 0
-    lowered_states: int = 0
-    states: int = 0
-    lowered_cities: int = 0
-    cities: int = 0
-    heavy: int = 0
-    lowered: int = 0
-    inherited: int = 0
-    full: int = 0
-    not_judged: int = 0
-
-    def count(self, level: PlaceLevel, share: ConnectorShare) -> None:
-        """Count the connector's ``share`` at a listed place of ``level``."""
-        if share.state is PlaceState.OWN:
-            self._own(level, share.lowered)
-            value = share.reputation.value
-            if value < HEAVILY_LOWERED:
-                self.heavy += 1
-            elif share.lowered:
-                self.lowered += 1
-            else:
-                self.full += 1
-        elif share.state is PlaceState.INHERITED:
-            self.inherited += 1
-        elif share.state is PlaceState.NOT_JUDGED:
-            self.not_judged += 1
-        elif share.state is PlaceState.NO_REPORTS:
-            self.full += 1
-
-    def _own(self, level: PlaceLevel, lowered: bool) -> None:
-        """Count an own value at ``level``."""
-        if level is PlaceLevel.COUNTRY:
-            self.countries += 1
-            self.lowered_countries += lowered
-        elif level is PlaceLevel.STATE:
-            self.states += 1
-            self.lowered_states += lowered
-        elif level is PlaceLevel.CITY:
-            self.cities += 1
-            self.lowered_cities += lowered
-
-
 class SitePlaces:
     """One site across every place its records name, for each connector: a row per place a dynamic connector has a
     record at (no place only when one of them has a record there), and per country where a connector with IPs has an
@@ -578,9 +466,9 @@ class SitePlaces:
                 counts[country] = (lowered + row.lowered, total + 1)
         return counts
 
-    def tile(self, connector_id: str) -> ConnectorTile:
+    def tile(self, connector_id: str) -> TileCounts:
         """The connector across the listed places."""
-        tile = ConnectorTile()
+        tile = TileCounts()
         for row in self.rows:
             tile.count(row.level, row.shares[connector_id])
         return tile
@@ -610,6 +498,57 @@ class SitePlaces:
             return None
         value, _depth, _reports, _index, connector_id, place = min(found)
         return connector_id, place, value
+
+    def view(self, project: Project, connectors: Sequence[Connector], sites: list[ReputationSite]) -> SitePlacesView:
+        """The view of these places for ``connectors``, sorted by name."""
+        mode = project.exit_reputation
+        rule = ReputationRule.of(project)
+        split = self.split
+        hardest = self.hardest
+        return SitePlacesView(
+            site=self.site,
+            mode=mode,
+            reputation_applied=split.applied,
+            reputation_strength=rule.strength,
+            reputation_floor=rule.floor,
+            sites=sites,
+            connectors=[
+                SiteConnector(
+                    connector_id=connector.id,
+                    name=connector.name,
+                    credential_type=connector.credential_type,
+                    enabled=connector.enabled,
+                    weight=connector.weight,
+                    dynamic=split.dynamic(connector.id),
+                    excluded_reason=split.excluded_reason(connector),
+                    tile=ConnectorTile.of(
+                        self.tile(connector.id), self.no_place[connector.id], split.dynamic(connector.id)
+                    ),
+                )
+                for connector in connectors
+            ],
+            places=[
+                SitePlace(
+                    place=row.place,
+                    label=place_label(row.place),
+                    level=row.level,
+                    parent=row.parent,
+                    reports=row.reports,
+                    lowered=row.lowered,
+                    not_judged=row.not_judged,
+                    lowest=PlaceLowest(value=lowest[0], inherited=lowest[1]) if (lowest := row.lowest) else None,
+                    cities_lowered=self.cities[row.place][0] if row.place in self.cities else None,
+                    cities_total=self.cities[row.place][1] if row.place in self.cities else None,
+                    cells={connector_id: PlaceCell.of(share) for connector_id, share in row.shares.items()},
+                )
+                for row in self.rows
+            ],
+            summary=SiteSummary(
+                lowered_connectors=len(self.lowered),
+                serving_connectors=len(self.serving),
+                hardest=HardestHit(connector_id=hardest[0], place=hardest[1], value=hardest[2]) if hardest else None,
+            ),
+        )
 
     def _thin(self, connector_id: str, level: PlaceLevel, share: ConnectorShare) -> bool:
         """Whether a connector with IPs has too few eligible rows at a state or a city for its value to tell."""

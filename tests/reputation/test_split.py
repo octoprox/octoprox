@@ -21,10 +21,11 @@ from api.core import utc_now
 from api.feed.models import REPUTATION_SECTION
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
+from api.models.exit_reputation import PlaceLevel, place_label
 from api.models.project import ExitReputationMode, Project
 from api.models.proxy import Proxy, ProxyProtocol
 from api.reputation.record import ConnectorSiteKey, ConnectorSiteReputation
-from api.reputation.split import PlaceLevel, ReputationSplit, SitePlaces, place_label, place_target
+from api.reputation.split import ReputationSplit, SitePlaces, place_target
 from api.reputation.weight import PlaceState
 from api.routing.router import Router
 from api.routing.snapshot import RoutingSnapshot

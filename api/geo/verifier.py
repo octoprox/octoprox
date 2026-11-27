@@ -23,14 +23,13 @@ from python_socks import ProxyConnectionError
 from api.core import utc_now
 from api.core.http_tunnel import TunnelRefusedError
 from api.geo.attributor import ProxyAttributor
-from api.geo.models import LocationRules
+from api.geo.models import META_DISCOVERED_IP, LocationRules
 from api.geo.preflight import PreflightChecker, PreflightVerdict
 from api.geo.readers import is_ip
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
 from api.providers.sdk.sources import UPSTREAM_ERRORS
-from api.providers.sdk.strategies import META_DISCOVERED_IP, is_dynamic_gateway, session_generation
 
 if TYPE_CHECKING:
     from api.routing.router import Router
@@ -70,7 +69,7 @@ class ExitIp:
     def last_seen(cls, proxy: Proxy) -> ExitIp | None:
         """The exit recorded on ``proxy``'s row; None when there is none, and on a dynamic gateway, whose exit is per request."""
         ip = proxy.metadata.get(META_DISCOVERED_IP)
-        if is_dynamic_gateway(proxy) or not isinstance(ip, str) or not is_ip(ip):
+        if proxy.is_dynamic_gateway or not isinstance(ip, str) or not is_ip(ip):
             return None
         return cls(ip.strip(), ExitSource.LAST_SEEN, ProxyAttributor.checked_at(proxy))
 
@@ -179,7 +178,7 @@ class ExitVerifier:
         # A session-less request on a dynamic gateway retries by re-rendering:
         # selecting the same row again mints a fresh vendor session, so the
         # row is not excluded and the strategy's promise about rows holds.
-        rerender = is_dynamic_gateway(proxy) and not session_id
+        rerender = proxy.is_dynamic_gateway and not session_id
         moves = bool(session_id) and project.location_session_move
         can_retry = rerender or moves or self._router.strategy_for_project(project.id).allows_exit_reselection(session_id)
         excluded: set[str] = set()
@@ -193,7 +192,7 @@ class ExitVerifier:
                 verdict = await self._preflight_checker.check(
                     project, proxy, session_id=session_id, requested=location, allowed=allowed
                 )
-                while session_id and verdict.generation > session_generation(proxy):
+                while session_id and verdict.generation > proxy.session_generation:
                     # Another request moved the session further meanwhile: it goes on from there,
                     # echoed again once that verdict is no longer trusted. That check may find the
                     # session moved further still, so it is followed until verdict and session agree.
@@ -204,7 +203,7 @@ class ExitVerifier:
                     verdict = await self._preflight_checker.check(
                         project, proxy, session_id=session_id, requested=location, allowed=allowed
                     )
-                    if session_generation(proxy) != target:
+                    if proxy.session_generation != target:
                         # The row left the feed and could not be rendered there: judged as it is below.
                         break
             except UPSTREAM_ERRORS as exc:
@@ -246,18 +245,18 @@ class ExitVerifier:
                 gone = upstream_error is None and verdict.replaced
                 unreachable = upstream_error is not None and _unreachable(upstream_error)
                 moved = None
-                if moves and session_id and is_dynamic_gateway(proxy) and not (refused or unreachable or gone):
+                if moves and session_id and proxy.is_dynamic_gateway and not (refused or unreachable or gone):
                     # The same gateway under a new vendor session. After a vendor's 4xx, which a new
                     # session would get too, a gateway out of reach, or once the row left the feed
                     # (also when it left during an echo that failed), another connector instead (below).
                     moved = self._router.render_session(
-                        proxy, project.id, session_id, location, session_generation(proxy) + 1
+                        proxy, project.id, session_id, location, proxy.session_generation + 1
                     )
-                if moved is not None and session_generation(moved) > session_generation(proxy):
+                if moved is not None and moved.session_generation > proxy.session_generation:
                     proxy = moved
                     logger.info(
                         "Preflight moving the session to a new vendor session",
-                        project_id=project.id, proxy_id=proxy.id, generation=session_generation(proxy),
+                        project_id=project.id, proxy_id=proxy.id, generation=proxy.session_generation,
                         attempt=attempts + 1,
                     )
                     continue

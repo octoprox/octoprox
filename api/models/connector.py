@@ -4,6 +4,7 @@
 """Connector model definitions."""
 
 import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, ClassVar, Literal
@@ -34,7 +35,7 @@ from api.models.cloud_options import (
     get_azure_architecture,
     get_gcp_architecture,
 )
-from api.models.credential import CredentialType
+from api.models.credential import Credential, CredentialType
 from api.models.location import normalize_country_list
 
 # Ceiling of a cloud connector's backoff after cloud errors, in minutes: 2^errors minutes up to this.
@@ -688,6 +689,39 @@ class ProxyTarget(BaseModel):
     exit_sample_percent: int | None = None
 
 
+@dataclass(frozen=True)
+class ConnectorRow:
+    """A connector with its credential, its pool and its traffic this period."""
+
+    connector: Connector
+    credential_name: str | None
+    credential_type: str | None
+    # Every proxy of the connector, whatever its status.
+    proxy_count: int
+    # How many proxies the connector is meant to hold; None when it has no target of its own.
+    target: ProxyTarget | None
+    traffic_usage: TrafficUsage
+
+    @classmethod
+    def of(
+        cls,
+        connector: Connector,
+        credential: Credential | None,
+        proxy_count: int,
+        target: ProxyTarget | None,
+        usage: TrafficUsage,
+    ) -> 'ConnectorRow':
+        """A connector with its credential's name and type, its proxies counted, its target and its usage."""
+        return cls(
+            connector=connector,
+            credential_name=credential.name if credential else None,
+            credential_type=credential.type if credential else None,
+            proxy_count=proxy_count,
+            target=target,
+            traffic_usage=usage,
+        )
+
+
 class ConnectorResponse(BaseModel):
     """Schema for connector API responses."""
     id: str
@@ -719,6 +753,50 @@ class ConnectorResponse(BaseModel):
     consecutive_errors: int = 0
     created_at: datetime
     updated_at: datetime
+
+    @classmethod
+    def of(cls, view: 'ConnectorRow', default_health_check_interval: int) -> 'ConnectorResponse':
+        """The full API view of a connector: its definition, credential, pool, target and traffic."""
+        connector = view.connector
+        return cls(
+            id=connector.id,
+            name=connector.name,
+            credential_id=connector.credential_id,
+            credential_name=view.credential_name,
+            credential_type=view.credential_type,
+            project_id=connector.project_id,
+            config=connector.config,
+            routing_config=connector.routing_config,
+            rate_limit_config=connector.rate_limit_config,
+            traffic_config=connector.traffic_config,
+            health_check_config=connector.health_check_config,
+            health_check_interval=connector.health_check_interval(default_health_check_interval),
+            default_health_check_interval=default_health_check_interval,
+            traffic_reset_at=connector.traffic_reset_at,
+            traffic_usage=view.traffic_usage,
+            enabled=connector.enabled,
+            proxy_count=view.proxy_count,
+            target=view.target,
+            last_error=connector.last_error,
+            last_error_at=connector.last_error_at,
+            consecutive_errors=connector.consecutive_errors,
+            created_at=connector.created_at,
+            updated_at=connector.updated_at,
+        )
+
+
+class ConnectorListResponse(BaseModel):
+    """Response for listing connectors."""
+    total: int
+    connectors: list[ConnectorResponse]
+
+    @classmethod
+    def of(cls, views: list['ConnectorRow'], default_health_check_interval: int) -> 'ConnectorListResponse':
+        """The connectors as listed, in the order given."""
+        return cls(
+            total=len(views),
+            connectors=[ConnectorResponse.of(view, default_health_check_interval) for view in views],
+        )
 
 
 # --- Options Response for Frontend ---

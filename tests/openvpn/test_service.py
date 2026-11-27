@@ -34,6 +34,7 @@ from api.models.project import Project
 from api.models.tunnel import TunnelEndpointState, TunnelValidationError
 from api.openvpn import pki
 from api.openvpn.service import OpenVpnService, defaults_from_config
+from api.services.errors import NotFoundError
 from api.wireguard.service import seed_tunnel_settings
 from tests.wireguard.test_service import (
     ACTOR,
@@ -98,7 +99,7 @@ class TestCertificates:
         rotated = await service.rotate_certificate(project.id, peer.id, ACTOR)
         assert rotated is not None and rotated.serial != peer.serial and rotated.address == peer.address
         assert pki.is_issued_by(rotated.certificate, server.ca_cert)
-        assert (await service.peer(project.id, peer.id)).serial == rotated.serial  # type: ignore[union-attr]
+        assert (await service.peer(project.id, peer.id)).serial == rotated.serial
         assert await announced(redis_client) == [("openvpn", peer.id)]
 
     async def test_rotating_the_identity_reissues_every_device_with_it(
@@ -154,10 +155,13 @@ class TestSettingsAndDevices:
         with pytest.raises(TunnelValidationError, match="named 'Console' already exists"):
             await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(name="Console"), ACTOR)
         elsewhere = await _project(db_session, "Kitchen")
-        assert await service.update_peer(elsewhere.id, tv.id, OpenVpnPeerUpdate(enabled=True), ACTOR) is None
-        assert await service.rotate_certificate(elsewhere.id, tv.id, ACTOR) is None
-        assert await service.remove_peer(elsewhere.id, tv.id, ACTOR) is False
-        assert await service.remove_peer(project.id, tv.id, ACTOR) is True
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.update_peer(elsewhere.id, tv.id, OpenVpnPeerUpdate(enabled=True), ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.rotate_certificate(elsewhere.id, tv.id, ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.remove_peer(elsewhere.id, tv.id, ACTOR)
+        await service.remove_peer(project.id, tv.id, ACTOR)
         assert [p.name for p in await service.peers(project.id)] == ["console"]
 
     async def test_a_removal_stands_when_the_window_cannot_be_dropped(
@@ -171,8 +175,9 @@ class TestSettingsAndDevices:
 
         monkeypatch.setattr(redis_client, "delete_tunnel_peer_window", down)
         with structlog.testing.capture_logs() as logs:
-            assert await service.remove_peer(project.id, tv.id, ACTOR) is True
-        assert await service.peer(project.id, tv.id) is None
+            await service.remove_peer(project.id, tv.id, ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.peer(project.id, tv.id)
         assert [log["step"] for log in logs if log["event"] == "Redis step after a write failed"] == [
             "drop a deleted device's metric window"
         ]
@@ -280,9 +285,12 @@ class TestChangeEntries:
             await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(name="Console"), ACTOR)
         with pytest.raises(TunnelValidationError, match="outside 10.68.0.0/24"):
             await service.save_settings(OpenVpnServerSettingsDoc(subnet="10.68.0.0/24"), ACTOR)
-        assert await service.update_peer(elsewhere.id, tv.id, OpenVpnPeerUpdate(enabled=True), ACTOR) is None
-        assert await service.rotate_certificate(elsewhere.id, tv.id, ACTOR) is None
-        assert await service.remove_peer(elsewhere.id, tv.id, ACTOR) is False
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.update_peer(elsewhere.id, tv.id, OpenVpnPeerUpdate(enabled=True), ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.rotate_certificate(elsewhere.id, tv.id, ACTOR)
+        with pytest.raises(NotFoundError, match="Peer not found"):
+            await service.remove_peer(elsewhere.id, tv.id, ACTOR)
 
         assert await announced(redis_client) == []
 
@@ -316,7 +324,10 @@ class TestChangeEntries:
         class Witness(ChangeLog):
             async def record(self, kind: ChangeKind, *ids: str) -> None:
                 ref = ref_of(ids)
-                seen.append(await service.peer(project.id, ref) if ref else (await service.settings()).ca_cert)
+                try:
+                    seen.append(await service.peer(project.id, ref) if ref else (await service.settings()).ca_cert)
+                except NotFoundError:
+                    seen.append(None)
 
         service = _service(db_session_factory, redis_client, changes=Witness(redis_client))
         await service.settings()
@@ -380,7 +391,7 @@ class TestAuditLog:
         await service.update_peer(project.id, tv.id, OpenVpnPeerUpdate(state="BE"), ACTOR)
         rotated = await service.rotate_certificate(project.id, tv.id, ACTOR)
         assert rotated is not None
-        assert await service.remove_peer(project.id, tv.id, ACTOR)
+        await service.remove_peer(project.id, tv.id, ACTOR)
 
         entries = await recorded(db_session_factory, AuditEntityType.OPENVPN_DEVICE, tv.id)
         assert [(e.action, e.entity_name, e.project_id, e.actor) for e in entries] == [
@@ -435,7 +446,7 @@ class TestAuditLog:
 
         monkeypatch.setattr(OpenVpnPeerRepository, "delete", deleted_first_elsewhere)
 
-        assert await service.remove_peer(project.id, tv.id, ACTOR) is True
+        await service.remove_peer(project.id, tv.id, ACTOR)
         assert [e.action for e in await recorded(db_session_factory, AuditEntityType.OPENVPN_DEVICE, tv.id)] == ["created"]
 
     async def test_a_rotation_that_cannot_be_recorded_is_not_made(
@@ -485,7 +496,7 @@ class TestAuditLog:
         devices: list[OpenVpnPeer | None] = [tv, await service.rotate_certificate(project.id, tv.id, ACTOR)]
         identities.append(await service.rotate_identity(ACTOR))
         devices.append(await service.peer(project.id, tv.id))
-        assert await service.remove_peer(project.id, tv.id, ACTOR)
+        await service.remove_peer(project.id, tv.id, ACTOR)
 
         issued = [device for device in devices if device is not None]
         secrets = [key for s in identities for key in (s.ca_key, s.server_key, s.tls_crypt_key)] + [

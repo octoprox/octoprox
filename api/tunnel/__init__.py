@@ -7,5 +7,6 @@ Whatever the protocol, ``dns`` answers a device's names with synthetic
 addresses, ``system`` redirects its TCP connections to a local listener,
 ``sniff`` and ``peers`` recover the name and the device, and ``transparent``
 relays as for a ``CONNECT``; ``dataplane`` ties them together on a gateway,
-where a protocol's endpoint attaches its interface.
+where a protocol's endpoint attaches its interface. On the api, ``service``
+holds what each protocol's service shares.
 """

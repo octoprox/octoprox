@@ -18,9 +18,13 @@ from uuid import UUID, uuid5
 import structlog
 
 from api.geo.models import (
+    META_COUNTRY,
+    META_DISCOVERED_IP,
+    META_DYNAMIC_SESSIONS,
     META_ENDPOINT_CITY,
     META_ENDPOINT_COUNTRY,
     META_ENDPOINT_STATE,
+    META_GEO_COUNTRY,
     META_VENDOR_CITY,
     META_VENDOR_COUNTRY,
     META_VENDOR_STATE,
@@ -43,32 +47,7 @@ SyncResult = tuple[list[Proxy], list[str]]
 
 META_SESSION_ID = "session_id"
 META_PROXY_TYPE = "proxy_type"
-META_DISCOVERED_IP = "discovered_ip"
 META_HASHED_IP = "hashed_ip"
-META_COUNTRY = "country"  # exit country routing reads; upper-case ISO code (see Proxy.country)
-# Raw evidence behind META_COUNTRY, kept apart so attribution can judge the
-# vendor: META_VENDOR_COUNTRY is what the vendor said (its list or known-IP
-# API, or its own discovery endpoint), META_ENDPOINT_COUNTRY what a
-# third-party discovery endpoint reported. Both from api.geo.models.
-# The place a slot or request was targeted at. The country is written on
-# provisioned rows (per-country slot groups) and on rendered requests.
-META_GEO_COUNTRY = "geo"
-# State and city rendered into a dynamic-sessions request (never on a stored row).
-META_GEO_STATE = "geo_state"
-META_GEO_CITY = "geo_city"
-# "true" on the single gateway row of a dynamic-sessions connector: its session
-# id and country are rendered per request, not provisioned per slot.
-META_DYNAMIC_SESSIONS = "dynamic_sessions"
-
-
-def is_dynamic_gateway(proxy: Proxy) -> bool:
-    """Whether ``proxy`` is the gateway row of a dynamic-sessions connector."""
-    return proxy.metadata.get(META_DYNAMIC_SESSIONS) == "true"
-
-
-def session_generation(proxy: Proxy) -> int:
-    """How many times the client session ``proxy`` was rendered for has moved to a new vendor session; 0 when never."""
-    return int(proxy.metadata.get(META_SESSION_GENERATION) or 0)
 
 
 # Where a source's word about an exit's place is kept, per level: the vendor's
@@ -108,9 +87,6 @@ META_EXIT_SAMPLE_PERCENT = "exit_sample_percent"
 # On a request rendered for a client session: how long the vendor keeps the
 # session's exit, in seconds, when the connector sets it.
 META_SESSION_SECONDS = "session_seconds"
-# On a request rendered for a client session that preflight moved off a refused
-# exit: how many times it moved.
-META_SESSION_GENERATION = "session_generation"
 META_LIST_IDENTITY = "list_identity"
 META_PROVIDER = "provider"
 
@@ -348,7 +324,7 @@ class DynamicSessionStrategy(SyncStrategy):
         return proxy
 
     async def sync(self, existing: list[Proxy]) -> SyncResult:
-        gateways = [p for p in existing if is_dynamic_gateway(p)]
+        gateways = [p for p in existing if p.is_dynamic_gateway]
         if gateways:
             keep = _sort_proxies_healthy_first(gateways)[0]
             return [], [p.id for p in existing if p.id != keep.id]

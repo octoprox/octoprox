@@ -17,9 +17,9 @@ from sqlalchemy import select
 from api.core.roles import JobKind
 from api.db.models import ConnectorModel
 from api.db.repository import ConnectorRepository, ProxyRepository
+from api.geo.models import META_GEO_COUNTRY
 from api.jobs.job import Job
 from api.models.location import normalize_country_code
-from api.providers.sdk.strategies import META_GEO_COUNTRY
 
 if TYPE_CHECKING:
     from api.db.session import SessionFactory

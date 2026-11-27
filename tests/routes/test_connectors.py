@@ -104,6 +104,15 @@ class TestConnectorEndpoints:
 
         assert response.status_code == 404
 
+    def test_not_found_details(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
+        """A listing checks the project first; one connector is looked up in the project, which is never checked."""
+        response = authenticated_client.get("/api/v1/projects/non-existent/connectors")
+        assert (response.status_code, response.json()) == (404, {"detail": "Project not found"})
+        for project_id in (created_project["id"], "non-existent"):
+            url = f"/api/v1/projects/{project_id}/connectors/non-existent"
+            for response in (authenticated_client.get(url), authenticated_client.get(f"{url}/metrics/history")):
+                assert (response.status_code, response.json()) == (404, {"detail": "Connector not found"})
+
     def test_create_connector(
         self,
         authenticated_client: TestClient,

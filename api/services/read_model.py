@@ -28,16 +28,16 @@ from api.db.repository import (
     ConnectorStatusCount,
     CredentialRepository,
     MetricsRepository,
-    ProjectCounts,
     ProjectRepository,
     ProxyPlacement,
     ProxyRepository,
 )
-from api.geo.models import ExitCoverage
-from api.models.connector import ProxyTarget, TrafficUsage
-from api.models.proxy import ProxyStatus
+from api.geo.models import META_GEO_COUNTRY, ExitCoverage
+from api.models.connector import ConnectorRow, ProxyTarget, TrafficUsage
+from api.models.metrics import ScalingView
+from api.models.project import PoolCounts, ProjectLoad, ProjectView
+from api.models.proxy import ProxyListView, ProxyStatus, ProxyView
 from api.providers.sdk.provider import DescriptorProvider
-from api.providers.sdk.strategies import META_GEO_COUNTRY
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,10 +45,9 @@ if TYPE_CHECKING:
     from api.core.demand_tracker import DemandTracker
     from api.db.redis import TotalledWindows
     from api.db.session import SessionFactory
-    from api.feed.state import HealthSoft, RuntimeStateReader
+    from api.feed.state import RuntimeStateReader
     from api.models.connector import CloudConnectorConfig, Connector
     from api.models.credential import Credential
-    from api.models.project import Project
     from api.models.proxy import Proxy
     from api.providers.registry import ProviderRegistry
 
@@ -56,134 +55,6 @@ logger = structlog.get_logger()
 
 
 # --- Views --------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class PoolCounts:
-    """A project's pool as the dashboard counts it: the proxies of its enabled connectors no traffic limit blocks."""
-
-    total: int = 0
-    # Healthy and not quarantined: what requests can be routed to.
-    healthy: int = 0
-    # Quarantined by a rate limit, whatever their status.
-    quarantined: int = 0
-    draining: int = 0
-    terminating: int = 0
-
-    @property
-    def unhealthy(self) -> int:
-        """What is neither routable nor on its way out (quarantined healthy proxies count here)."""
-        return self.total - self.healthy - self.draining - self.terminating
-
-
-@dataclass(frozen=True)
-class ProjectView:
-    """A project with what it holds."""
-
-    project: Project
-    credentials: int
-    connectors: int
-    pool: PoolCounts
-
-    @classmethod
-    def of(cls, project: Project, counts: ProjectCounts | None, pool: PoolCounts) -> ProjectView:
-        """A project with its counts; a project holding nothing has no counts row."""
-        held = counts or ProjectCounts()
-        return cls(project=project, credentials=held.credentials, connectors=held.connectors, pool=pool)
-
-
-@dataclass(frozen=True)
-class ProjectLoad:
-    """A project's load: its request rate now, and its requests over a range, in total and as a trend."""
-
-    project_id: str
-    # Over the demand window, rejected requests included: the rate the Overview and scaling read.
-    requests_per_minute: float
-    # The range's counters, from the flushed history.
-    counters: MetricDelta
-    # Requests per bucket, oldest first, the newest ending at the last flush.
-    trend: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class ScalingView:
-    """A project's demand and its cloud instances, as the scaling metrics show them."""
-
-    # The demand level's name in capitals (LOW, MEDIUM, HIGH).
-    demand_level: str
-    requests_per_minute: float
-    rate_per_proxy: float
-    # Instances of the project's enabled cloud connectors that no traffic limit blocks.
-    current_instances: int
-    healthy_instances: int
-    # Sums over the project's enabled cloud connectors.
-    min_instances: int
-    max_instances: int
-    draining_instances: int
-    terminating_instances: int
-
-
-@dataclass(frozen=True)
-class ConnectorRow:
-    """A connector with its credential, its pool and its traffic this period."""
-
-    connector: Connector
-    credential_name: str | None
-    credential_type: str | None
-    # Every proxy of the connector, whatever its status.
-    proxy_count: int
-    # How many proxies the connector is meant to hold; None when it has no target of its own.
-    target: ProxyTarget | None
-    traffic_usage: TrafficUsage
-
-    @classmethod
-    def of(
-        cls,
-        connector: Connector,
-        credential: Credential | None,
-        proxy_count: int,
-        target: ProxyTarget | None,
-        usage: TrafficUsage,
-    ) -> ConnectorRow:
-        """A connector with its credential's name and type, its proxies counted, its target and its usage."""
-        return cls(
-            connector=connector,
-            credential_name=credential.name if credential else None,
-            credential_type=credential.type if credential else None,
-            proxy_count=proxy_count,
-            target=target,
-            traffic_usage=usage,
-        )
-
-
-@dataclass(frozen=True)
-class ProxyView:
-    """A proxy row with its runtime state."""
-
-    # The stored row: its definition and its status column.
-    proxy: Proxy
-    # Its connector; None only while a delete is under way.
-    connector: Connector | None
-    # All-time totals plus the window not flushed yet.
-    counters: MetricDelta
-    # Failures in a row and latency from the last health check; None when not checked lately.
-    health: HealthSoft | None
-    # Seconds left of a rate-limit quarantine, 0 when none.
-    quarantine_remaining_seconds: float
-
-    @property
-    def quarantined(self) -> bool:
-        """Whether a rate limit has the proxy in quarantine now."""
-        return self.quarantine_remaining_seconds > 0
-
-
-@dataclass(frozen=True)
-class ProxyListView:
-    """A project's proxies, every one, with how many requests can be routed to."""
-
-    proxies: list[ProxyView]
-    # Healthy, not quarantined, on an enabled connector no traffic limit blocks.
-    healthy: int
 
 
 @dataclass(frozen=True)

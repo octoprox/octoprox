@@ -448,6 +448,30 @@ class TestTheBatch:
             assert response.status_code == 503, response.text
         assert install.appended() == []
 
+    def test_the_503_and_404_answers_in_full(self, install: Install, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Notes that cannot be read and reports that cannot be appended are told alike, and with Retry-After."""
+        unavailable = (
+            503, {"detail": "Redis cannot be reached, so the reports were not taken; send them again shortly"}, "5"
+        )
+        redis = api_runtime(install.client).redis_client
+
+        async def unreadable(*_args: Any, **_kwargs: Any) -> Any:
+            raise ConnectionError("notes cannot be read")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(redis.client, "mget", unreadable)
+            response = install.report(_bad(f"{install.username}-tag-t1"))
+            assert (response.status_code, response.json(), response.headers.get("retry-after")) == unavailable
+        install.note("t1", ip="198.51.100.23")
+        with monkeypatch.context() as patch:
+            patch.setattr(redis, "_request_timeout", 0)
+            response = install.report(_bad(f"{install.username}-tag-t2", connector_id="pool", ip="203.0.113.7"))
+            assert (response.status_code, response.json(), response.headers.get("retry-after")) == unavailable
+        response = install.client.post(
+            "/api/v1/projects/no-such-project/exit-reports", json={"reports": [_bad("x-tag-t1")]}
+        )
+        assert (response.status_code, response.json()) == (404, {"detail": "Project not found"})
+
 
 class TestWhoMayReport:
     def test_a_viewer(self, install: Install, viewer_auth_headers: dict[str, str]) -> None:

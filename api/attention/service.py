@@ -64,9 +64,9 @@ class AttentionService:
         self._session_factory = session_factory
         self._checks = checks
 
-    async def project(self, project_id: str) -> ProjectAttention | None:
-        """The project's lines, muted or not, in display order, and when they were checked; None when there is no such
-        project, and no lines while it is pending deletion."""
+    async def project(self, project_id: str) -> ProjectAttention:
+        """The project's lines, muted or not, in display order, and when they were checked; no lines while it is
+        pending deletion, and not found when there is no such project."""
         now = utc_now()
         # The check state first: a run commits its alerts before it marks the check, so lines read after a state that
         # is no longer pending include that check.
@@ -74,7 +74,7 @@ class AttentionService:
         async with self._session_factory() as session:
             project = await ProjectRepository(session).get_by_id(project_id)
             if project is None:
-                return None
+                raise NotFoundError("Project not found")
             alerts = [] if project.pending_deletion else await AlertRepository(session).open_of(project_id)
             mutes = await ProjectRepository(session).attention_mutes([project_id])
         book = MuteBook(mutes.get(project_id, {}), now)

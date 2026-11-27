@@ -510,9 +510,16 @@ class LoadedDatabase(BaseModel):
 
 # --- proxy metadata keys ---------------------------------------------------------------------
 #
-# Written by GeoService.apply_observation. ``country`` itself stays the key
-# routing reads (see Proxy.country), so nothing downstream had to change.
+# Written by GeoService.apply_observation, beside the raw evidence it judges
+# (the vendor_* and endpoint_* keys), which the provider SDK records along with
+# a first ``country`` until attribution resolves one. ``country`` itself stays
+# the key routing reads (see Proxy.country), so nothing downstream had to change.
 
+META_COUNTRY = "country"  # exit country routing reads; upper-case ISO code (see Proxy.country)
+# Raw evidence behind META_COUNTRY, kept apart so attribution can judge the
+# vendor: META_VENDOR_COUNTRY is what the vendor said (its list or known-IP
+# API, or its own discovery endpoint), META_ENDPOINT_COUNTRY what a
+# third-party discovery endpoint reported.
 META_VENDOR_COUNTRY = "vendor_country"  # what the vendor claimed for this exit
 META_ENDPOINT_COUNTRY = "endpoint_country"  # what a third-party discovery or echo endpoint reported for this exit
 META_COUNTRY_SOURCE = "country_source"  # GeoSourceKind that produced metadata.country, or MANUAL_SOURCE
@@ -537,6 +544,24 @@ META_LOCATION_CONFLICT = "location_conflict"  # bool: the country claim is contr
 META_LOCATION_VERDICT = "location_verdict"  # LocationVerdict for the country claim; absent when nothing was claimed
 META_LOCATION_CANDIDATES = "location_candidates"  # compact candidate list
 META_LOCATION_CHECKED_AT = "location_checked_at"  # ISO timestamp of the last resolution
+
+# Written by the provider SDK: by its sync on stored rows, and when it renders
+# a request. GeoService.apply_observation also rewrites META_DISCOVERED_IP on
+# each sighting.
+
+# The place a slot or request was targeted at. The country is written on
+# provisioned rows (per-country slot groups) and on rendered requests.
+META_GEO_COUNTRY = "geo"
+# State and city rendered into a dynamic-sessions request (never on a stored row).
+META_GEO_STATE = "geo_state"
+META_GEO_CITY = "geo_city"
+META_DISCOVERED_IP = "discovered_ip"  # the exit IP the row was last seen exiting from
+# "true" on the single gateway row of a dynamic-sessions connector: its session
+# id and country are rendered per request, not provisioned per slot.
+META_DYNAMIC_SESSIONS = "dynamic_sessions"
+# On a request rendered for a client session that preflight moved off a refused
+# exit: how many times it moved.
+META_SESSION_GENERATION = "session_generation"
 
 
 INDEPENDENT_SOURCES = (GeoSourceKind.DATABASE.value, GeoSourceKind.ENDPOINT.value)

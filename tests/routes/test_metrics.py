@@ -13,12 +13,14 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from prometheus_client.parser import text_string_to_metric_families
 from sqlalchemy import text
 from starlette.testclient import TestClient
 
 from api.core import utc_now
+from api.core.config import Settings
 from api.core.demand_tracker import DEMAND_REQUESTS_FIELD, demand_minute
 from api.core.roles import Role
 from api.core.stats import MetricDelta, StepMetricDelta
@@ -241,6 +243,80 @@ class TestMetricsEndpoints:
         assert samples["octoprox_connector_traffic_bytes", connector] == 30
         assert samples["octoprox_connector_traffic_blocked", connector] == 0
 
+    def test_the_prometheus_text_whole_with_connectors_by_name_and_escaped_labels(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_credential: dict[str, Any],
+    ) -> None:
+        """Every family in order, a blank line between two, connectors by name, label values escaped, a final line feed."""
+        project_id = created_project["id"]
+        priced = _connector(
+            authenticated_client, created_project, created_credential, 'b "quoted"',
+            traffic_config={"limit_bytes": 1000, "price_per_gb": 2.0, "currency": "EUR"},
+        )
+        plain = _connector(authenticated_client, created_project, created_credential, "A back\\slash\nline")
+        _add_proxy(authenticated_client, plain["id"], ProxyStatus.HEALTHY)
+        runtime = api_runtime(authenticated_client)
+        flushed = MetricDelta(request_count=4, success_count=3, failure_count=1, bytes_sent=10, bytes_received=20)
+        on_app_loop(authenticated_client, _flush_project_totals, runtime.session_factory, project_id, flushed)
+        flush_connector_window(authenticated_client, priced["id"], 10, 20)
+        flush_connector_window(authenticated_client, plain["id"], 1, 2)
+
+        response = authenticated_client.get(f"/api/v1/projects/{project_id}/metrics/prometheus")
+
+        project = f'{{project="{project_id}"}}'
+        first = f'project="{project_id}",connector="{plain["id"]}",name="A back\\\\slash\\nline"'
+        second = f'project="{project_id}",connector="{priced["id"]}",name="b \\"quoted\\""'
+        assert response.text == "\n".join([
+            "# HELP octoprox_proxies_total Total number of proxies in the pool",
+            "# TYPE octoprox_proxies_total gauge",
+            f"octoprox_proxies_total{project} 1",
+            "",
+            "# HELP octoprox_proxies_healthy Number of healthy proxies",
+            "# TYPE octoprox_proxies_healthy gauge",
+            f"octoprox_proxies_healthy{project} 1",
+            "",
+            "# HELP octoprox_proxies_quarantined Number of quarantined (rate-limited) proxies",
+            "# TYPE octoprox_proxies_quarantined gauge",
+            f"octoprox_proxies_quarantined{project} 0",
+            "",
+            "# HELP octoprox_requests_total Total number of requests processed",
+            "# TYPE octoprox_requests_total counter",
+            f"octoprox_requests_total{project} 4",
+            "",
+            "# HELP octoprox_requests_success_total Total successful requests",
+            "# TYPE octoprox_requests_success_total counter",
+            f"octoprox_requests_success_total{project} 3",
+            "",
+            "# HELP octoprox_requests_failure_total Total failed requests",
+            "# TYPE octoprox_requests_failure_total counter",
+            f"octoprox_requests_failure_total{project} 1",
+            "",
+            "# HELP octoprox_bytes_sent_total Total bytes sent through proxies",
+            "# TYPE octoprox_bytes_sent_total counter",
+            f"octoprox_bytes_sent_total{project} 10",
+            "",
+            "# HELP octoprox_bytes_received_total Total bytes received through proxies",
+            "# TYPE octoprox_bytes_received_total counter",
+            f"octoprox_bytes_received_total{project} 20",
+            "",
+            "# HELP octoprox_connector_traffic_bytes Bytes through the connector in its current traffic period",
+            "# TYPE octoprox_connector_traffic_bytes gauge",
+            f"octoprox_connector_traffic_bytes{{{first}}} 3",
+            f"octoprox_connector_traffic_bytes{{{second}}} 30",
+            "",
+            "# HELP octoprox_connector_traffic_limit_bytes The connector's traffic limit for the period",
+            "# TYPE octoprox_connector_traffic_limit_bytes gauge",
+            f"octoprox_connector_traffic_limit_bytes{{{second}}} 1000",
+            "",
+            "# HELP octoprox_connector_traffic_cost Spend in the current period at the connector's price per GB",
+            "# TYPE octoprox_connector_traffic_cost gauge",
+            f'octoprox_connector_traffic_cost{{{second},currency="EUR"}} 0.0',
+            "",
+            "# HELP octoprox_connector_traffic_blocked 1 while the connector takes no requests because of its traffic limit",
+            "# TYPE octoprox_connector_traffic_blocked gauge",
+            f"octoprox_connector_traffic_blocked{{{first}}} 0",
+            f"octoprox_connector_traffic_blocked{{{second}}} 0",
+        ]) + "\n"
+
     def test_prometheus_metrics_project_not_found(
         self,
         authenticated_client: TestClient,
@@ -328,6 +404,23 @@ class TestHistory:
             f"/api/v1/projects/{project_id}/metrics/history", params={"range": "7d"}
         ).status_code == 200
 
+    def test_several_windows_come_oldest_first(
+        self, authenticated_client: TestClient, created_project: dict[str, Any],
+    ) -> None:
+        """Raw one-minute rows up to a day, hourly buckets past it; either way the oldest first."""
+        project_id = created_project["id"]
+        on_app_loop(authenticated_client, _save_aged_project_history, api_runtime(authenticated_client).session_factory,
+                    project_id)
+        url = f"/api/v1/projects/{project_id}/metrics/history"
+
+        raw = authenticated_client.get(url, params={"range": "6h"}).json()["snapshots"]
+        bucketed = authenticated_client.get(url, params={"range": "7d"}).json()["snapshots"]
+
+        assert [(s["request_count"], s["failure_count"], s["bytes_received"]) for s in raw] == [(2, 0, 20), (10, 2, 100)]
+        assert [s["request_count"] for s in bucketed] == [100, 4, 2, 10]
+        for snapshots in (raw, bucketed):
+            assert [s["timestamp"] for s in snapshots] == sorted(s["timestamp"] for s in snapshots)
+
     def test_errors(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
         assert authenticated_client.get("/api/v1/projects/nope/metrics/history").status_code == 404
         assert authenticated_client.get(
@@ -413,6 +506,10 @@ class TestTrafficSplit:
     def test_project_not_found(self, authenticated_client: TestClient) -> None:
         response = authenticated_client.get("/api/v1/projects/nope/metrics/traffic-split")
         assert response.status_code == 404
+
+    def test_a_site_that_names_none_is_refused_before_the_project_is_looked_up(self, authenticated_client: TestClient) -> None:
+        response = authenticated_client.get("/api/v1/projects/nope/metrics/traffic-split", params={"site": "co.uk"})
+        assert (response.status_code, response.json()) == (400, {"detail": "not a site: co.uk is a public suffix"})
 
     def test_empty_project(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
         response = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/metrics/traffic-split")
@@ -579,13 +676,6 @@ class TestHostMetricsEndpoints:
         history = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/metrics/hosts/history").json()
         assert history["series"] == [] and history["bucket_seconds"] == 900
 
-    def test_enabled_is_this_installs_setting(
-        self, authenticated_client: TestClient, created_project: dict[str, Any], test_settings: Any,
-    ) -> None:
-        test_settings.host_metrics_enabled = False
-        data = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/metrics/hosts").json()
-        assert data["enabled"] is False
-
     def test_hosts_with_totals_shares_and_connector_split(
         self, authenticated_client: TestClient, created_project: dict[str, Any], created_connector: dict[str, Any],
     ) -> None:
@@ -694,6 +784,21 @@ class TestHostMetricsEndpoints:
         # Read-only, so a viewer gets past the role check (and then a 404 for a project that is not there).
         assert viewer_client.get("/api/v1/projects/nope/metrics/hosts").status_code == 404
         assert viewer_client.get("/api/v1/projects/nope/metrics/hosts/history").status_code == 404
+
+
+class TestHostMetricsSetting:
+    """The Hosts page tells whether per-host counting is on, as this install was started with it."""
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings) -> Settings:
+        test_settings.host_metrics_enabled = False
+        return test_settings
+
+    def test_enabled_is_this_installs_setting(
+        self, authenticated_client: TestClient, created_project: dict[str, Any],
+    ) -> None:
+        data = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/metrics/hosts").json()
+        assert data["enabled"] is False
 
 
 def _connector(

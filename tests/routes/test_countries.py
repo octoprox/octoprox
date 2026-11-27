@@ -8,6 +8,7 @@ from typing import Any
 
 from starlette.testclient import TestClient
 
+from api.db.repository import ConnectorRepository
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from tests.conftest import api_runtime, on_app_loop
 
@@ -107,3 +108,52 @@ class TestCountries:
     def test_viewers_read_and_never_write(self, viewer_client: TestClient) -> None:
         assert viewer_client.get(_url({"id": "nope"})).status_code == 404
         assert viewer_client.put(_url({"id": "nope"}, "GB"), json={"connectors": {}}).status_code == 403
+
+    def test_a_missing_project_is_not_found_before_the_code_is_read(
+        self, authenticated_client: TestClient, editor_auth_headers: dict[str, str]
+    ) -> None:
+        missing = (404, {"detail": "Project not found"})
+        response = authenticated_client.get(_url({"id": "nope"}))
+        assert (response.status_code, response.json()) == missing
+        response = authenticated_client.put(_url({"id": "nope"}, "GBR"), json={"connectors": {}}, headers=editor_auth_headers)
+        assert (response.status_code, response.json()) == missing
+
+    def test_a_code_that_is_no_country_is_refused_with_its_detail(
+        self, authenticated_client: TestClient, created_project: dict[str, Any]
+    ) -> None:
+        response = authenticated_client.put(_url(created_project, "GBR"), json={"connectors": {}})
+        assert (response.status_code, response.json()) == (
+            422, {"detail": "country must be a two-letter ISO 3166-1 alpha-2 code, got 'GBR'"}
+        )
+        response = authenticated_client.put(_url(created_project, "%20"), json={"connectors": {}})
+        assert (response.status_code, response.json()) == (422, {"detail": "A country code is required"})
+
+    def test_the_history_names_the_country_as_normalized(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_credential: dict[str, Any]
+    ) -> None:
+        connector_id = _connector(authenticated_client, created_project, created_credential, "Mixed")
+
+        response = authenticated_client.put(_url(created_project, "uk"), json={"connectors": {connector_id: "off"}})
+
+        assert response.status_code == 200, response.text
+        [connector] = response.json()["connectors"]
+        assert connector["excluded_countries"] == ["GB"]
+        entries = authenticated_client.get(f"/api/v1/audit/connector/{connector_id}").json()["entries"]
+        assert entries[0]["details"] == {"country": "GB"}
+
+    def test_connectors_come_in_creation_order_without_those_being_deleted(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_credential: dict[str, Any]
+    ) -> None:
+        for name in ("b", "A", "c"):
+            _connector(authenticated_client, created_project, created_credential, name)
+        deleted = _connector(authenticated_client, created_project, created_credential, "Gone")
+
+        async def pending_deletion() -> None:
+            async with api_runtime(authenticated_client).session_factory() as session:
+                await ConnectorRepository(session).mark_pending_deletion(deleted)
+                await session.commit()
+
+        on_app_loop(authenticated_client, pending_deletion)
+
+        data = authenticated_client.get(_url(created_project)).json()
+        assert [c["name"] for c in data["connectors"]] == ["b", "A", "c"]

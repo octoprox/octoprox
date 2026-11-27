@@ -29,7 +29,12 @@ from api.core.roles import JobKind
 from api.db.redis import PROXY_HEALTH_KEY, PROXY_HEALTH_TTL_SECONDS, RedisClient
 from api.feed.state import RuntimeStateReader
 from api.geo.extraction import DEFAULT_HEALTHCHECK_URL, EchoExtractionRules, ExtractionPaths
-from api.geo.models import IpObservation, ObservationSource
+from api.geo.models import (
+    META_DISCOVERED_IP,
+    META_DYNAMIC_SESSIONS,
+    IpObservation,
+    ObservationSource,
+)
 from api.geo.observations import ObservationRecorder
 from api.geo.runtime import GeoStack
 from api.geo.service import GeoService
@@ -45,7 +50,6 @@ from api.models.credential import CredentialType
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
-from api.providers.sdk.strategies import META_DISCOVERED_IP, META_DYNAMIC_SESSIONS
 from api.services.proxies import ProxyService
 from tests.jobs.conftest import (
     LONDON_IP,

@@ -16,6 +16,7 @@ import structlog
 
 from api.core import utc_now
 from api.geo.models import (
+    META_DISCOVERED_IP,
     META_LOCATION_CHECKED_AT,
     META_LOCATION_CONFLICT,
     META_LOCATION_VERDICT,
@@ -33,7 +34,7 @@ from api.models.credential import CredentialType
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy
-from api.providers.sdk.strategies import META_DISCOVERED_IP, META_SESSION_ID, is_dynamic_gateway
+from api.providers.sdk.strategies import META_SESSION_ID
 
 logger = structlog.get_logger()
 
@@ -122,7 +123,7 @@ class ProxyAttributor:
         Deleting it lets the provider sync provision a fresh session; fixed exits, open verdicts and skipped slots are
         kept.
         """
-        if project is None or is_dynamic_gateway(proxy) or not proxy.metadata.get(META_SESSION_ID):
+        if project is None or proxy.is_dynamic_gateway or not proxy.metadata.get(META_SESSION_ID):
             return False
         return (
             proxy.metadata.get(META_LOCATION_VERDICT) == LocationVerdict.CONTRADICTED
@@ -197,7 +198,7 @@ class ProxyAttributor:
             return None
         observed_at = observed_at or utc_now()
         project = self.project_of(store, proxy.connector_id)
-        if is_dynamic_gateway(proxy):
+        if proxy.is_dynamic_gateway:
             # A dynamic-sessions gateway is not probed, so this is a sighting of
             # one vendor session's exit (Detect, or a plugin): record it for
             # accuracy and unique exits and write nothing on the row.
@@ -356,7 +357,7 @@ class ProxyAttributor:
             # is refused when a sighting moved the row on since this page was read.
             stamp = self.checked_at(proxy)
             _, did_change = self._geo_service.rejudge(
-                proxy, ip, policy=self.policy_for(project), endpoint=GeoService.endpoint_place_of(proxy)
+                proxy, ip, policy=self.policy_for(project), endpoint=proxy.endpoint_place
             )
             rotate = self.is_refused_slot(proxy, project)
             if did_change or rotate:

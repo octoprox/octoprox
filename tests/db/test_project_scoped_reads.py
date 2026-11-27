@@ -16,13 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.db.repository import (
     ConnectorRepository,
     CredentialRepository,
-    ProjectCounts,
     ProjectRepository,
     ProxyRepository,
 )
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
-from api.models.project import Project
+from api.models.project import Project, ProjectCounts
 from api.models.proxy import Proxy, ProxyStatus
 
 

@@ -11,49 +11,32 @@ from __future__ import annotations
 
 from typing import Annotated
 
-import structlog
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query, Request
 
-from api.core.auth import CurrentUserDep, DbDep, RequireAdminDep
-from api.db.audit_repository import AuditRepository, SystemSettingsRepository
+from api.core.auth import CurrentUserDep, RequireAdminDep
 from api.models.audit import AuditEntityType, AuditHistory, AuditRetention, AuditRetentionUpdate
-from api.models.user import UserRole
-from api.routes.common import actor_of
-
-logger = structlog.get_logger()
+from api.routes.common import actor_of, audit_service_of, system_settings_service_of
+from api.services.audit import DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT
 
 router = APIRouter(prefix="/audit")
 
-# A History page when the caller does not say, and the most one may ask for.
-DEFAULT_HISTORY_LIMIT = 50
-MAX_HISTORY_LIMIT = 200
-
 
 @router.get("/retention", response_model=AuditRetention)
-async def get_retention(session: DbDep, _admin: RequireAdminDep) -> AuditRetention:
+async def get_retention(request: Request, _admin: RequireAdminDep) -> AuditRetention:
     """How many days audit entries are kept (admin); 0 keeps them forever."""
-    return (await SystemSettingsRepository(session).get()).audit_retention()
+    return (await system_settings_service_of(request).get()).audit_retention()
 
 
 @router.put("/retention", response_model=AuditRetention)
-async def put_retention(
-    request: Request, session: DbDep, body: AuditRetentionUpdate, admin: RequireAdminDep
-) -> AuditRetention:
+async def put_retention(request: Request, body: AuditRetentionUpdate, admin: RequireAdminDep) -> AuditRetention:
     """Set how many days audit entries are kept (admin), itself recorded; the hourly compaction applies it."""
-    repository = SystemSettingsRepository(session)
-    before = await repository.get()
-    after = await repository.set_audit_retention(body.days)
-    # Only the column this save wrote: the row it returns can carry another request's license save.
-    changed = before.model_copy(update={"audit_retention_days": after.audit_retention_days})
-    await actor_of(request, admin).updated(session, before, changed)
-    await session.commit()
-    logger.info("Audit retention changed", days=body.days, admin=admin.username)
-    return after.audit_retention()
+    saved = await system_settings_service_of(request).set_audit_retention(body.days, actor_of(request, admin))
+    return saved.audit_retention()
 
 
 @router.get("/{entity_type}/{entity_id}", response_model=AuditHistory)
 async def entity_history(
-    session: DbDep,
+    request: Request,
     user: CurrentUserDep,
     entity_type: AuditEntityType,
     entity_id: str,
@@ -64,6 +47,4 @@ async def entity_history(
 
     The install's types (users, providers, settings) are for admins only.
     """
-    if entity_type.admin_only and user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return await AuditRepository(session).history(entity_type, entity_id, limit, before)
+    return await audit_service_of(request).history(entity_type, entity_id, limit, before, user)

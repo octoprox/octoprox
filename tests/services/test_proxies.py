@@ -572,7 +572,7 @@ class TestUnquarantine:
         await redis_client.client.zadd(QUARANTINE_KEY, {manual.id: time.time() + 600, "other": time.time() + 600})
         await redis_client.client.zadd(window, {"r1": time.time()})
 
-        assert await proxy_service.unquarantine(project.id, manual.id) is True
+        await proxy_service.unquarantine(project.id, manual.id)
 
         assert await redis_client.client.zrange(QUARANTINE_KEY, 0, -1) == ["other"]
         assert await redis_client.client.exists(window) == 0
@@ -591,7 +591,7 @@ class TestUnquarantine:
         """Never one without the other: an entry without the lift, or a lift the controller is never told of."""
         await redis_client.client.zadd(QUARANTINE_KEY, {manual.id: time.time() + 600})
 
-        assert await proxy_service.unquarantine(project.id, manual.id) is True
+        await proxy_service.unquarantine(project.id, manual.id)
 
         # The project's alert check follows, a MULTI of its own.
         assert pipelines == [(True, ["ZREM", "DEL", "XADD"]), (True, ["HSET", "EXPIRE", "XADD"])]
@@ -603,7 +603,8 @@ class TestUnquarantine:
         window = PROXY_REQUESTS_KEY.format(proxy_id=manual.id)
         await redis_client.client.zadd(window, {"r1": time.time()})
 
-        assert await proxy_service.unquarantine(project.id, manual.id) is False
+        with pytest.raises(WriteRejectedError, match="Proxy is not quarantined"):
+            await proxy_service.unquarantine(project.id, manual.id)
 
         assert await redis_client.client.exists(window) == 1
         assert await runtime_entries(redis_client) == []

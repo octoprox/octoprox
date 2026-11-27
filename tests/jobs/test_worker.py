@@ -22,7 +22,7 @@ from api.core.roles import JobKind
 from api.core.workers import WorkerName, job_runner_name
 from api.db.redis import EXIT_REPORT_STREAM_KEY, SIGHTING_STREAM_KEY, RedisClient
 from api.db.streams import ChangeLog
-from api.geo.models import IpObservation, ObservationSource
+from api.geo.models import META_DISCOVERED_IP, IpObservation, ObservationSource
 from api.geo.observations import ObservationRecorder
 from api.geo.runtime import GeoStack
 from api.geo.updater import GeoDatabaseUpdater
@@ -33,7 +33,6 @@ from api.models.project import ExitReputationMode
 from api.models.proxy import ProxyStatus
 from api.models.system import WorkerSnapshot
 from api.providers.registry import ProviderRegistry
-from api.providers.sdk.strategies import META_DISCOVERED_IP
 from api.providers.store import ProviderStore
 from api.reputation.ingest import ExitReportCount
 from api.roles.worker import WorkerRuntime

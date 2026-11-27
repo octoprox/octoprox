@@ -4,14 +4,12 @@
 """Project management endpoints.
 
 Writes go through :class:`~api.services.projects.ProjectService`, reads
-through :class:`~api.services.read_model.RuntimeView`, and the Connect page
-previews routing with the gateway's own router over a compile of the project
-(``ApiRuntime.preview_router``).
+through :class:`~api.services.read_model.RuntimeView`, the Connect page
+through :class:`~api.services.connect.ConnectService`, which previews routing
+with the gateway's own router over a compile of the project, and the CA
+certificate through :class:`~api.services.mitm.MitmService`.
 """
 
-import re
-from datetime import timedelta
-from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -19,154 +17,33 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from api.core.auth import RequireEditorDep
-from api.core.username_params import (
-    CITY_SEPARATOR,
-    COUNTRY_SEPARATOR,
-    RESERVED_SEPARATORS,
-    SESSID_SEPARATOR,
-    STATE_SEPARATOR,
-    format_username_params,
-    parse_username_params,
-)
-from api.models.connect import ConnectEndpoint, ConnectInfo, ConnectLocation
+from api.models.connect import ConnectInfo
 from api.models.project import (
-    Project,
+    LOAD_RANGES,
     ProjectCreate,
+    ProjectListResponse,
+    ProjectLoadResponse,
     ProjectResponse,
-    ProjectSummary,
     ProjectUpdate,
+    ProjectView,
 )
 from api.routes.common import (
     actor_of,
-    api_runtime_of,
+    connect_service_of,
+    mitm_service_of,
     project_service_of,
-    require_project,
     runtime_view_of,
-    settings_of,
 )
-from api.services.read_model import ProjectView
 
 router = APIRouter(prefix="/projects")
 
-_SEPARATORS = (COUNTRY_SEPARATOR, STATE_SEPARATOR, CITY_SEPARATOR, SESSID_SEPARATOR)
-# Every reserved delimiter in a string, overlapping ones included: "-sessid-st-ny" holds two.
-_DELIMITERS = re.compile("(?=" + "|".join(re.escape(separator) for separator in RESERVED_SEPARATORS) + ")")
 # What a delete must be confirmed with, typed by the user.
 _DELETE_CONFIRMATION = "permanently delete"
-
-
-class ProjectListResponse(BaseModel):
-    """Response for listing projects."""
-    total: int
-    projects: list[ProjectSummary]
 
 
 class DeleteConfirmation(BaseModel):
     """Request body for delete confirmation."""
     confirmation: str
-
-
-def _project_to_response(
-    project: Project,
-    credential_count: int = 0,
-    connector_count: int = 0,
-    proxy_count: int = 0,
-    healthy_proxy_count: int = 0,
-) -> ProjectResponse:
-    """Convert a Project to ProjectResponse."""
-    return ProjectResponse(
-        id=project.id,
-        name=project.name,
-        description=project.description,
-        username=project.username,
-        password=project.password,
-        routing_strategy=project.routing_strategy,
-        connection_timeout=project.connection_timeout,
-        max_retries=project.max_retries,
-        tls_mitm_mode=project.tls_mitm_mode,
-        tls_mitm_engine=project.tls_mitm_engine,
-        tls_mitm_browser=project.tls_mitm_browser,
-        metrics_retention_days=project.metrics_retention_days,
-        location_contradicted=project.location_contradicted,
-        location_unknown=project.location_unknown,
-        location_preflight=project.location_preflight,
-        location_session_move=project.location_session_move,
-        location_conflict_rule=project.location_conflict_rule,
-        location_city_radius_km=project.location_city_radius_km,
-        exit_headers=project.exit_headers,
-        observation_log=project.observation_log,
-        observation_retention_days=project.observation_retention_days,
-        exit_reputation=project.exit_reputation,
-        exit_reputation_avoid_minutes=project.exit_reputation_avoid_minutes,
-        exit_reputation_half_life_hours=project.exit_reputation_half_life_hours,
-        exit_reputation_connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
-        exit_reputation_connector_half_life_minutes=project.exit_reputation_connector_half_life_minutes,
-        exit_reputation_bad_reports=project.exit_reputation_bad_reports,
-        exit_reputation_bad_share=project.exit_reputation_bad_share,
-        exit_reputation_strength=project.exit_reputation_strength,
-        exit_reputation_floor=project.exit_reputation_floor,
-        exit_reputation_retention_days=project.exit_reputation_retention_days,
-        pending_deletion=project.pending_deletion,
-        created_at=project.created_at,
-        updated_at=project.updated_at,
-        credential_count=credential_count,
-        connector_count=connector_count,
-        proxy_count=proxy_count,
-        healthy_proxy_count=healthy_proxy_count,
-    )
-
-
-def _view_to_response(view: ProjectView) -> ProjectResponse:
-    """A project with its counts; the proxy counts are its pool's (enabled connectors no traffic limit blocks)."""
-    return _project_to_response(
-        view.project,
-        credential_count=view.credentials,
-        connector_count=view.connectors,
-        proxy_count=view.pool.total,
-        healthy_proxy_count=view.pool.healthy,
-    )
-
-
-def _view_to_summary(view: ProjectView) -> ProjectSummary:
-    """Convert a project with its counts to ProjectSummary."""
-    project = view.project
-    return ProjectSummary(
-        id=project.id,
-        name=project.name,
-        description=project.description,
-        username=project.username,
-        password=project.password,
-        routing_strategy=project.routing_strategy,
-        metrics_retention_days=project.metrics_retention_days,
-        tls_mitm_mode=project.tls_mitm_mode,
-        tls_mitm_engine=project.tls_mitm_engine,
-        tls_mitm_browser=project.tls_mitm_browser,
-        location_contradicted=project.location_contradicted,
-        location_unknown=project.location_unknown,
-        location_preflight=project.location_preflight,
-        location_session_move=project.location_session_move,
-        location_conflict_rule=project.location_conflict_rule,
-        location_city_radius_km=project.location_city_radius_km,
-        exit_headers=project.exit_headers,
-        observation_log=project.observation_log,
-        observation_retention_days=project.observation_retention_days,
-        exit_reputation=project.exit_reputation,
-        exit_reputation_avoid_minutes=project.exit_reputation_avoid_minutes,
-        exit_reputation_half_life_hours=project.exit_reputation_half_life_hours,
-        exit_reputation_connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
-        exit_reputation_connector_half_life_minutes=project.exit_reputation_connector_half_life_minutes,
-        exit_reputation_bad_reports=project.exit_reputation_bad_reports,
-        exit_reputation_bad_share=project.exit_reputation_bad_share,
-        exit_reputation_strength=project.exit_reputation_strength,
-        exit_reputation_floor=project.exit_reputation_floor,
-        exit_reputation_retention_days=project.exit_reputation_retention_days,
-        pending_deletion=project.pending_deletion,
-        credential_count=view.credentials,
-        connector_count=view.connectors,
-        proxy_count=view.pool.total,
-        healthy_proxy_count=view.pool.healthy,
-        created_at=project.created_at,
-    )
 
 
 async def _project_with_counts(request: Request, project_id: str) -> ProjectView:
@@ -184,12 +61,8 @@ async def download_ca_certificate(request: Request) -> FileResponse:
     The api reads only the certificate, from the CA volume the gateways
     share; until a gateway has generated it there is nothing to download.
     """
-    ca_cert_path = Path(settings_of(request).tls_mitm_ca_cert_path)
-    if not ca_cert_path.exists():
-        raise HTTPException(status_code=404, detail="CA certificate not found")
-
     return FileResponse(
-        path=ca_cert_path,
+        path=mitm_service_of(request).ca_certificate(),
         media_type="application/x-pem-file",
         filename="octoprox-ca.crt",
     )
@@ -198,41 +71,7 @@ async def download_ca_certificate(request: Request) -> FileResponse:
 @router.get("", response_model=ProjectListResponse)
 async def list_projects(request: Request) -> ProjectListResponse:
     """List all projects, oldest first."""
-    summaries = [_view_to_summary(view) for view in await runtime_view_of(request).projects()]
-    return ProjectListResponse(total=len(summaries), projects=summaries)
-
-
-class ProjectLoadEntry(BaseModel):
-    """One project's load: its request rate now, and its requests over the range."""
-    project_id: str
-    # Over the last five minutes, rejected requests included: the Overview's requests per minute.
-    requests_per_minute: float
-    request_count: int
-    success_count: int
-    failure_count: int
-    bytes_sent: int
-    bytes_received: int
-    # Requests per bucket of ``bucket_seconds``, oldest first, the last ending at the last metrics flush.
-    trend: list[int]
-
-
-class ProjectLoadResponse(BaseModel):
-    """Every project's load over one range, for the project list."""
-    range: str
-    bucket_seconds: int
-    projects: list[ProjectLoadEntry]
-
-
-# What each range reads: how far back, and the trend's bucket in seconds. Two to three dozen points, none finer than
-# the rows kept at that age (minute rows for a day, hourly ones for a week, six-hourly ones after), so no bucket is
-# left empty between two full ones.
-LOAD_RANGES: dict[str, tuple[timedelta, int]] = {
-    "1h": (timedelta(hours=1), 120),
-    "6h": (timedelta(hours=6), 900),
-    "24h": (timedelta(hours=24), 3600),
-    "7d": (timedelta(days=7), 21600),
-    "30d": (timedelta(days=30), 86400),
-}
+    return ProjectListResponse.of(await runtime_view_of(request).projects())
 
 
 @router.get("/load", response_model=ProjectLoadResponse)
@@ -243,23 +82,7 @@ async def get_projects_load(
     """Every project's request rate now and its requests, outcomes and bytes over ``range``, oldest first."""
     span, bucket_seconds = LOAD_RANGES[range]
     loads = await runtime_view_of(request).load(int(span.total_seconds()) // bucket_seconds, bucket_seconds)
-    return ProjectLoadResponse(
-        range=range,
-        bucket_seconds=bucket_seconds,
-        projects=[
-            ProjectLoadEntry(
-                project_id=load.project_id,
-                requests_per_minute=round(load.requests_per_minute, 2),
-                request_count=load.counters.request_count,
-                success_count=load.counters.success_count,
-                failure_count=load.counters.failure_count,
-                bytes_sent=load.counters.bytes_sent,
-                bytes_received=load.counters.bytes_received,
-                trend=list(load.trend),
-            )
-            for load in loads
-        ],
-    )
+    return ProjectLoadResponse.of(range, bucket_seconds, loads)
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)
@@ -268,13 +91,13 @@ async def create_project(
 ) -> ProjectResponse:
     """Create a new project; a name or username another project holds is a 400."""
     project = await project_service_of(request).create(project_data, actor_of(request, user))
-    return _project_to_response(project)
+    return ProjectResponse.of(project)
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 async def get_project(request: Request, project_id: str) -> ProjectResponse:
     """Get a specific project by ID."""
-    return _view_to_response(await _project_with_counts(request, project_id))
+    return ProjectResponse.of_view(await _project_with_counts(request, project_id))
 
 
 @router.get("/{project_id}/connect", response_model=ConnectInfo)
@@ -293,43 +116,7 @@ async def get_connect_info(
     exactly what a client would get, and ``routes`` lists the connectors a
     gateway routing on the project's current rows would spread it over.
     """
-    project = await require_project(request, project_id)
-
-    values = [
-        (separator, value.strip())
-        for separator, value in zip(_SEPARATORS, (country, state, city, sessid), strict=True)
-        if value and value.strip()
-    ]
-    composed = project.username + "".join(f"{separator}{value}" for separator, value in values)
-    params = parse_username_params(composed)
-    error = params.location_error
-    if params.username != project.username:
-        error = "The project username contains a reserved delimiter (-cc-, -st-, -city-, -sessid-, -prxy- or -tag-), so the proxy cannot read it"
-    elif len(_DELIMITERS.findall(composed, len(project.username))) != len(values):
-        # Only the delimiters put there may follow the username: a value holding one, or
-        # forming one with the dash before or after it ("st-ny" after -sessid- reads as
-        # -st-ny), would be read as another parameter.
-        error = "A value cannot contain -cc-, -st-, -city-, -sessid-, -prxy- or -tag-, including one formed with the dash before or after it"
-    elif params.sessid and ":" in params.sessid:
-        # Basic auth splits user and password at the first colon.
-        error = "A session ID cannot contain a colon"
-    location = params.location
-    preview = await api_runtime_of(request).preview_router(project_id)
-    countries, any_country, places = preview.served_places(project_id)
-
-    scheme, host, port = settings_of(request).proxy_endpoint
-
-    return ConnectInfo(
-        endpoint=ConnectEndpoint(scheme=scheme, host=host, port=port),
-        username=composed if error else format_username_params(project.username, params.sessid, location),
-        sessid=params.sessid,
-        location=ConnectLocation(country=location.country, state=location.state, city=location.city) if location else None,
-        error=error,
-        routes=[] if error else preview.route_preview(project_id, location),
-        countries=countries,
-        any_country=any_country,
-        places=places,
-    )
+    return await connect_service_of(request).info(project_id, country, state, city, sessid)
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
@@ -342,7 +129,7 @@ async def update_project(
     project's proxies; the response does not wait for that.
     """
     await project_service_of(request).update(project_id, project_data, actor_of(request, user))
-    return _view_to_response(await _project_with_counts(request, project_id))
+    return ProjectResponse.of_view(await _project_with_counts(request, project_id))
 
 
 @router.delete("/{project_id}", status_code=204, responses={202: {"description": "Deleting: its cloud instances go first"}})

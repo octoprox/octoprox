@@ -33,7 +33,8 @@ from api.db.redis import (
     EntityWindows,
     RedisClient,
 )
-from api.feed.state import HealthSoft, RuntimeStateReader
+from api.feed.state import RuntimeStateReader
+from api.models.proxy import HealthSoft
 
 
 @pytest.fixture

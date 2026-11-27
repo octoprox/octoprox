@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from api.attention.alert import Alert, FoundAlert
+from api.core import as_naive_utc
 from api.db.models import AlertModel
 from api.models.attention import AttentionWhen, Severity
 
@@ -105,6 +106,19 @@ class AlertFilters:
     q: str | None = None
     # Alerts open at any point since then.
     since: datetime | None = None
+
+    @classmethod
+    def of(
+        cls, status: str, severity: Severity | None, kind: str | None, q: str | None, since: datetime | None
+    ) -> AlertFilters:
+        """The filters as a list's query string gives them: ``status`` "all" narrows nothing, and ``since`` reads as UTC."""
+        return cls(
+            status=None if status == "all" else status,
+            severity=severity,
+            kind=kind,
+            q=q,
+            since=as_naive_utc(since),
+        )
 
 
 @dataclass(frozen=True)

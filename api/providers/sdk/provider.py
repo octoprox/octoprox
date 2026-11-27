@@ -10,6 +10,7 @@ import random
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from api.geo.models import META_GEO_CITY, META_GEO_COUNTRY, META_GEO_STATE, META_SESSION_GENERATION
 from api.models.connector import Connector, ProxyTarget
 from api.models.credential import Credential
 from api.models.location import LocationTarget, normalize_country_list
@@ -33,10 +34,6 @@ from api.providers.sdk.sources import (
 )
 from api.providers.sdk.strategies import (
     META_EXIT_SAMPLE_PERCENT,
-    META_GEO_CITY,
-    META_GEO_COUNTRY,
-    META_GEO_STATE,
-    META_SESSION_GENERATION,
     META_SESSION_ID,
     META_SESSION_SECONDS,
     DynamicSessionStrategy,
@@ -45,7 +42,6 @@ from api.providers.sdk.strategies import (
     ProxyBuilder,
     SessionModeStrategy,
     SyncStrategy,
-    is_dynamic_gateway,
 )
 from api.providers.sdk.templating import (
     RenderContext,
@@ -466,8 +462,8 @@ class DescriptorProvider(ProxyProvider):
             return await self._strategy.sync(existing_proxies)
         # A connector switched back from dynamic sessions: its gateway row is
         # not a slot and must go, or it would stay routable for every country.
-        stale = [p.id for p in existing_proxies if is_dynamic_gateway(p)]
-        existing_proxies = [p for p in existing_proxies if not is_dynamic_gateway(p)]
+        stale = [p.id for p in existing_proxies if p.is_dynamic_gateway]
+        existing_proxies = [p for p in existing_proxies if not p.is_dynamic_gateway]
         if not self._geo_targeted:
             added, removed = await self._strategy.sync(existing_proxies)
             return added, removed + stale

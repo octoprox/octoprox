@@ -25,7 +25,18 @@ from fastapi.responses import JSONResponse, Response
 from api.core.logging import error_label, error_text
 from api.db.repository import ProjectRepository
 from api.models.tunnel import TunnelAddressError, TunnelValidationError
-from api.services.errors import InvalidConfigError, NotFoundError, WriteRejectedError
+from api.services.errors import (
+    ConflictError,
+    ForbiddenError,
+    HostConfirmationError,
+    InputRejectedError,
+    InvalidConfigError,
+    NotFoundError,
+    TimedOutError,
+    UnavailableError,
+    UpstreamError,
+    WriteRejectedError,
+)
 
 if TYPE_CHECKING:
     from api.attention.history import AlertHistory
@@ -35,28 +46,44 @@ if TYPE_CHECKING:
     from api.core.auth import CurrentUser
     from api.core.config import Settings
     from api.core.extension import Extension
-    from api.db.redis import RedisClient
     from api.db.session import SessionFactory
-    from api.db.streams import ChangeLog
-    from api.geo.observations import ObservationRecorder
-    from api.geo.service import GeoService
-    from api.geo.settings import GeoSettingsStore
+    from api.geo.databases import GeoDatabaseService
+    from api.geo.history import ObservationHistory
+    from api.geo.reattribution import ReattributionService
+    from api.geo.settings import GeoSettingsService
+    from api.geo.status import GeoStatusService
     from api.geo.store import GeoDatabaseStore
-    from api.geo.updater import GeoDatabaseUpdater
-    from api.jobs.attribution import Attribution
-    from api.jobs.queue import JobQueue
     from api.models.project import Project
     from api.openvpn.service import OpenVpnService
-    from api.providers.registry import ProviderRegistry
-    from api.providers.store import ProviderStore
+    from api.reputation.ip_service import ExitIpService
+    from api.reputation.reports import ExitReportService
+    from api.reputation.site_service import SiteReputationService
     from api.roles.api import ApiRuntime
     from api.roles.node import Node
+    from api.services.api_tokens import ApiTokenService
+    from api.services.audit import AuditService
+    from api.services.backup import BackupService
+    from api.services.connect import ConnectService
     from api.services.connectors import ConnectorService
+    from api.services.countries import CountryService
     from api.services.credentials import CredentialService
+    from api.services.detect import DetectService
+    from api.services.failures import FailureLogService
+    from api.services.hosts import HostMetricsService
+    from api.services.metrics import MetricsService
+    from api.services.mitm import MitmService
     from api.services.projects import ProjectService
+    from api.services.provider_calls import ProviderCallService
+    from api.services.providers import ProviderService
     from api.services.proxies import ProxyService
     from api.services.read_model import RuntimeView
+    from api.services.releases import ReleaseService
+    from api.services.system import SystemService
+    from api.services.system_settings import SystemSettingsService
+    from api.services.traffic_split import TrafficSplitService
+    from api.services.users import UserService
     from api.sso import SsoFlow
+    from api.sso.providers import SsoProviderService
     from api.wireguard.service import WireGuardService
 
 logger = structlog.get_logger()
@@ -70,6 +97,16 @@ ERROR_STATUS: dict[type[Exception], int] = {
     WriteRejectedError: 400,
     # A config failed its validator (422).
     InvalidConfigError: 422,
+    # A read's argument names nothing it can read (400).
+    InputRejectedError: 400,
+    # The caller may not do this with these arguments (403).
+    ForbiddenError: 403,
+    # The write cannot apply to the entity as it stands (409); HostConfirmationError has its own handler.
+    ConflictError: 409,
+    # A vendor or a download the request relies on refused or failed (502).
+    UpstreamError: 502,
+    # A read took longer than it may (504).
+    TimedOutError: 504,
     # A tunnel device or settings edit that cannot stand, such as a name in use (400).
     TunnelValidationError: 400,
     # A tunnel address taken concurrently or a full subnet: retry or widen (409).
@@ -113,11 +150,15 @@ def install_error_handlers(app: FastAPI) -> None:
     """Answer the domain errors with their status, and a store that does not answer with 503.
 
     Each error of :data:`ERROR_STATUS` gets its status and its message as
-    ``detail``; each of :data:`UNAVAILABLE_ERRORS`, and a Postgres
-    connection refused or lost mid-request, a 503 (:func:`_unavailable`).
+    ``detail``, an :class:`UnavailableError` a 503 with ``Retry-After``, and a
+    :class:`HostConfirmationError` its hosts too; each of
+    :data:`UNAVAILABLE_ERRORS`, and a Postgres connection refused or lost
+    mid-request, a 503 (:func:`_unavailable`).
     """
     for error, status in ERROR_STATUS.items():
         app.add_exception_handler(error, _answer_with(status))
+    app.add_exception_handler(UnavailableError, _answer_retry_later)
+    app.add_exception_handler(HostConfirmationError, _answer_host_confirmation)
     for error, store in UNAVAILABLE_ERRORS.items():
         app.add_exception_handler(error, _answer_unavailable(store))
     app.add_exception_handler(sqlalchemy.exc.DBAPIError, _answer_lost_connection)
@@ -145,6 +186,22 @@ def _answer_with(status: int) -> Callable[[Request, Exception], Awaitable[Respon
         return JSONResponse(status_code=status, content={"detail": str(exc)})
 
     return answer
+
+
+async def _answer_retry_later(request: Request, exc: Exception) -> Response:
+    """503 with the error's message and ``Retry-After``; logs nothing, as the service that raised it knows what failed."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc)},
+        headers={"Retry-After": str(UNAVAILABLE_RETRY_AFTER_SECONDS)},
+    )
+
+
+async def _answer_host_confirmation(request: Request, exc: Exception) -> Response:
+    """409 with the message and the provider's egress hosts, every one and those still to confirm."""
+    hosts = cast("HostConfirmationError", exc)
+    detail = {"detail": str(hosts), "egress_hosts": hosts.egress_hosts, "unconfirmed_hosts": hosts.unconfirmed_hosts}
+    return JSONResponse(status_code=409, content={"detail": detail})
 
 
 def _answer_unavailable(store: str) -> Callable[[Request, Exception], Awaitable[Response]]:
@@ -226,35 +283,6 @@ def session_factory_of(request: Request) -> SessionFactory:
     return api_runtime_of(request).session_factory
 
 
-def redis_client_of(request: Request) -> RedisClient:
-    """The process's Redis client."""
-    return api_runtime_of(request).redis_client
-
-
-def change_log_of(request: Request) -> ChangeLog:
-    """The process's change log, for routes that write definitions themselves: each announces its commit there.
-
-    The descriptor, attribution settings, IP database and import routes append their entry after the commit, as the
-    services do for theirs.
-    """
-    return api_runtime_of(request).changes
-
-
-def jobs_of(request: Request) -> JobQueue:
-    """The job streams, for routes that ask for a run (a re-attribution)."""
-    return api_runtime_of(request).jobs
-
-
-def provider_registry_of(request: Request) -> ProviderRegistry:
-    """The process's provider registry, with the custom descriptors as stored."""
-    return api_runtime_of(request).provider_registry
-
-
-def provider_store_of(request: Request) -> ProviderStore:
-    """What applies the stored custom descriptors to the registry (``sync_all`` after a descriptor write)."""
-    return api_runtime_of(request).provider_store
-
-
 # --- Edition and audit log --------------------------------------------------------------------
 
 
@@ -279,7 +307,7 @@ def actor_of(request: Request, user: CurrentUser) -> Actor:
     return audit_log_of(request).actor(user.id, user.username, request_id, details=details)
 
 
-# --- Write services, read model, previews -----------------------------------------------------
+# --- Services, read model, previews -----------------------------------------------------------
 
 
 def project_service_of(request: Request) -> ProjectService:
@@ -288,7 +316,7 @@ def project_service_of(request: Request) -> ProjectService:
 
 
 def credential_service_of(request: Request) -> CredentialService:
-    """Credential writes, validated by the provider registry."""
+    """A project's credentials: reads, and writes validated by the provider registry."""
     return api_runtime_of(request).credential_service
 
 
@@ -297,9 +325,74 @@ def connector_service_of(request: Request) -> ConnectorService:
     return api_runtime_of(request).connector_service
 
 
+def provider_service_of(request: Request) -> ProviderService:
+    """The provider catalog, the authoring dry run, and custom descriptor writes."""
+    return api_runtime_of(request).provider_service
+
+
+def provider_call_service_of(request: Request) -> ProviderCallService:
+    """Live vendor calls through a descriptor: dynamic select options and the builder's test panel."""
+    return api_runtime_of(request).provider_call_service
+
+
 def proxy_service_of(request: Request) -> ProxyService:
     """Proxy writes: add, upload, edit, remove, unquarantine."""
     return api_runtime_of(request).proxy_service
+
+
+def detect_service_of(request: Request) -> DetectService:
+    """Detect: a proxy's exit looked up through it from this process, and recorded."""
+    return api_runtime_of(request).detect_service
+
+
+def metrics_service_of(request: Request) -> MetricsService:
+    """A project's pool, counters, scaling and history, its connectors' history, and their Prometheus export."""
+    return api_runtime_of(request).metrics_service
+
+
+def traffic_split_service_of(request: Request) -> TrafficSplitService:
+    """How a project's traffic divides between its connectors, and under exit reputation for a site."""
+    return api_runtime_of(request).traffic_split_service
+
+
+def host_metrics_service_of(request: Request) -> HostMetricsService:
+    """Where a project's traffic went, by destination host and connector (the Hosts page)."""
+    return api_runtime_of(request).host_metrics_service
+
+
+def failure_log_service_of(request: Request) -> FailureLogService:
+    """A project's failure examples and counted failures (the Failures page)."""
+    return api_runtime_of(request).failure_log_service
+
+
+def connect_service_of(request: Request) -> ConnectService:
+    """The Connect page: the proxy endpoint, the username for a place and session, and where it would route."""
+    return api_runtime_of(request).connect_service
+
+
+def country_service_of(request: Request) -> CountryService:
+    """The Countries page: a project's connectors by country, and where a request for each would go now."""
+    return api_runtime_of(request).country_service
+
+
+def mitm_service_of(request: Request) -> MitmService:
+    """A project's MITM captures, paged and cleared, and the CA certificate the gateways generated."""
+    return api_runtime_of(request).mitm_service
+
+
+def exit_report_service_of(request: Request) -> ExitReportService:
+    """Exit reports taken without Postgres, the project from this process's project map, onto the reports stream."""
+    return api_runtime_of(request).exit_report_service
+
+
+def exit_ip_service_of(request: Request) -> ExitIpService:
+    """The exit IPs view: a project's exit IP records paged and filtered, one IP's, and per-IP totals."""
+    return api_runtime_of(request).exit_ip_service
+
+
+def site_reputation_service_of(request: Request) -> SiteReputationService:
+    """One site of a project across its places, a place's history, and what a draft Strength would do."""
+    return api_runtime_of(request).site_reputation_service
 
 
 def runtime_view_of(request: Request) -> RuntimeView:
@@ -327,6 +420,31 @@ def alert_settings_of(request: Request) -> AlertSettingsService:
     return api_runtime_of(request).alert_settings
 
 
+def system_settings_service_of(request: Request) -> SystemSettingsService:
+    """The install's settings, and how long its resolved alerts and the audit log's entries are kept."""
+    return api_runtime_of(request).system_settings_service
+
+
+def audit_service_of(request: Request) -> AuditService:
+    """An entity's History, the install's entities' for admins only."""
+    return api_runtime_of(request).audit_service
+
+
+def system_service_of(request: Request) -> SystemService:
+    """The admin System view: the cluster from the heartbeats, the stores, and the gauge history."""
+    return api_runtime_of(request).system_service
+
+
+def release_service_of(request: Request) -> ReleaseService:
+    """What's New: the bundled notes, what the user has not seen, and for admins a newer release."""
+    return api_runtime_of(request).release_service
+
+
+def backup_service_of(request: Request) -> BackupService:
+    """The full setup exported as an encrypted file, and restored from one."""
+    return api_runtime_of(request).backup_service
+
+
 async def require_project(request: Request, project_id: str) -> Project:
     """The project a nested route names, read from Postgres; 404 when there is none."""
     async with session_factory_of(request)() as session:
@@ -339,34 +457,34 @@ async def require_project(request: Request, project_id: str) -> Project:
 # --- Attribution ------------------------------------------------------------------------------
 
 
-def geo_service_of(request: Request) -> GeoService:
-    """Attribution: lookups, judgements, the settings in force."""
-    return api_runtime_of(request).geo_service
-
-
-def geo_settings_store_of(request: Request) -> GeoSettingsStore:
-    """The attribution settings (``save`` writes the row and adopts it)."""
-    return api_runtime_of(request).geo_settings_store
-
-
 def geo_database_store_of(request: Request) -> GeoDatabaseStore:
     """The IP databases this process has open, and their files (``blob_file``)."""
     return api_runtime_of(request).geo_database_store
 
 
-def observation_recorder_of(request: Request) -> ObservationRecorder:
-    """This process's observation buffer (published by the node's observation publisher)."""
-    return api_runtime_of(request).observation_recorder
+def geo_settings_service_of(request: Request) -> GeoSettingsService:
+    """The attribution settings, read and replaced, and a lookup of one IP under them."""
+    return api_runtime_of(request).geo_settings_service
 
 
-def attribution_of(request: Request) -> Attribution:
-    """The attributor with a Postgres-backed store per call (``store()``), for Detect."""
-    return api_runtime_of(request).attribution
+def geo_database_service_of(request: Request) -> GeoDatabaseService:
+    """The IP databases: listed with where each is open, uploaded, registered, edited, downloaded, removed, inspected."""
+    return api_runtime_of(request).geo_database_service
 
 
-def geo_updater_of(request: Request) -> GeoDatabaseUpdater:
-    """The IP database updater without its loop, for manual refresh and from-url."""
-    return api_runtime_of(request).geo_updater
+def reattribution_service_of(request: Request) -> ReattributionService:
+    """Re-judging every proxy, or one connector's, asked of the workers."""
+    return api_runtime_of(request).reattribution_service
+
+
+def observation_history_of(request: Request) -> ObservationHistory:
+    """The observation log and each connector's exit statistics: accuracy, recurrence, sharing and exit IPs."""
+    return api_runtime_of(request).observation_history
+
+
+def geo_status_service_of(request: Request) -> GeoStatusService:
+    """The attribution pipeline's health: this api process, the observations stream and every live gateway."""
+    return api_runtime_of(request).geo_status_service
 
 
 # --- Tunnels and sign-in ----------------------------------------------------------------------
@@ -385,6 +503,21 @@ def openvpn_service_of(request: Request) -> OpenVpnService:
 def sso_flow_of(request: Request) -> SsoFlow:
     """The sign-in round trip through identity providers; its per-login state is in Redis."""
     return api_runtime_of(request).sso_flow
+
+
+def sso_provider_service_of(request: Request) -> SsoProviderService:
+    """The admin's sign-in provider settings: each provider's OAuth client, read and replaced."""
+    return api_runtime_of(request).sso_provider_service
+
+
+def user_service_of(request: Request) -> UserService:
+    """User accounts, people and service accounts, and the provider accounts linked to each."""
+    return api_runtime_of(request).user_service
+
+
+def api_token_service_of(request: Request) -> ApiTokenService:
+    """Users' personal access tokens: listed, issued and revoked."""
+    return api_runtime_of(request).api_token_service
 
 
 def external_base_url(request: Request) -> str:

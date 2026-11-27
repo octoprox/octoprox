@@ -29,8 +29,9 @@ from api.db.redis import (
 )
 from api.db.repository import MetricsRepository
 from api.db.session import SessionFactory
+from api.geo.models import META_GEO_COUNTRY
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.providers.sdk.strategies import META_GEO_COUNTRY, META_SESSION_ID
+from api.providers.sdk.strategies import META_SESSION_ID
 from tests.conftest import api_runtime, on_app_loop, queued_jobs
 
 # A vendor session pool of two slots per country listing no country: a provider that syncs.
@@ -295,6 +296,50 @@ class TestProxyEndpoints:
     def test_locate_unknown_proxy(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
         response = authenticated_client.post(f"/api/v1/projects/{created_project['id']}/proxies/nope/locate")
         assert response.status_code == 404
+
+    def test_refusal_details(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        created_proxy: dict[str, Any],
+        monkeypatch: Any,
+    ) -> None:
+        """A listing checks the project first, one proxy is looked up in the project, and a failed Detect says why."""
+        from unittest.mock import AsyncMock
+
+        from api.geo.attributor import ProxyAttributor
+
+        response = authenticated_client.get("/api/v1/projects/non-existent/proxies")
+        assert (response.status_code, response.json()) == (404, {"detail": "Project not found"})
+        for project_id in (created_project["id"], "non-existent"):
+            url = f"/api/v1/projects/{project_id}/proxies/nope"
+            for response in (authenticated_client.get(url), authenticated_client.post(f"{url}/locate")):
+                assert (response.status_code, response.json()) == (404, {"detail": "Proxy not found"})
+        monkeypatch.setattr(ProxyAttributor, "locate", AsyncMock(return_value=(None, "")))
+        response = authenticated_client.post(f"/api/v1/projects/{created_project['id']}/proxies/{created_proxy['id']}/locate")
+        assert (response.status_code, response.json()) == (
+            502, {"detail": "Could not determine the exit location through this proxy"},
+        )
+
+    def test_an_exit_outside_the_declared_countries_and_its_ip_are_shown(
+        self, authenticated_client: TestClient, created_project: dict[str, Any],
+    ) -> None:
+        """The vendor placed the row in a declared country and it exits elsewhere: routing skips it, and says so."""
+        connector = _connector(authenticated_client, created_project, "static_proxy_provider", {}, {"countries": ["DE"]})
+        outside = Proxy(host="10.0.0.9", port=8080, protocol=ProxyProtocol.HTTP, connector_id=connector["id"],
+                        metadata={"country": "NL", "vendor_country": "DE", "discovered_ip": "198.51.100.7"})
+        inside = Proxy(host="10.0.0.10", port=8080, protocol=ProxyProtocol.HTTP, connector_id=connector["id"],
+                       metadata={"country": "DE", "vendor_country": "DE"})
+        for proxy in (outside, inside):
+            on_app_loop(authenticated_client, api_runtime(authenticated_client).proxy_service.add, proxy)
+
+        url = f"/api/v1/projects/{created_project['id']}/proxies"
+        shown = {p["id"]: p for p in authenticated_client.get(url).json()["proxies"]}
+        one = authenticated_client.get(f"{url}/{outside.id}").json()
+
+        assert (shown[outside.id]["outside_declared_countries"], shown[outside.id]["exit_ip"]) == (True, "198.51.100.7")
+        assert (shown[inside.id]["outside_declared_countries"], shown[inside.id]["exit_ip"]) == (False, None)
+        assert one == shown[outside.id]
 
     def test_delete_proxy(
         self,
@@ -641,6 +686,18 @@ class TestUpload:
         response = self._upload(authenticated_client, created_project["id"], "nope", b"http://10.0.0.1:8080\n")
 
         assert response.status_code == 404
+
+    def test_an_added_row_is_answered_as_it_then_reads(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_connector: dict[str, Any],
+    ) -> None:
+        """Nothing counted, no quarantine, never checked, on its connector: the row as a read right after shows it."""
+        response = self._upload(
+            authenticated_client, created_project["id"], created_connector["id"], b"socks5://user:pass@10.0.0.2:1080\n"
+        )
+
+        [added] = response.json()["proxies"]
+        read = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/proxies/{added['id']}").json()
+        assert added == read
 
 
 class TestProxyProjectScope:

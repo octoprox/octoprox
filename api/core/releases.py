@@ -9,70 +9,23 @@ check; ``scripts/release.sh`` adds each release's entry.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from api.db.redis import LATEST_RELEASE_KEY
+from api.models.release import ReleaseNote, version_key
 
 if TYPE_CHECKING:
     from api.db.redis import RedisClient
 
 # The notes file: in the docs site's data, so the changelog page renders it, and copied into the image beside api/.
 RELEASES_FILE = Path(__file__).resolve().parents[2] / "docs" / "_data" / "releases.yml"
-
-_VERSION = re.compile(r"\d+\.\d+\.\d+")
-
-type VersionKey = tuple[int, int, int]
-
-
-def version_key(version: str | None) -> VersionKey | None:
-    """``6.1.4`` as ``(6, 1, 4)`` for ordering; None for anything else, such as ``unknown`` from a source tree."""
-    if version is None or not _VERSION.fullmatch(version):
-        return None
-    major, minor, patch = (int(part) for part in version.split("."))
-    return major, minor, patch
-
-
-class ReleaseChange(BaseModel):
-    """One change, in the words of the people who use Octoprox, with the docs page that explains it."""
-
-    text: str
-    # A page on the docs site, such as ``wireguard`` or ``connecting#exit-headers``.
-    docs: str | None = None
-
-
-class ReleaseNote(BaseModel):
-    """One release's notes, or one summary covering ``from`` to ``version`` for the releases before the notes began."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    version: str
-    from_version: str | None = Field(default=None, alias="from")
-    date: date
-    title: str
-    changes: list[ReleaseChange]
-
-    @field_validator("version", "from_version")
-    @classmethod
-    def _check_version(cls, v: str | None) -> str | None:
-        if v is not None and version_key(v) is None:
-            raise ValueError(f"Version {v!r} is not MAJOR.MINOR.PATCH")
-        return v
-
-    @property
-    def key(self) -> VersionKey:
-        """The version, for ordering."""
-        key = version_key(self.version)
-        assert key is not None
-        return key
-
 
 _NOTES = TypeAdapter(list[ReleaseNote])
 

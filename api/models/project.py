@@ -3,7 +3,8 @@
 
 """Project model definitions for multi-tenancy."""
 
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, ClassVar, Literal
 from uuid import uuid4
@@ -11,6 +12,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, model_validator
 
 from api.core import utc_now
+from api.core.stats import MetricDelta
 from api.geo.models import (
     MAX_CITY_RADIUS_KM,
     MAX_OBSERVATION_RETENTION_DAYS,
@@ -333,10 +335,72 @@ class ProjectUpdate(BaseModel):
     def changes(self) -> dict[str, object]:
         """The fields this edit sets, with the empty strings that clear an override turned into None."""
         changes: dict[str, object] = self.model_dump(exclude_none=True)
-        for field in ("location_conflict_rule", "location_city_radius_km", "observation_retention_days"):
-            if changes.get(field) == "":
-                changes[field] = None
+        for name in ("location_conflict_rule", "location_city_radius_km", "observation_retention_days"):
+            if changes.get(name) == "":
+                changes[name] = None
         return changes
+
+
+@dataclass(frozen=True)
+class PoolCounts:
+    """A project's pool as the dashboard counts it: the proxies of its enabled connectors no traffic limit blocks."""
+
+    total: int = 0
+    # Healthy and not quarantined: what requests can be routed to.
+    healthy: int = 0
+    # Quarantined by a rate limit, whatever their status.
+    quarantined: int = 0
+    draining: int = 0
+    terminating: int = 0
+
+    @property
+    def unhealthy(self) -> int:
+        """What is neither routable nor on its way out (quarantined healthy proxies count here)."""
+        return self.total - self.healthy - self.draining - self.terminating
+
+
+@dataclass
+class ProjectCounts:
+    """What one project holds, as the projects list shows it (``ProjectRepository.get_counts``)."""
+
+    credentials: int = 0
+    connectors: int = 0
+    # Proxies per status (ProxyStatus values); a status no proxy has is absent.
+    proxies_by_status: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def proxies(self) -> int:
+        """Every proxy of the project, whatever its status."""
+        return sum(self.proxies_by_status.values())
+
+
+@dataclass(frozen=True)
+class ProjectView:
+    """A project with what it holds."""
+
+    project: Project
+    credentials: int
+    connectors: int
+    pool: PoolCounts
+
+    @classmethod
+    def of(cls, project: Project, counts: ProjectCounts | None, pool: PoolCounts) -> "ProjectView":
+        """A project with its counts; a project holding nothing has no counts row."""
+        held = counts or ProjectCounts()
+        return cls(project=project, credentials=held.credentials, connectors=held.connectors, pool=pool)
+
+
+@dataclass(frozen=True)
+class ProjectLoad:
+    """A project's load: its request rate now, and its requests over a range, in total and as a trend."""
+
+    project_id: str
+    # Over the demand window, rejected requests included: the rate the Overview and scaling read.
+    requests_per_minute: float
+    # The range's counters, from the flushed history.
+    counters: MetricDelta
+    # Requests per bucket, oldest first, the newest ending at the last flush.
+    trend: tuple[int, ...]
 
 
 class ProjectResponse(BaseModel):
@@ -381,6 +445,68 @@ class ProjectResponse(BaseModel):
     proxy_count: int = 0
     healthy_proxy_count: int = 0
 
+    @classmethod
+    def of(
+        cls,
+        project: Project,
+        credential_count: int = 0,
+        connector_count: int = 0,
+        proxy_count: int = 0,
+        healthy_proxy_count: int = 0,
+    ) -> "ProjectResponse":
+        """A project as the API shows it, with the counts given (none for a project just created)."""
+        return cls(
+            id=project.id,
+            name=project.name,
+            description=project.description,
+            username=project.username,
+            password=project.password,
+            routing_strategy=project.routing_strategy,
+            connection_timeout=project.connection_timeout,
+            max_retries=project.max_retries,
+            tls_mitm_mode=project.tls_mitm_mode,
+            tls_mitm_engine=project.tls_mitm_engine,
+            tls_mitm_browser=project.tls_mitm_browser,
+            metrics_retention_days=project.metrics_retention_days,
+            location_contradicted=project.location_contradicted,
+            location_unknown=project.location_unknown,
+            location_preflight=project.location_preflight,
+            location_session_move=project.location_session_move,
+            location_conflict_rule=project.location_conflict_rule,
+            location_city_radius_km=project.location_city_radius_km,
+            exit_headers=project.exit_headers,
+            observation_log=project.observation_log,
+            observation_retention_days=project.observation_retention_days,
+            exit_reputation=project.exit_reputation,
+            exit_reputation_avoid_minutes=project.exit_reputation_avoid_minutes,
+            exit_reputation_half_life_hours=project.exit_reputation_half_life_hours,
+            exit_reputation_connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
+            exit_reputation_connector_half_life_minutes=project.exit_reputation_connector_half_life_minutes,
+            exit_reputation_bad_reports=project.exit_reputation_bad_reports,
+            exit_reputation_bad_share=project.exit_reputation_bad_share,
+            exit_reputation_strength=project.exit_reputation_strength,
+            exit_reputation_floor=project.exit_reputation_floor,
+            exit_reputation_retention_days=project.exit_reputation_retention_days,
+            pending_deletion=project.pending_deletion,
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+            credential_count=credential_count,
+            connector_count=connector_count,
+            proxy_count=proxy_count,
+            healthy_proxy_count=healthy_proxy_count,
+        )
+
+    @classmethod
+    def of_view(cls, view: "ProjectView") -> "ProjectResponse":
+        """A project with its counts; the proxy counts are its pool's (enabled connectors no traffic limit blocks)."""
+        return cls.of(
+            view.project,
+            credential_count=view.credentials,
+            connector_count=view.connectors,
+            proxy_count=view.pool.total,
+            healthy_proxy_count=view.pool.healthy,
+        )
+
 
 class ProjectSummary(BaseModel):
     """Summary of a project for listing; the project page edits from it, so it carries every field the form sends."""
@@ -419,4 +545,110 @@ class ProjectSummary(BaseModel):
     proxy_count: int = 0
     healthy_proxy_count: int = 0
     created_at: datetime
+
+    @classmethod
+    def of(cls, view: "ProjectView") -> "ProjectSummary":
+        """A project with its counts, as listed; the proxy counts are its pool's."""
+        project = view.project
+        return cls(
+            id=project.id,
+            name=project.name,
+            description=project.description,
+            username=project.username,
+            password=project.password,
+            routing_strategy=project.routing_strategy,
+            metrics_retention_days=project.metrics_retention_days,
+            tls_mitm_mode=project.tls_mitm_mode,
+            tls_mitm_engine=project.tls_mitm_engine,
+            tls_mitm_browser=project.tls_mitm_browser,
+            location_contradicted=project.location_contradicted,
+            location_unknown=project.location_unknown,
+            location_preflight=project.location_preflight,
+            location_session_move=project.location_session_move,
+            location_conflict_rule=project.location_conflict_rule,
+            location_city_radius_km=project.location_city_radius_km,
+            exit_headers=project.exit_headers,
+            observation_log=project.observation_log,
+            observation_retention_days=project.observation_retention_days,
+            exit_reputation=project.exit_reputation,
+            exit_reputation_avoid_minutes=project.exit_reputation_avoid_minutes,
+            exit_reputation_half_life_hours=project.exit_reputation_half_life_hours,
+            exit_reputation_connector_half_life_requests=project.exit_reputation_connector_half_life_requests,
+            exit_reputation_connector_half_life_minutes=project.exit_reputation_connector_half_life_minutes,
+            exit_reputation_bad_reports=project.exit_reputation_bad_reports,
+            exit_reputation_bad_share=project.exit_reputation_bad_share,
+            exit_reputation_strength=project.exit_reputation_strength,
+            exit_reputation_floor=project.exit_reputation_floor,
+            exit_reputation_retention_days=project.exit_reputation_retention_days,
+            pending_deletion=project.pending_deletion,
+            credential_count=view.credentials,
+            connector_count=view.connectors,
+            proxy_count=view.pool.total,
+            healthy_proxy_count=view.pool.healthy,
+            created_at=project.created_at,
+        )
+
+
+class ProjectListResponse(BaseModel):
+    """Response for listing projects."""
+    total: int
+    projects: list[ProjectSummary]
+
+    @classmethod
+    def of(cls, views: list["ProjectView"]) -> "ProjectListResponse":
+        """The projects as listed, in the order given."""
+        summaries = [ProjectSummary.of(view) for view in views]
+        return cls(total=len(summaries), projects=summaries)
+
+
+class ProjectLoadEntry(BaseModel):
+    """One project's load: its request rate now, and its requests over the range."""
+    project_id: str
+    # Over the last five minutes, rejected requests included: the Overview's requests per minute.
+    requests_per_minute: float
+    request_count: int
+    success_count: int
+    failure_count: int
+    bytes_sent: int
+    bytes_received: int
+    # Requests per bucket of ``bucket_seconds``, oldest first, the last ending at the last metrics flush.
+    trend: list[int]
+
+    @classmethod
+    def of(cls, load: "ProjectLoad") -> "ProjectLoadEntry":
+        """A project's load, its rate rounded to hundredths."""
+        return cls(
+            project_id=load.project_id,
+            requests_per_minute=round(load.requests_per_minute, 2),
+            request_count=load.counters.request_count,
+            success_count=load.counters.success_count,
+            failure_count=load.counters.failure_count,
+            bytes_sent=load.counters.bytes_sent,
+            bytes_received=load.counters.bytes_received,
+            trend=list(load.trend),
+        )
+
+
+class ProjectLoadResponse(BaseModel):
+    """Every project's load over one range, for the project list."""
+    range: str
+    bucket_seconds: int
+    projects: list[ProjectLoadEntry]
+
+    @classmethod
+    def of(cls, range: str, bucket_seconds: int, loads: list["ProjectLoad"]) -> "ProjectLoadResponse":
+        """Every project's load over ``range`` in buckets of ``bucket_seconds``, in the order given."""
+        return cls(range=range, bucket_seconds=bucket_seconds, projects=[ProjectLoadEntry.of(load) for load in loads])
+
+
+# What each range reads: how far back, and the trend's bucket in seconds. Two to three dozen points, none finer than
+# the rows kept at that age (minute rows for a day, hourly ones for a week, six-hourly ones after), so no bucket is
+# left empty between two full ones.
+LOAD_RANGES: dict[str, tuple[timedelta, int]] = {
+    "1h": (timedelta(hours=1), 120),
+    "6h": (timedelta(hours=6), 900),
+    "24h": (timedelta(hours=24), 3600),
+    "7d": (timedelta(days=7), 21600),
+    "30d": (timedelta(days=30), 86400),
+}
 

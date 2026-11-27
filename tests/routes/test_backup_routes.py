@@ -21,8 +21,10 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.testclient import TestClient
 
+from api.core import utc_now
 from api.core.config import Settings
 from api.core.roles import JobKind, Role
+from api.core.session_tokens import create_jwt
 from api.core.stats import MetricDelta
 from api.db.redis import (
     FAILURE_LOG_DATA_KEY,
@@ -40,7 +42,6 @@ from api.db.repository import (
 from api.db.streams import ChangeKind
 from api.models.provider import ProviderRecord
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
-from api.routes.auth import create_jwt
 from tests.conftest import api_runtime, on_app_loop, queued_jobs
 from tests.geo.test_readers import MAXMIND_RECORD, write_mmdb
 from tests.routes.test_providers import Unheard, announced_since, stream_head
@@ -492,11 +493,10 @@ class TestImportedDefinitionsHere:
         # Its writes are announced where no refresher hears them, and the
         # hourly reconcile is far off: only the import itself can bring them in.
         unheard = Unheard()
-        for route in ("backup", "geo"):
-            monkeypatch.setattr(f"api.routes.{route}.change_log_of", lambda request: unheard)
         app = build_app(Role.API, reconcile_interval=3600)
         with TestClient(app, headers=auth_headers) as client:
             runtime = api_runtime(client)
+            monkeypatch.setattr(runtime.changes, "record", unheard.record)
             spec = {**TestProviderDescriptorsInBackup.ACME, "id": "acme_here", "name": "Acme Here"}
             record = ProviderRecord(id="acme_here", name="Acme Here", spec=spec, created_by="testadmin")
             _in_session(client, lambda s: ProviderDescriptorRepository(s).create(record))
@@ -527,7 +527,7 @@ class TestImportedDefinitionsHere:
         runtime = api_runtime(authenticated_client)
         monkeypatch.setattr(runtime.provider_store, "sync_all", AsyncMock(side_effect=TimeoutError))
 
-        with patch("api.routes.backup.logger") as log:
+        with patch("api.services.backup.logger") as log:
             assert _import(authenticated_client, file_bytes).status_code == 200
 
         log.warning.assert_called_once_with(
@@ -572,6 +572,34 @@ class TestImportErrors:
             data={"passphrase": PASSPHRASE, "mode": "merge"},
         )
         assert resp.status_code == 400 and "mode" in resp.json()["detail"]
+
+    def test_the_mode_is_refused_before_the_passphrase_each_with_its_rule(
+        self, authenticated_client: TestClient
+    ) -> None:
+        def sent(passphrase: str, mode: str) -> Any:
+            return authenticated_client.post(
+                "/api/v1/backup/import",
+                files={"file": ("backup.opbak", b"{}", "application/octet-stream")},
+                data={"passphrase": passphrase, "mode": mode},
+            )
+
+        assert sent("short", "merge").json() == {"detail": "Unsupported import mode: merge"}
+        short = sent("short", "replace")
+        assert (short.status_code, short.json()) == (400, {"detail": "Passphrase must be at least 8 characters."})
+
+
+class TestExportAnswer:
+    def test_the_file_downloads_named_for_today(self, authenticated_client: TestClient) -> None:
+        days = {utc_now().date().isoformat()}
+        resp = authenticated_client.post("/api/v1/backup/export", json={"passphrase": PASSPHRASE})
+        days.add(utc_now().date().isoformat())
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/octet-stream"
+        assert resp.headers["content-disposition"] in {
+            f'attachment; filename="octoprox-backup-{day}.opbak"' for day in days
+        }
+        assert json.loads(resp.content)["format"]
 
 
 class TestKeepCurrentUser:

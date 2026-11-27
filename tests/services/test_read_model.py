@@ -41,20 +41,20 @@ from api.db.redis import (
     RedisClient,
 )
 from api.db.repository import MetricsRepository
-from api.feed.state import HealthSoft, RuntimeStateReader
+from api.feed.state import RuntimeStateReader
 from api.geo.models import ExitCoverage
 from api.jobs.job import JobBatch
 from api.jobs.queue import JobQueue
 from api.jobs.traffic import TrafficJob
 from api.models.connector import Connector, ConnectorCreate, ProxyTarget
 from api.models.credential import Credential
-from api.models.project import Project, ProjectUpdate
-from api.models.proxy import Proxy, ProxyStatus
+from api.models.project import PoolCounts, Project, ProjectUpdate, ProjectView
+from api.models.proxy import HealthSoft, Proxy, ProxyStatus
 from api.providers.registry import ProviderRegistry
 from api.services.connectors import ConnectorService
 from api.services.projects import ProjectService
 from api.services.proxies import ProxyService
-from api.services.read_model import PoolCounts, ProjectView, RuntimeView
+from api.services.read_model import RuntimeView
 from tests.jobs.conftest import counted_round_trips, counted_selects
 from tests.providers.test_registry import fail_to_build
 from tests.services.conftest import AWS, OXYLABS_DYNAMIC, OXYLABS_POOL, STATIC, Connect

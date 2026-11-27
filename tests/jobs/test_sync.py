@@ -26,7 +26,13 @@ from api.db.repository import (
     ProviderDescriptorRepository,
     ProxyRepository,
 )
-from api.geo.models import META_ENDPOINT_COUNTRY, IpObservation, ObservationSource
+from api.geo.models import (
+    META_DISCOVERED_IP,
+    META_ENDPOINT_COUNTRY,
+    META_GEO_COUNTRY,
+    IpObservation,
+    ObservationSource,
+)
 from api.geo.runtime import GeoStack
 from api.jobs.attribution import Attribution
 from api.jobs.sync import ProviderSyncJob
@@ -36,7 +42,7 @@ from api.models.project import Project
 from api.models.provider import ProviderRecord
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import ProviderRegistry
-from api.providers.sdk.strategies import META_DISCOVERED_IP, META_GEO_COUNTRY, META_SESSION_ID
+from api.providers.sdk.strategies import META_SESSION_ID
 from api.providers.store import ProviderStore
 from api.roles.refresh import DefinitionsRefresher
 from api.services.proxies import ProxyService

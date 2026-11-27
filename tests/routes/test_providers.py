@@ -161,10 +161,10 @@ def announced_since(client: TestClient, after: str) -> list[tuple[str, str]]:
 
 
 @pytest.fixture
-def unheard(monkeypatch: pytest.MonkeyPatch) -> Unheard:
+def unheard(authenticated_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Unheard:
     """The descriptor routes announce their writes here instead: this api's refresher never hears of them."""
     log = Unheard()
-    monkeypatch.setattr("api.routes.providers.change_log_of", lambda request: log)
+    monkeypatch.setattr(api_runtime(authenticated_client).provider_service, "_changes", log)
     return log
 
 
@@ -336,6 +336,83 @@ class TestAuthoring:
         response = authenticated_client.put("/api/v1/providers/acme", json={"enabled": False})
         assert response.status_code == 200
         assert "acme" not in {p["id"] for p in authenticated_client.get("/api/v1/providers").json()["providers"]}
+
+    def test_refusals_answer_with_their_details(
+        self, authenticated_client: TestClient, editor_auth_headers: dict[str, str]
+    ) -> None:
+        client = authenticated_client
+        provider_id = _create_unique_acme(client)
+        spec = dict(ACME_SPEC, id=provider_id)
+
+        def answer(response: httpx.Response) -> tuple[int, Any]:
+            return response.status_code, response.json()
+
+        assert answer(client.post("/api/v1/providers", json={"spec": spec, "confirmed_hosts": ["api.acme.test"]})) == (
+            409, {"detail": f"Provider id '{provider_id}' already exists"}
+        )
+        assert answer(client.post("/api/v1/providers", json={"spec": dict(ACME_SPEC, id="acme_unconfirmed")})) == (
+            409,
+            {"detail": {
+                "detail": "Confirm the hosts this provider will send credentials to",
+                "egress_hosts": ["api.acme.test"],
+                "unconfirmed_hosts": ["api.acme.test"],
+            }},
+        )
+        builtin = {"detail": "Provider 'oxylabs' is builtin and cannot be modified"}
+        assert answer(client.put("/api/v1/providers/oxylabs", json={"enabled": False})) == (409, builtin)
+        assert answer(client.delete("/api/v1/providers/oxylabs")) == (409, builtin)
+        renamed = client.put(f"/api/v1/providers/{provider_id}", json={"spec": dict(spec, id="acme_other")})
+        assert answer(renamed) == (422, {"detail": "A provider's id cannot be changed"})
+        missing = {"detail": "Provider not found"}
+        for response in (
+            client.get("/api/v1/providers/nope"),
+            client.put("/api/v1/providers/nope", json={"enabled": False}),
+            client.delete("/api/v1/providers/nope"),
+            client.get("/api/v1/providers/nope/export"),
+            client.post("/api/v1/providers/nope/options/regions", json={"credential_config": {}}),
+            client.post("/api/v1/providers/nope/test", json={"action": "validate"}),
+        ):
+            assert answer(response) == (404, missing)
+        invalid = client.post("/api/v1/providers", json={"spec": {"id": "x"}})
+        assert invalid.status_code == 422 and invalid.json()["detail"].startswith("Invalid provider descriptor: ")
+        options = f"/api/v1/providers/{provider_id}/options"
+        assert answer(client.post(f"{options}/regions", json={"spec": spec}, headers=editor_auth_headers)) == (
+            403, {"detail": "Only admins can resolve options for an unsaved descriptor"}
+        )
+        assert answer(client.post(f"{options}/nope", json={})) == (
+            404, {"detail": "Provider has no options source 'nope'"}
+        )
+        assert answer(client.post(f"{options}/regions", json={"credential_id": "nope"})) == (
+            404, {"detail": "Credential not found for this provider"}
+        )
+        assert answer(client.post(f"{options}/regions", json={})) == (
+            422, {"detail": "credential_id or credential_config is required"}
+        )
+
+    def test_options_say_whether_they_came_from_the_cache_and_a_vendor_refusal_is_502(
+        self, mocked_vendor: TestClient
+    ) -> None:
+        client = mocked_vendor
+        url = f"/api/v1/providers/{_create_unique_acme(client)}/options/regions"
+
+        first = client.post(url, json={"credential_config": {"api_key": "good"}})
+        again = client.post(url, json={"credential_config": {"api_key": "good"}})
+        refused = client.post(url, json={"credential_config": {"api_key": "bad"}})
+
+        options = [{"value": "eu", "label": "Europe"}, {"value": "us", "label": "US"}]
+        assert first.status_code == 200 and again.status_code == 200
+        assert [{k: o[k] for k in ("value", "label")} for o in first.json()["options"]] == options
+        assert (first.json()["cached"], again.json()) == (False, {**first.json(), "cached": True})
+        assert (refused.status_code, refused.json()) == (
+            502, {"detail": 'GET https://api.acme.test/regions returned HTTP 401: {"detail":"nope"}'}
+        )
+
+    def test_an_export_is_a_yaml_attachment_named_for_the_provider(self, authenticated_client: TestClient) -> None:
+        export = authenticated_client.get("/api/v1/providers/oxylabs/export")
+
+        assert export.status_code == 200
+        assert export.headers["content-type"] == "application/yaml"
+        assert export.headers["content-disposition"] == 'attachment; filename="oxylabs.yaml"'
 
     def test_admin_only(
         self, authenticated_client: TestClient, editor_auth_headers: dict[str, str], viewer_auth_headers: dict[str, str]
@@ -653,10 +730,28 @@ class TestTheWritingApiAppliesAtOnce:
         store = api_runtime(authenticated_client).provider_store
         monkeypatch.setattr(store, "sync_all", AsyncMock(side_effect=TimeoutError))
 
-        with patch("api.routes.providers.logger") as log:
+        with patch("api.services.providers.logger") as log:
             assert authenticated_client.delete(f"/api/v1/providers/{provider_id}").status_code == 204
 
         log.warning.assert_called_once_with("Provider descriptors not applied after a write", error="TimeoutError")
+
+    def test_a_descriptor_stored_but_never_applied_answers_500_and_stays_stored(
+        self, authenticated_client: TestClient, unheard: Unheard, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider_id = f"acme_{uuid.uuid4().hex[:8]}"
+        store = api_runtime(authenticated_client).provider_store
+        monkeypatch.setattr(store, "sync_all", AsyncMock(return_value=False))
+
+        response = authenticated_client.post(
+            "/api/v1/providers", json={"spec": dict(ACME_SPEC, id=provider_id), "confirmed_hosts": ["api.acme.test"]}
+        )
+
+        assert (response.status_code, response.json()) == (
+            500, {"detail": "Provider was stored but could not be registered"}
+        )
+        assert unheard.entries == [(ChangeKind.DESCRIPTOR, provider_id)]
+        # The next read applies the stored row.
+        assert authenticated_client.get(f"/api/v1/providers/{provider_id}").json()["source"] == "custom"
 
 
 class TestBuiltinProviders:

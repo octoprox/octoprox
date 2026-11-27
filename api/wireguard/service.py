@@ -24,12 +24,8 @@ from api.db.wireguard_repository import WireGuardPeerRepository, WireGuardSettin
 from api.models.audit import AuditAction
 from api.models.location import LOCATION_NEEDS_COUNTRY
 from api.models.tunnel import (
-    DeviceTotals,
-    EndpointStates,
     TunnelAddressError,
-    TunnelEndpointState,
     TunnelPeerMetrics,
-    TunnelProtocol,
     TunnelStatus,
     TunnelValidationError,
     device_changes,
@@ -49,6 +45,7 @@ from api.models.wireguard import (
     WireGuardServerSettingsResponse,
 )
 from api.openvpn.service import seed_openvpn_settings
+from api.tunnel.service import TunnelService
 from api.wireguard import keys
 from api.wireguard.config import client_conf_filename, render_client_conf
 
@@ -57,14 +54,11 @@ if TYPE_CHECKING:
 
     from api.core.audit import Actor
     from api.core.config import Settings
-    from api.db.redis import RedisClient
     from api.db.session import SessionFactory
     from api.db.streams import ChangeLog
 
 logger = structlog.get_logger()
 
-# The protocol's name in the Redis status keys and in endpoint states.
-PROTOCOL: TunnelProtocol = "wireguard"
 # A device whose last handshake is older than this is offline, in seconds:
 # WireGuard re-handshakes every two minutes while traffic flows, three with
 # keepalive slack.
@@ -137,7 +131,7 @@ def _within_online_window(seen: datetime, now: datetime) -> bool:
     return (now - seen).total_seconds() <= ONLINE_WINDOW_SECONDS
 
 
-class WireGuardService:
+class WireGuardService(TunnelService[WireGuardPeer]):
     """WireGuard settings and devices for the admin API, over Postgres; gateways follow through the feed.
 
     A write records its change in the audit log through the actor it is given, in the write's transaction; a settings
@@ -147,22 +141,8 @@ class WireGuardService:
         defaults: ``wireguard.defaults``, for a settings row created when a read finds none.
     """
 
-    def __init__(
-        self,
-        session_factory: SessionFactory,
-        redis_client: RedisClient,
-        *,
-        endpoint_states: EndpointStates,
-        device_totals: DeviceTotals,
-        defaults: Mapping[str, Any],
-        changes: ChangeLog,
-    ) -> None:
-        self._session_factory = session_factory
-        self._redis = redis_client
-        self._endpoint_states = endpoint_states
-        self._device_totals = device_totals
-        self._defaults = defaults
-        self._changes = changes
+    PROTOCOL = "wireguard"
+    CHANGE_KIND = ChangeKind.WIREGUARD
 
     # --- settings ----------------------------------------------------------------------
 
@@ -213,11 +193,6 @@ class WireGuardService:
         assert saved is not None
         return saved
 
-    async def _announce_seed(self, created: bool) -> None:
-        """Announce the settings row a read just created (a backup restored without one); nothing when it was there."""
-        if created:
-            await self._changes.record(ChangeKind.WIREGUARD)
-
     async def _check_subnet(self, session: AsyncSession, settings: WireGuardServerSettings) -> None:
         """TunnelValidationError unless the subnet clears the OpenVPN one and still holds every device."""
         network, gateway = settings.network, settings.gateway
@@ -239,16 +214,20 @@ class WireGuardService:
         async with self._session_factory() as session:
             return await WireGuardPeerRepository(session).get_by_project(project_id)
 
-    async def peer(self, project_id: str, peer_id: str) -> WireGuardPeer | None:
-        """The device, or None when it does not exist or belongs to another project."""
+    async def peer(self, project_id: str, peer_id: str) -> WireGuardPeer:
+        """The device; not found for a missing project, then for a device that is not the project's."""
         async with self._session_factory() as session:
-            return await WireGuardPeerRepository(session).get_in_project(project_id, peer_id)
+            return await self._peer_of_project(session, project_id, peer_id)
+
+    async def _get_in_project(self, session: AsyncSession, project_id: str, peer_id: str) -> WireGuardPeer | None:
+        """The device from the WireGuard peers table, or None when it does not exist or belongs to another project."""
+        return await WireGuardPeerRepository(session).get_in_project(project_id, peer_id)
 
     async def add_peer(self, project_id: str, data: WireGuardPeerCreate, actor: Actor) -> WireGuardPeer:
         """Register a device at the lowest free tunnel address, with a key pair Octoprox generates and keeps when none is given.
 
-        Raises TunnelValidationError for a name or key in use, and TunnelAddressError when no address is free or a
-        device created at the same moment took this one.
+        Raises NotFoundError for a missing project, TunnelValidationError for a name or key in use, and
+        TunnelAddressError when no address is free or a device created at the same moment took this one.
         """
         private_key: str | None
         if data.public_key:
@@ -256,6 +235,7 @@ class WireGuardService:
         else:
             private_key, public_key = keys.generate_keypair()
         async with self._session_factory() as session:
+            await self._require_project(session, project_id)
             server, _ = await seed_wireguard_settings(session, self._defaults)
             repo = WireGuardPeerRepository(session)
             peer = WireGuardPeer(
@@ -283,17 +263,15 @@ class WireGuardService:
 
     async def update_peer(
         self, project_id: str, peer_id: str, data: WireGuardPeerUpdate, actor: Actor
-    ) -> WireGuardPeer | None:
-        """Apply a partial update; None when the device is not the project's.
+    ) -> WireGuardPeer:
+        """Apply a partial update; not found when the device is not the project's.
 
         Raises TunnelValidationError for a name in use or a state or city
         without a country.
         """
         async with self._session_factory() as session:
             repo = WireGuardPeerRepository(session)
-            peer = await repo.get_in_project(project_id, peer_id)
-            if peer is None:
-                return None
+            peer = await self._peer_of_project(session, project_id, peer_id)
             updated = peer.model_copy(update=device_changes(data))
             if (updated.state or updated.city) and not updated.country:
                 raise TunnelValidationError(LOCATION_NEEDS_COUNTRY)
@@ -306,17 +284,15 @@ class WireGuardService:
         await self._changes.record(ChangeKind.WIREGUARD, peer_id)
         return updated
 
-    async def rotate_peer_keys(self, project_id: str, peer_id: str, actor: Actor) -> WireGuardPeer | None:
+    async def rotate_peer_keys(self, project_id: str, peer_id: str, actor: Actor) -> WireGuardPeer:
         """A new key pair for the device (and preshared key, if it had one); the old config stops working.
 
-        None when the device is not the project's.
+        Not found when the device is not the project's.
         """
         private, public = keys.generate_keypair()
         async with self._session_factory() as session:
             repo = WireGuardPeerRepository(session)
-            peer = await repo.get_in_project(project_id, peer_id)
-            if peer is None:
-                return None
+            peer = await self._peer_of_project(session, project_id, peer_id)
             updated = peer.model_copy(
                 update={
                     "private_key": private,
@@ -330,13 +306,11 @@ class WireGuardService:
         await self._changes.record(ChangeKind.WIREGUARD, peer_id)
         return updated
 
-    async def remove_peer(self, project_id: str, peer_id: str, actor: Actor) -> bool:
-        """Delete the device with its metrics history; False when it is not the project's."""
+    async def remove_peer(self, project_id: str, peer_id: str, actor: Actor) -> None:
+        """Delete the device with its metrics history; not found when it is not the project's."""
         async with self._session_factory() as session:
             repo = WireGuardPeerRepository(session)
-            peer = await repo.get_in_project(project_id, peer_id)
-            if peer is None:
-                return False
+            peer = await self._peer_of_project(session, project_id, peer_id)
             # A removal that lost a race with another finds the row gone: that one records it.
             if await repo.delete(peer_id):
                 await actor.deleted(session, peer)
@@ -348,14 +322,11 @@ class WireGuardService:
         await self._redis.after_commit(
             lambda: self._redis.delete_tunnel_peer_window(peer_id), "drop a deleted device's metric window", peer_id=peer_id
         )
-        return True
 
-    async def client_config(self, project_id: str, peer_id: str) -> WireGuardPeerConfigResponse | None:
-        """The device's wg-quick file, issued even before the endpoint is set (flagged); None when not the project's."""
+    async def client_config(self, project_id: str, peer_id: str) -> WireGuardPeerConfigResponse:
+        """The device's wg-quick file, issued even before the endpoint is set (flagged); not found when not the project's."""
         async with self._session_factory() as session:
-            peer = await WireGuardPeerRepository(session).get_in_project(project_id, peer_id)
-            if peer is None:
-                return None
+            peer = await self._peer_of_project(session, project_id, peer_id)
             server, created = await seed_wireguard_settings(session, self._defaults)
             await session.commit()
         await self._announce_seed(created)
@@ -441,6 +412,7 @@ class WireGuardService:
     async def peer_list(self, project_id: str) -> WireGuardPeerListResponse:
         """A project's devices as the admin API lists them, with whether configs can be issued yet."""
         async with self._session_factory() as session:
+            await self._require_project(session, project_id)
             peers = await WireGuardPeerRepository(session).get_by_project(project_id)
             server, created = await seed_wireguard_settings(session, self._defaults)
             await session.commit()
@@ -486,20 +458,3 @@ class WireGuardService:
             connections_by_address=totals.by_address,
             encrypted_dns_blocked=totals.encrypted_dns_blocked,
         )
-
-    async def _published(self) -> list[dict[str, str]]:
-        """What every gateway carrying the tunnel last published; [] when Redis cannot be reached."""
-        try:
-            return await self._redis.get_tunnel_peer_status(PROTOCOL)
-        except Exception as exc:
-            logger.debug("Peer status unavailable", error=str(exc))
-            return []
-
-    async def _gateways(self) -> list[TunnelEndpointState]:
-        """The WireGuard endpoints the live gateways report, by instance; [] when the heartbeats cannot be read."""
-        try:
-            states = await self._endpoint_states()
-        except Exception as exc:
-            logger.debug("Gateway endpoint states unavailable", error=str(exc))
-            return []
-        return sorted((s for s in states if s.protocol == PROTOCOL), key=lambda s: s.instance_id)

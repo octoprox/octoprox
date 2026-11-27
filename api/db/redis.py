@@ -44,6 +44,7 @@ from api.core.stats import (
     TunnelPeerMetricDelta,
     WindowCounts,
 )
+from api.models.failures import FailureCursor, FailureLogRow
 
 logger = structlog.get_logger()
 
@@ -757,50 +758,6 @@ class _PartKeys:
             self.keys.append(key)
             found = self._positions[key] = str(len(self.keys) + 1)
         return found
-
-
-class FailureCursor(NamedTuple):
-    """Where a failure log example stands: its rank (when Redis last took an addition to it, epoch ms), kind and fingerprint.
-
-    Pages order by the three, highest first.
-    """
-
-    rank: int
-    kind: str
-    fingerprint: str
-
-
-@dataclass(frozen=True)
-class FailureLogRow:
-    """One failure log example as read back: its description (the window that made it) and what every gateway added up."""
-
-    cursor: FailureCursor
-    fields: dict[str, Any]
-    count: int
-    first_ms: int
-    last_ms: int
-    latency_ms: float | None
-
-    @staticmethod
-    def fields_of(fingerprint: str) -> list[str]:
-        """An example's fields in its kind's hash, as :meth:`read` takes their values: its description, then its tallies."""
-        fp = fingerprint
-        return [fp, f"{fp}:count", f"{fp}:first", f"{fp}:last", f"{fp}:latency", f"{fp}:timed"]
-
-    @classmethod
-    def read(cls, cursor: FailureCursor, values: Sequence[Any]) -> "FailureLogRow | None":
-        """The example from its fields' values; None when it has none, trimmed since its index was read."""
-        description, n, first, last, latency, timed = values
-        if description is None:
-            return None
-        return cls(
-            cursor=cursor,
-            fields=json.loads(description),
-            count=int(n or 0),
-            first_ms=int(first or 0),
-            last_ms=int(last or 0),
-            latency_ms=round(float(latency) / int(timed), 1) if latency and timed and int(timed) else None,
-        )
 
 
 class StreamId(NamedTuple):

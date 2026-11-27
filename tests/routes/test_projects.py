@@ -9,6 +9,7 @@ it asks for (its key on the job's stream), not by the job's effect.
 
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -580,6 +581,34 @@ class TestProjectRoleAccess:
 
 
 
+class TestCaCertificate:
+    """GET /projects/ca-certificate: the CA the gateways generate on the volume they share, for a client's trust store."""
+
+    PEM = b"-----BEGIN CERTIFICATE-----\nMIIBtest\n-----END CERTIFICATE-----\n"
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings, tmp_path: Path) -> Settings:
+        test_settings.tls_mitm_ca_cert_path = str(tmp_path / "ca" / "octoprox-ca.crt")
+        return test_settings
+
+    def test_not_found_until_a_gateway_wrote_it_then_the_file(
+        self, viewer_client: TestClient, test_settings: Settings
+    ) -> None:
+        response = viewer_client.get("/api/v1/projects/ca-certificate")
+        assert (response.status_code, response.json()) == (404, {"detail": "CA certificate not found"})
+
+        path = Path(test_settings.tls_mitm_ca_cert_path)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.PEM)
+        response = viewer_client.get("/api/v1/projects/ca-certificate")
+
+        assert (response.status_code, response.content) == (200, self.PEM)
+        assert response.headers["content-type"] == "application/x-pem-file"
+        assert response.headers["content-disposition"] == 'attachment; filename="octoprox-ca.crt"'
+        assert response.headers["content-length"] == str(len(self.PEM))
+        assert "etag" in response.headers and "last-modified" in response.headers
+
+
 class TestConnectInfo:
     """GET /projects/{id}/connect: the username for a place and session, read as the proxy reads it."""
 
@@ -597,21 +626,6 @@ class TestConnectInfo:
         assert data["endpoint"] == {"scheme": "http", "host": None, "port": test_settings.proxy_port}
         assert data["routes"] == [] and data["places"] == [] and data["countries"] == []
         assert data["any_country"] is False
-
-    def test_configured_endpoint(
-        self,
-        authenticated_client: TestClient,
-        created_project: dict[str, Any],
-        test_settings: Settings,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(test_settings, "proxy_public_url", "http://proxy.example.com:18080")
-        data = self._get(authenticated_client, created_project)
-        assert data["endpoint"] == {"scheme": "http", "host": "proxy.example.com", "port": 18080}
-        # A TLS load balancer in front of the listener, on the default port.
-        monkeypatch.setattr(test_settings, "proxy_public_url", "https://proxy.example.com")
-        data = self._get(authenticated_client, created_project)
-        assert data["endpoint"] == {"scheme": "https", "host": "proxy.example.com", "port": None}
 
     def test_place_and_session_are_normalised(
         self, authenticated_client: TestClient, created_project: dict[str, Any]
@@ -671,8 +685,53 @@ class TestConnectInfo:
     def test_not_found(self, authenticated_client: TestClient) -> None:
         assert authenticated_client.get("/api/v1/projects/non-existent-id/connect").status_code == 404
 
+    def test_a_project_username_holding_a_delimiter_is_refused_first(
+        self, authenticated_client: TestClient, sample_project_data: dict[str, Any]
+    ) -> None:
+        """The proxy would read part of such a username as a parameter, whatever the values asked for."""
+        project = authenticated_client.post(
+            "/api/v1/projects", json={**sample_project_data, "username": f"team-cc-{uuid.uuid4().hex[:6]}"}
+        ).json()
+        data = self._get(authenticated_client, project, sessid="a:b")
+        assert data["error"] == (
+            "The project username contains a reserved delimiter (-cc-, -st-, -city-, -sessid-, -prxy- or -tag-), so the"
+            " proxy cannot read it"
+        )
+        assert (data["username"], data["routes"]) == (f"{project['username']}-sessid-a:b", [])
+        response = authenticated_client.get("/api/v1/projects/non-existent-id/connect")
+        assert (response.status_code, response.json()) == (404, {"detail": "Project not found"})
+
     def test_viewer_can_read_it(self, viewer_client: TestClient) -> None:
         assert viewer_client.get("/api/v1/projects/non-existent-id/connect").status_code == 404
+
+
+class TestConfiguredConnectEndpoint:
+    """GET /projects/{id}/connect names the proxy endpoint this install was started with."""
+
+    @pytest.fixture(params=[
+        ("http://proxy.example.com:18080", {"scheme": "http", "host": "proxy.example.com", "port": 18080}),
+        # A TLS load balancer in front of the listener, on the default port.
+        ("https://proxy.example.com", {"scheme": "https", "host": "proxy.example.com", "port": None}),
+    ])
+    def endpoint(self, request: pytest.FixtureRequest) -> tuple[str, dict[str, Any]]:
+        """The public URL configured, and the endpoint the page shows for it."""
+        configured: tuple[str, dict[str, Any]] = request.param
+        return configured
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings, endpoint: tuple[str, dict[str, Any]]) -> Settings:
+        test_settings.proxy_public_url = endpoint[0]
+        return test_settings
+
+    def test_configured_endpoint(
+        self,
+        authenticated_client: TestClient,
+        created_project: dict[str, Any],
+        endpoint: tuple[str, dict[str, Any]],
+    ) -> None:
+        response = authenticated_client.get(f"/api/v1/projects/{created_project['id']}/connect")
+        assert response.status_code == 200
+        assert response.json()["endpoint"] == endpoint[1]
 
 
 def _add_proxy(client: TestClient, connector_id: str, status: ProxyStatus) -> Proxy:

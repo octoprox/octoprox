@@ -328,6 +328,21 @@ class CredentialResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @classmethod
+    def of(cls, credential: Credential) -> 'CredentialResponse':
+        """A credential as listed: whether its config holds a username and a password, never the config."""
+        config = credential.config or {}
+        return cls(
+            id=credential.id,
+            name=credential.name,
+            type=credential.type,
+            project_id=credential.project_id,
+            has_username=bool(config.get("username")),
+            has_password=bool(config.get("password")),
+            created_at=credential.created_at,
+            updated_at=credential.updated_at,
+        )
+
 
 class CredentialDetailResponse(BaseModel):
     """Schema for credential detail API responses (includes config)."""
@@ -338,3 +353,27 @@ class CredentialDetailResponse(BaseModel):
     config: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+    @classmethod
+    def of(cls, credential: Credential) -> 'CredentialDetailResponse':
+        """A credential with its config, as one credential is shown."""
+        return cls(
+            id=credential.id,
+            name=credential.name,
+            type=credential.type,
+            project_id=credential.project_id,
+            config=credential.config,
+            created_at=credential.created_at,
+            updated_at=credential.updated_at,
+        )
+
+
+class CredentialListResponse(BaseModel):
+    """Response for listing credentials."""
+    total: int
+    credentials: list[CredentialResponse]
+
+    @classmethod
+    def of(cls, credentials: list[Credential]) -> 'CredentialListResponse':
+        """The credentials as listed, in the order given."""
+        return cls(total=len(credentials), credentials=[CredentialResponse.of(c) for c in credentials])

@@ -76,6 +76,13 @@ class TestCredentialEndpoints:
 
         assert response.status_code == 404
 
+    def test_not_found_details(self, authenticated_client: TestClient) -> None:
+        """A listing checks the project first; one credential is looked up in the project, which is never checked."""
+        response = authenticated_client.get("/api/v1/projects/non-existent/credentials")
+        assert (response.status_code, response.json()) == (404, {"detail": "Project not found"})
+        response = authenticated_client.get("/api/v1/projects/non-existent/credentials/non-existent")
+        assert (response.status_code, response.json()) == (404, {"detail": "Credential not found"})
+
     def test_create_credential(
         self,
         authenticated_client: TestClient,

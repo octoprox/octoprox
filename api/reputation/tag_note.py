@@ -17,7 +17,7 @@ class TagNote(BaseModel):
 
     connector_id: str
     proxy_id: str
-    # Canonical text (api.feed.models.static_exit_ip), what routing keeps the row's avoids under.
+    # Canonical text (Proxy.static_exit_ip), what routing keeps the row's avoids under.
     ip: str | None = None
 
     @staticmethod

@@ -20,9 +20,9 @@ from api.core.stats import RequestCount
 from api.db import reputation_repository
 from api.db.geo_repository import ExitSighting, ObservationRepository
 from api.db.reputation_repository import ExitReputationRepository
+from api.models import exit_reputation
 from api.models.proxy import Proxy, ProxyProtocol, ProxyStatus
 from api.reputation.record import ConnectorSiteKey, ExitIpKey, ReportCounts
-from api.routes import exit_reputation
 from tests.conftest import api_runtime, on_app_loop
 
 
@@ -396,6 +396,84 @@ class TestAccess:
         assert authenticated_client.get(base).status_code == 404
         assert authenticated_client.get(f"{base}/ips/203.0.113.1").status_code == 404
         assert authenticated_client.post(f"{base}/summary", json={"ips": []}).status_code == 404
+
+    def test_which_refusal_comes_first_and_the_404_detail(self, authenticated_client: TestClient) -> None:
+        """A site or place that names none is refused before the project is looked up; an IP only after."""
+        base = "/api/v1/projects/missing/exit-reputation"
+        client = authenticated_client
+        missing = (404, {"detail": "Project not found"})
+        not_a_site = (400, {"detail": "not a site: co.uk is a public suffix"})
+
+        def answer(response: Any) -> tuple[int, Any]:
+            return response.status_code, response.json()
+
+        assert answer(client.get(f"{base}/places", params={"site": "co.uk"})) == not_a_site
+        assert answer(client.get(f"{base}/places/history", params={"site": "co.uk"})) == not_a_site
+        assert answer(client.get(f"{base}/places/history", params={"site": "google.com", "place": "US/NY/a/b"})) == (
+            400, {"detail": "not a place: US/NY/a/b"}
+        )
+        preview = {"strength": 2, "floor": 10}
+        assert answer(client.get(f"{base}/strength-preview", params={**preview, "site": "co.uk"})) == not_a_site
+        assert answer(client.get(f"{base}/ips/example.com")) == missing
+        for response in (
+            client.get(base),
+            client.get(f"{base}/ips/203.0.113.1"),
+            client.post(f"{base}/summary", json={"ips": []}),
+            client.get(f"{base}/places"),
+            client.get(f"{base}/places/history", params={"site": "google.com"}),
+            client.get(f"{base}/strength-preview", params=preview),
+        ):
+            assert answer(response) == missing
+
+
+class TestFilterEdges:
+    def test_a_limit_past_a_thousand_is_a_thousand_and_blank_filters_do_not_narrow(
+        self, authenticated_client: TestClient, three: tuple[str, datetime]
+    ) -> None:
+        project_id, _ = three
+
+        page = _records(authenticated_client, project_id, limit=5000, ip="  ", site=" ")
+
+        assert (page["limit"], page["total"], len(page["records"])) == (1000, 3, 3)
+
+    def test_the_connectors_of_an_ip_the_one_that_saw_it_last_first(
+        self,
+        authenticated_client: TestClient,
+        sample_project_data: dict[str, Any],
+        sample_credential_data: dict[str, Any],
+        sample_connector_data: dict[str, Any],
+    ) -> None:
+        client = authenticated_client
+        project_id = _project(client, sample_project_data)["id"]
+        credential = client.post(f"/api/v1/projects/{project_id}/credentials", json=sample_credential_data)
+        assert credential.status_code == 201, credential.text
+        ip, now = "203.0.113.7", utc_now()
+        ids = []
+        for name, age in (("Earlier", timedelta(hours=2)), ("Later", timedelta(hours=1))):
+            connector = client.post(
+                f"/api/v1/projects/{project_id}/connectors",
+                json={**sample_connector_data, "name": name, "credential_id": credential.json()["id"]},
+            )
+            assert connector.status_code == 201, connector.text
+            ids.append(connector.json()["id"])
+            _sighted(client, connector.json()["id"], ip, now - age)
+
+        body = client.get(f"/api/v1/projects/{project_id}/exit-reputation/ips/{ip}").json()
+
+        assert [(c["connector_id"], c["connector_name"]) for c in body["connectors"]] == [
+            (ids[1], "Later"), (ids[0], "Earlier"),
+        ]
+
+    def test_an_ip_asked_twice_in_the_same_text_is_answered_once(
+        self, authenticated_client: TestClient, three: tuple[str, datetime]
+    ) -> None:
+        project_id, _ = three
+
+        response = authenticated_client.post(
+            f"/api/v1/projects/{project_id}/exit-reputation/summary", json={"ips": ["203.0.113.2", "203.0.113.2"]}
+        )
+
+        assert [row["ip"] for row in response.json()["ips"]] == ["203.0.113.2"]
 
 
 class TestProxyExitIp:

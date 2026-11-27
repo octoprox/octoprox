@@ -1,7 +1,8 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Credential writes: create, edit and delete, validated by the provider registry and announced with a ``credential`` entry.
+"""Credentials: a project's read, and its writes validated by the provider registry and announced with a ``credential``
+entry.
 
 The vendor's check runs before the transaction opens, and a credential a connector uses is never deleted.
 """
@@ -40,7 +41,7 @@ _NAME_UNIQUE = "ix_credentials_project_name_unique"
 
 
 class CredentialService:
-    """Creates, edits and deletes credentials."""
+    """Reads, creates, edits and deletes a project's credentials."""
 
     def __init__(
         self, session_factory: SessionFactory, provider_registry: ProviderRegistry, *, changes: ChangeLog
@@ -48,6 +49,22 @@ class CredentialService:
         self._session_factory = session_factory
         self._registry = provider_registry
         self._changes = changes
+
+    async def of_project(self, project_id: str) -> list[Credential]:
+        """The project's credentials, oldest first (ties by id, so every api process lists them alike)."""
+        async with self._session_factory() as session:
+            if await ProjectRepository(session).get_by_id(project_id) is None:
+                raise NotFoundError("Project not found")
+            credentials = await CredentialRepository(session).get_by_project(project_id)
+        return sorted(credentials, key=lambda credential: (credential.created_at, credential.id))
+
+    async def get(self, project_id: str, credential_id: str) -> Credential:
+        """A credential of the project, config included; another project's is not found."""
+        async with self._session_factory() as session:
+            credential = await CredentialRepository(session).get_in_project(project_id, credential_id)
+        if credential is None:
+            raise NotFoundError("Credential not found")
+        return credential
 
     async def create(self, project_id: str, data: CredentialCreate, actor: Actor) -> Credential:
         """Validate and store a new credential of the project; the saved credential."""

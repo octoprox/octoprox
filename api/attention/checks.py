@@ -23,13 +23,12 @@ from urllib.parse import quote
 
 from api.core.stats import FailureKind
 from api.geo.models import META_LOCATION_VERDICT, ContradictedAction, LocationVerdict
-from api.geo.service import GeoService
 from api.models.attention import AttentionWhen, Severity
 from api.models.connector import BYTES_PER_GB, TrafficLimitAction, TrafficPeriod
+from api.models.exit_reputation import place_label
 from api.models.location import LocationTarget
 from api.models.proxy import ProxyStatus
-from api.providers.sdk.strategies import META_SESSION_ID, is_dynamic_gateway
-from api.reputation.split import place_label
+from api.providers.sdk.strategies import META_SESSION_ID
 
 if TYPE_CHECKING:
     from api.attention.data import FailureCount, ProjectData
@@ -719,9 +718,9 @@ class ExitLocationCheck(ConnectorCheck):
         view = data.preview.snapshot.connector_view(connector.id)
         if view is None or not view.takes_requests:
             return []
-        rows = [proxy for proxy in view.proxies if not proxy.status.retiring and not is_dynamic_gateway(proxy)]
+        rows = [proxy for proxy in view.proxies if not proxy.status.retiring and not proxy.is_dynamic_gateway]
         outside = {
-            proxy.id for proxy in rows if GeoService.outside_declared_countries(proxy, view.declared_countries)
+            proxy.id for proxy in rows if proxy.outside_declared_countries(view.declared_countries)
         }
         thresholds = data.thresholds
         found: list[Finding] = []

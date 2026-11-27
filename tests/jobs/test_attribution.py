@@ -33,6 +33,8 @@ from api.db.streams import ChangeKind, ChangeLog, StreamEntry, ref_of
 from api.gateway.sightings import SightingPublisher
 from api.geo.attributor import ProxyAttributor
 from api.geo.models import (
+    META_DISCOVERED_IP,
+    META_GEO_COUNTRY,
     META_LOCATION_CHECKED_AT,
     META_LOCATION_VERDICT,
     ContradictedAction,
@@ -61,7 +63,7 @@ from api.jobs.runner import JobRunner
 from api.models.connector import Connector
 from api.models.project import Project
 from api.models.proxy import Proxy
-from api.providers.sdk.strategies import META_DISCOVERED_IP, META_GEO_COUNTRY, META_SESSION_ID
+from api.providers.sdk.strategies import META_SESSION_ID
 from api.services.proxies import ProxyService
 from tests.conftest import queued_job_keys
 from tests.geo.test_readers import write_mmdb

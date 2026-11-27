@@ -42,6 +42,7 @@ from api.models.connector import (
     validate_traffic_config,
 )
 from api.models.countries import CountryRole
+from api.models.location import normalize_country_code
 from api.services.errors import (
     InvalidConfigError,
     NameConflictError,
@@ -202,11 +203,20 @@ class ConnectorService:
     ) -> None:
         """Set how each connector named in ``roles`` stands to ``country``, all in one transaction or none.
 
-        A connector listing countries gets the country on or off its list, which provisions or drops its slots; one
-        listing none gets it excluded or not. Either reserves it or not.
+        ``country`` is normalized first (``uk`` is ``GB``), after the project is found. A connector listing countries
+        gets the country on or off its list, which provisions or drops its slots; one listing none gets it excluded or
+        not. Either reserves it or not.
         """
         edited: list[tuple[Connector, Connector]] = []
         async with self._session_factory() as session:
+            if await ProjectRepository(session).get_by_id(project_id) is None:
+                raise NotFoundError("Project not found")
+            try:
+                code = normalize_country_code(country)
+            except ValueError as exc:
+                raise InvalidConfigError(str(exc)) from None
+            if code is None:
+                raise InvalidConfigError("A country code is required")
             connectors = ConnectorRepository(session)
             credentials = CredentialRepository(session)
             for connector_id, role in roles.items():
@@ -214,17 +224,17 @@ class ConnectorService:
                 if current is None:
                     raise NotFoundError("Connector not found")
                 credential = await credentials.get_by_id(current.credential_id)
-                changed = self._with_country_role(current, credential, country, role)
+                changed = self._with_country_role(current, credential, code, role)
                 if changed.config == current.config and changed.routing_config == current.routing_config:
                     continue
                 self._check_countries(changed, credential)
                 saved = await self._save(session, changed)
                 masked = self._registry.audit_masked("connector", current.credential_type)
-                await actor.updated(session, current, saved, masked=masked, details={"country": country})
+                await actor.updated(session, current, saved, masked=masked, details={"country": code})
                 edited.append((current, saved))
             await session.commit()
         for current, saved in edited:
-            logger.info("Updated connector", connector_id=saved.id, name=saved.name, country=country)
+            logger.info("Updated connector", connector_id=saved.id, name=saved.name, country=code)
             await self._changes.record(ChangeKind.CONNECTOR, saved.id)
             if saved.config != current.config:
                 await self._start_work(saved)

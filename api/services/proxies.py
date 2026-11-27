@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import structlog
@@ -20,7 +19,7 @@ from api.db.redis import PROXY_REQUESTS_KEY, QUARANTINE_KEY
 from api.db.repository import ConnectorRepository, ProjectRepository, ProxyRepository
 from api.db.streams import ChangeKind, RuntimeSignal
 from api.geo.attributor import ProxyAttributor
-from api.geo.models import MANUAL_SOURCE, META_COUNTRY_SOURCE
+from api.geo.models import MANUAL_SOURCE, META_COUNTRY, META_COUNTRY_SOURCE
 from api.models.credential import CredentialType
 from api.models.location import set_manual_location
 from api.models.proxy import (
@@ -29,9 +28,10 @@ from api.models.proxy import (
     ProxyProtocol,
     ProxyStatus,
     ProxyUpdate,
+    ProxyUpload,
+    UploadError,
     metadata_diff,
 )
-from api.providers.sdk.strategies import META_COUNTRY
 from api.services.errors import NotFoundError, WriteRejectedError
 
 if TYPE_CHECKING:
@@ -66,25 +66,6 @@ _EDITABLE = frozenset({"host", "port", "protocol", "username", "password", "tags
 # The definition fields a sync's refresh may change, written as the vendor
 # left them (a credential a listed endpoint no longer has is cleared).
 _SYNCED = ("host", "port", "protocol", "username", "password")
-
-
-@dataclass(frozen=True)
-class UploadError:
-    """One line of an upload that did not become a proxy, and why."""
-
-    line_number: int
-    line: str
-    error: str
-
-
-@dataclass(frozen=True)
-class ProxyUpload:
-    """What an upload did: the proxies it added and the lines it could not read."""
-
-    # Non-empty lines in the file.
-    total_lines: int
-    added: list[Proxy] = field(default_factory=list)
-    errors: list[UploadError] = field(default_factory=list)
 
 
 class StatusMove(NamedTuple):
@@ -224,7 +205,9 @@ class ProxyService:
         await self._announce([proxy.id for proxy in proxies])
         await self._added(proxies, {connector.id: connector})
         await self._alerts.request(project_id)
-        return ProxyUpload(total_lines=sum(1 for line in lines if line.strip()), added=proxies, errors=errors)
+        return ProxyUpload(
+            total_lines=sum(1 for line in lines if line.strip()), connector=connector, added=proxies, errors=errors
+        )
 
     async def update(self, project_id: str, proxy_id: str, data: ProxyUpdate, actor: Actor) -> Proxy:
         """Apply the fields ``data`` sets, never the status, to a proxy of the project; the saved proxy.
@@ -271,8 +254,8 @@ class ProxyService:
             await self._jobs.request_now(JobKind.SCALE, [connector.id])
         await self._alerts.request(project_id)
 
-    async def unquarantine(self, project_id: str, proxy_id: str) -> bool:
-        """Lift a proxy's quarantine and empty its rate window; False, touching nothing, when it was not quarantined.
+    async def unquarantine(self, project_id: str, proxy_id: str) -> None:
+        """Lift a proxy's quarantine and empty its rate window; refused, touching nothing, when it was not quarantined.
 
         Both go in one MULTI with the runtime entry announcing them, so gateways route to the proxy again within moments.
         """
@@ -280,7 +263,7 @@ class ProxyService:
             if await ProxyRepository(session).get_in_project(project_id, proxy_id) is None:
                 raise NotFoundError("Proxy not found")
         if await self._redis.client.zscore(QUARANTINE_KEY, proxy_id) is None:
-            return False
+            raise WriteRejectedError("Proxy is not quarantined")
         pipe = self._redis.client.pipeline(transaction=True)
         pipe.zrem(QUARANTINE_KEY, proxy_id)
         pipe.delete(PROXY_REQUESTS_KEY.format(proxy_id=proxy_id))
@@ -288,7 +271,6 @@ class ProxyService:
         await pipe.execute()
         logger.info("Proxy manually unquarantined", proxy_id=proxy_id)
         await self._alerts.request(project_id)
-        return True
 
     # --- The jobs' writes -------------------------------------------------------------------
 

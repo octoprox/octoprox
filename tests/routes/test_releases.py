@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 from api.core import utc_now
 from api.core.config import Settings
 from api.core.releases import LatestRelease, ReleaseNotes
-from api.routes import releases
+from api.services import releases
 from tests.conftest import api_runtime, on_app_loop
 from tests.core.test_releases import NOTES, note
 
@@ -72,10 +72,20 @@ class TestReleases:
         assert (upgraded["last_seen_version"], upgraded["unseen"]) == ("6.2.0", 1)
         assert upgraded["notes"][0]["version"] == "6.2.1"
 
-    def test_an_admin_sees_the_releases_newer_than_the_running_one(
-        self, authenticated_client: TestClient, test_settings: Settings
-    ) -> None:
+    def test_with_the_check_off_an_earlier_finding_is_not_shown(self, authenticated_client: TestClient) -> None:
+        store_finding(authenticated_client, "6.3.0")
+        assert authenticated_client.get(ENDPOINT).json()["update"] is None
+
+
+class TestUpdateCheckOn:
+    """With the update check on, as this install was started, admins are told of a newer release."""
+
+    @pytest.fixture
+    def test_settings(self, test_settings: Settings) -> Settings:
         test_settings.update_check = True
+        return test_settings
+
+    def test_an_admin_sees_the_releases_newer_than_the_running_one(self, authenticated_client: TestClient) -> None:
         store_finding(authenticated_client, "6.1.4", "6.2.0", "6.2.1", "6.3.0")
 
         update = authenticated_client.get(ENDPOINT).json()["update"]
@@ -83,19 +93,13 @@ class TestReleases:
         assert update["version"] == "6.3.0"
         assert [n["version"] for n in update["notes"]] == ["6.3.0", "6.2.1"]
 
-    def test_nothing_newer_listed_is_no_update(self, authenticated_client: TestClient, test_settings: Settings) -> None:
-        test_settings.update_check = True
+    def test_nothing_newer_listed_is_no_update(self, authenticated_client: TestClient) -> None:
         store_finding(authenticated_client, "6.1.4", "6.2.0")
         assert authenticated_client.get(ENDPOINT).json()["update"] is None
 
     def test_editors_and_viewers_are_not_told(
-        self, viewer_client: TestClient, editor_auth_headers: dict[str, str], test_settings: Settings
+        self, viewer_client: TestClient, editor_auth_headers: dict[str, str]
     ) -> None:
-        test_settings.update_check = True
         store_finding(viewer_client, "6.3.0")
         assert viewer_client.get(ENDPOINT, headers=editor_auth_headers).json()["update"] is None
         assert viewer_client.get(ENDPOINT).json()["update"] is None
-
-    def test_with_the_check_off_an_earlier_finding_is_not_shown(self, authenticated_client: TestClient) -> None:
-        store_finding(authenticated_client, "6.3.0")
-        assert authenticated_client.get(ENDPOINT).json()["update"] is None

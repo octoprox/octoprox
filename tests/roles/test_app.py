@@ -132,11 +132,11 @@ class TestApiJobs:
     def test_the_routes_ask_for_jobs_on_the_api_runtime_s_queue(
         self, build_app: Callable[..., FastAPI], auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Read when a request asks, so a queue the runtime holds is the one every route uses."""
+        """The services the routes call publish on the queue the runtime holds."""
         with TestClient(build_app(Role.API, **FAST), headers=auth_headers) as client:
             runtime = api_runtime(client)
             noted = NotedQueue(runtime.redis_client)
-            monkeypatch.setattr(runtime, "jobs", noted)
+            monkeypatch.setattr(runtime.jobs, "publish", noted.publish)
 
             response = client.post("/api/v1/geo/reattribute", json={})
 

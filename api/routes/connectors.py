@@ -1,72 +1,34 @@
 # Copyright 2026 Octoprox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Connector endpoints, thin over :class:`~api.services.connectors.ConnectorService` for writes and
-:class:`~api.services.read_model.RuntimeView` for answers; another project's connector is not found.
+"""Connector endpoints, thin over :class:`~api.services.connectors.ConnectorService` for writes,
+:class:`~api.services.read_model.RuntimeView` for answers and :class:`~api.services.metrics.MetricsService` for the
+history; another project's connector is not found.
 """
 
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
 
-from api.core import utc_now
 from api.core.auth import RequireEditorDep
-from api.db.repository import ConnectorRepository, MetricsRepository
 from api.models.connector import (
     ConnectorCreate,
+    ConnectorListResponse,
     ConnectorOptionsResponse,
     ConnectorResponse,
     ConnectorUpdate,
 )
+from api.models.metrics import MetricsHistoryResponse
 from api.routes.common import (
     actor_of,
     connector_service_of,
+    metrics_service_of,
     require_project,
     runtime_view_of,
-    session_factory_of,
     settings_of,
 )
-from api.routes.metrics import RANGE_CONFIG, MetricsHistoryResponse, MetricsSnapshot
-from api.services.read_model import ConnectorRow
 
 router = APIRouter(prefix="/projects/{project_id}/connectors")
-
-
-class ConnectorListResponse(BaseModel):
-    """Response for listing connectors."""
-    total: int
-    connectors: list[ConnectorResponse]
-
-
-def _connector_to_response(view: ConnectorRow, default_health_check_interval: int) -> ConnectorResponse:
-    """The full API view of a connector: its definition, credential, pool, target and traffic."""
-    connector = view.connector
-    return ConnectorResponse(
-        id=connector.id,
-        name=connector.name,
-        credential_id=connector.credential_id,
-        credential_name=view.credential_name,
-        credential_type=view.credential_type,
-        project_id=connector.project_id,
-        config=connector.config,
-        routing_config=connector.routing_config,
-        rate_limit_config=connector.rate_limit_config,
-        traffic_config=connector.traffic_config,
-        health_check_config=connector.health_check_config,
-        health_check_interval=connector.health_check_interval(default_health_check_interval),
-        default_health_check_interval=default_health_check_interval,
-        traffic_reset_at=connector.traffic_reset_at,
-        traffic_usage=view.traffic_usage,
-        enabled=connector.enabled,
-        proxy_count=view.proxy_count,
-        target=view.target,
-        last_error=connector.last_error,
-        last_error_at=connector.last_error_at,
-        consecutive_errors=connector.consecutive_errors,
-        created_at=connector.created_at,
-        updated_at=connector.updated_at,
-    )
 
 
 async def _describe(request: Request, project_id: str, connector_id: str) -> ConnectorResponse:
@@ -74,7 +36,7 @@ async def _describe(request: Request, project_id: str, connector_id: str) -> Con
     view = await runtime_view_of(request).connector(project_id, connector_id)
     if view is None:
         raise HTTPException(status_code=404, detail="Connector not found")
-    return _connector_to_response(view, settings_of(request).health_check_interval)
+    return ConnectorResponse.of(view, settings_of(request).health_check_interval)
 
 
 @router.get("", response_model=ConnectorListResponse)
@@ -82,8 +44,7 @@ async def list_connectors(request: Request, project_id: str) -> ConnectorListRes
     """List all connectors for a project, oldest first."""
     await require_project(request, project_id)
     views = await runtime_view_of(request).connectors(project_id)
-    default = settings_of(request).health_check_interval
-    return ConnectorListResponse(total=len(views), connectors=[_connector_to_response(view, default) for view in views])
+    return ConnectorListResponse.of(views, settings_of(request).health_check_interval)
 
 
 @router.post("", response_model=ConnectorResponse, status_code=201)
@@ -120,21 +81,7 @@ async def get_connector_metrics_history(
     Unlike per-proxy history these survive the connector's proxies being
     rotated or re-synced, so a period's traffic can be charted in full.
     """
-    delta, limit, bucket_seconds = RANGE_CONFIG[range]
-    since = utc_now() - delta
-    async with session_factory_of(request)() as session:
-        if await ConnectorRepository(session).get_in_project(project_id, connector_id) is None:
-            raise HTTPException(status_code=404, detail="Connector not found")
-        repo = MetricsRepository(session)
-        if bucket_seconds:
-            rows = await repo.get_connector_metrics_history_aggregated(
-                connector_id=connector_id, since=since, bucket_seconds=bucket_seconds
-            )
-        else:
-            rows = await repo.get_connector_metrics_history(
-                connector_id=connector_id, since=since, limit=limit, granularity=60
-            )
-    return MetricsHistoryResponse(snapshots=[MetricsSnapshot(**row) for row in reversed(rows)])
+    return await metrics_service_of(request).connector_history(project_id, connector_id, range)
 
 
 @router.post("/{connector_id}/traffic/reset", response_model=ConnectorResponse)

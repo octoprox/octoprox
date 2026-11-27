@@ -4,6 +4,7 @@
 """User model definitions for authentication and authorization."""
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, ClassVar
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from api.core import utc_now
 from api.core.password import hash_password
 from api.models.audit import Audited, AuditEntityType
+from api.models.auth import TokenUsage
 
 
 class UserRole(StrEnum):
@@ -206,6 +208,23 @@ class SetPasswordRequest(BaseModel):
     password: str
 
 
+@dataclass(frozen=True)
+class UserView:
+    """A user with the sign-in providers linked to it, by kind, and its tokens' usage, None while it holds none."""
+
+    user: User
+    sign_in_providers: list[str]
+    tokens: TokenUsage | None
+
+
+@dataclass(frozen=True)
+class Invitation:
+    """A user invited, or invited again, with the set-password link to hand them."""
+
+    user: UserView
+    url: str
+
+
 class UserResponse(BaseModel):
     """Schema for user API responses (never exposes password_hash)."""
 
@@ -226,9 +245,48 @@ class UserResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @classmethod
+    def of(cls, view: UserView) -> "UserResponse":
+        """A user as answered: whether it has a password, never the hash, with its sign-ins and token usage."""
+        user = view.user
+        tokens = view.tokens or TokenUsage()
+        return cls(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            role=user.role,
+            kind=user.kind,
+            is_active=user.is_active,
+            has_password=user.password_hash is not None,
+            sign_in_providers=view.sign_in_providers,
+            token_count=tokens.count,
+            token_last_used_at=tokens.last_used_at,
+            theme_preference=user.theme_preference,
+            last_login_at=user.last_login_at,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+        )
+
+
+class UserListResponse(BaseModel):
+    """Response for listing users."""
+
+    total: int
+    users: list[UserResponse]
+
+    @classmethod
+    def of(cls, views: list[UserView]) -> "UserListResponse":
+        """The users as listed, in the order given."""
+        return cls(total=len(views), users=[UserResponse.of(view) for view in views])
+
 
 class InviteResponse(BaseModel):
     """Response for invite user endpoint."""
 
     user: UserResponse
     invite_url: str
+
+    @classmethod
+    def of(cls, invitation: Invitation) -> "InviteResponse":
+        """An invited user with the link that sets their password."""
+        return cls(user=UserResponse.of(invitation.user), invite_url=invitation.url)

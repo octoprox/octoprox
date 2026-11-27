@@ -22,7 +22,6 @@ from api.core.logging import error_text
 from api.core.loops import PeriodicLoop
 from api.core.workers import WorkerName
 from api.db.redis import TAG_NOTE_TTL_SECONDS
-from api.feed.models import static_exit_ip
 from api.reputation.tag_note import TagNote
 
 if TYPE_CHECKING:
@@ -90,7 +89,7 @@ class TagNotes(PeriodicLoop):
         if not tag or not project.exit_reputation.records:
             return
         proxy = decision.proxy
-        current = TagNote(connector_id=proxy.connector_id, proxy_id=proxy.id, ip=static_exit_ip(proxy))
+        current = TagNote(connector_id=proxy.connector_id, proxy_id=proxy.id, ip=proxy.static_exit_ip)
         key = TagNote.key(project.id, tag)
         now = self._clock()
         half = self._ttl / 2

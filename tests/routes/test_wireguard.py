@@ -9,14 +9,19 @@ the gateways' heartbeats and device readings, which route tests, running no gate
 
 import time
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from typing import Any
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
+from api.core import utc_now
 from api.core.stats import TunnelPeerMetricDelta
+from api.db.models import TunnelPeerMetricsModel
 from api.db.redis import TUNNEL_PEER_METRICS_KEY, TUNNEL_PEER_WINDOWS
 from api.db.repository import MetricsRepository
+from api.db.session import SessionFactory
 from api.db.wireguard_repository import WireGuardPeerRepository
 from api.models.audit import MASK
 from api.models.wireguard import WireGuardPeer, WireGuardPeerReading
@@ -66,6 +71,48 @@ def _count_device(
         await runtime.redis_client.client.hset(key, mapping=window.to_dict())
 
     on_app_loop(client, count)
+
+
+def device_routes(client: TestClient, url: str, rotate: str) -> list[httpx.Response]:
+    """The answers of every route naming the device at ``url``; the edit, a city without a country, would be refused."""
+    return [
+        client.get(url),
+        client.patch(url, json={"country": "", "city": "Berlin"}),
+        client.post(f"{url}/{rotate}"),
+        client.get(f"{url}/metrics/history"),
+        client.get(f"{url}/config"),
+        client.delete(url),
+    ]
+
+
+async def save_aged_history(
+    session_factory: SessionFactory, protocol: str, project_id: str, peer_id: str, other_id: str
+) -> None:
+    """History rows of ``peer_id`` 10 and 90 minutes old, an hourly one 23.5 hours old and one 25 hours old, and a row
+    of ``other_id`` 20 minutes old."""
+    now = utc_now()
+    async with session_factory() as session:
+        for device, age, granularity, requests, failures in (
+            (peer_id, timedelta(minutes=10), 60, 10, 2),
+            (peer_id, timedelta(minutes=90), 60, 2, 0),
+            (peer_id, timedelta(hours=23, minutes=30), 3600, 4, 1),
+            (peer_id, timedelta(hours=25), 3600, 100, 0),
+            (other_id, timedelta(minutes=20), 60, 7, 0),
+        ):
+            session.add(TunnelPeerMetricsModel(
+                peer_id=device, protocol=protocol, project_id=project_id, timestamp=now - age,
+                request_count=requests, success_count=requests - failures, failure_count=failures,
+                avg_latency_ms=10.0, bytes_sent=requests, bytes_received=requests * 10,
+                by_address=failures, encrypted_dns_blocked=1, granularity=granularity,
+            ))
+        await session.commit()
+
+
+# The fields of a history snapshot, in the order they are sent.
+SNAPSHOT_FIELDS = [
+    "request_count", "success_count", "failure_count", "avg_latency_ms", "bytes_sent", "bytes_received",
+    "connections_by_address", "encrypted_dns_blocked", "timestamp",
+]
 
 
 @pytest.fixture
@@ -362,6 +409,49 @@ class TestPeers:
         assert authenticated_client.delete(url).status_code == 404
         # Still there, unchanged, under its own project.
         assert authenticated_client.get(f"{_peers_url(created_project)}/{peer['id']}").json()["name"] == "tv"
+
+    def test_not_found_details(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
+        """A missing project is named first on every device route, before the device and before what the body asks."""
+        url = _peers_url(created_project)
+        peer = authenticated_client.post(url, json={"name": "tv"}).json()
+        missing = "/api/v1/projects/nope/wireguard/peers"
+        for response in (
+            authenticated_client.get(missing),
+            authenticated_client.post(missing, json={"name": "tv"}),
+            *device_routes(authenticated_client, f"{missing}/{peer['id']}", "rotate-keys"),
+            *device_routes(authenticated_client, f"{missing}/nope", "rotate-keys"),
+        ):
+            assert (response.status_code, response.json()) == (404, {"detail": "Project not found"})
+        for response in device_routes(authenticated_client, f"{url}/nope", "rotate-keys"):
+            assert (response.status_code, response.json()) == (404, {"detail": "Peer not found"})
+        deleted = authenticated_client.delete(f"{url}/{peer['id']}")
+        assert (deleted.status_code, deleted.content) == (204, b"")
+
+    def test_history_comes_oldest_first(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
+        """Raw one-minute rows up to a day, hourly buckets past it; either way the oldest first, and only the device's."""
+        url = _peers_url(created_project)
+        tv = authenticated_client.post(url, json={"name": "tv"}).json()
+        console = authenticated_client.post(url, json={"name": "console"}).json()
+        on_app_loop(
+            authenticated_client, save_aged_history, api_runtime(authenticated_client).session_factory,
+            "wireguard", created_project["id"], tv["id"], console["id"],
+        )
+
+        raw = authenticated_client.get(f"{url}/{tv['id']}/metrics/history", params={"range": "6h"}).json()["snapshots"]
+        bucketed = authenticated_client.get(f"{url}/{tv['id']}/metrics/history", params={"range": "7d"}).json()["snapshots"]
+
+        assert [{k: v for k, v in s.items() if k != "timestamp"} for s in raw] == [
+            {"request_count": 2, "success_count": 2, "failure_count": 0, "avg_latency_ms": 10.0, "bytes_sent": 2,
+             "bytes_received": 20, "connections_by_address": 0, "encrypted_dns_blocked": 1},
+            {"request_count": 10, "success_count": 8, "failure_count": 2, "avg_latency_ms": 10.0, "bytes_sent": 10,
+             "bytes_received": 100, "connections_by_address": 2, "encrypted_dns_blocked": 1},
+        ]
+        assert [list(s) for s in raw] == [SNAPSHOT_FIELDS, SNAPSHOT_FIELDS]
+        assert [(s["request_count"], s["connections_by_address"]) for s in bucketed] == [(100, 0), (4, 1), (2, 0), (10, 2)]
+        for snapshots in (raw, bucketed):
+            assert [s["timestamp"] for s in snapshots] == sorted(s["timestamp"] for s in snapshots)
+        for peer in (tv, console):
+            assert authenticated_client.delete(f"{url}/{peer['id']}").status_code == 204
 
     def test_deleting_the_project_removes_its_peers(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
         url = _peers_url(created_project)

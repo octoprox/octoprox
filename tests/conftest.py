@@ -365,7 +365,7 @@ def async_client(app_with_lifespan: Any) -> Generator[TestClient, None, None]:
 @pytest.fixture
 def auth_headers(test_settings: Settings) -> dict[str, str]:
     """Create admin authentication headers with a valid JWT token."""
-    from api.routes.auth import create_jwt
+    from api.core.session_tokens import create_jwt
 
     token = create_jwt(
         payload={
@@ -382,7 +382,7 @@ def auth_headers(test_settings: Settings) -> dict[str, str]:
 @pytest.fixture
 def editor_auth_headers(test_settings: Settings) -> dict[str, str]:
     """Create editor authentication headers with a valid JWT token."""
-    from api.routes.auth import create_jwt
+    from api.core.session_tokens import create_jwt
 
     token = create_jwt(
         payload={
@@ -399,7 +399,7 @@ def editor_auth_headers(test_settings: Settings) -> dict[str, str]:
 @pytest.fixture
 def viewer_auth_headers(test_settings: Settings) -> dict[str, str]:
     """Create viewer authentication headers with a valid JWT token."""
-    from api.routes.auth import create_jwt
+    from api.core.session_tokens import create_jwt
 
     token = create_jwt(
         payload={

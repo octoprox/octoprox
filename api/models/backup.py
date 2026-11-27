@@ -16,6 +16,7 @@ safe and resilient to schema evolution - no per-column duplication that could
 drift away from the SQLAlchemy models.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -113,6 +114,14 @@ class ExportRequest(BaseModel):
     include_metrics: bool = False
     # The bytes of uploaded and downloaded IP databases. Their rows are always included.
     include_database_files: bool = False
+
+
+@dataclass(frozen=True)
+class BackupExport:
+    """An exported backup file: its bytes, and the name it downloads as."""
+
+    content: bytes
+    filename: str
 
 
 class UserConflict(BaseModel):

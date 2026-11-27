@@ -10,6 +10,8 @@ project's rows, else the ``-tag-`` in the username, by the note a gateway made o
 headers named carries its tag's note too, which the workers fall back on when the headers name no exit of the rows. A
 row with IPs counts the report for its exit IP and its connector; a dynamic connector, whose exits are per request,
 alone, at the place the username names; see docs/exit-reputation.md.
+
+The project comes from the api's project map, so taking reports reads no Postgres.
 """
 
 from __future__ import annotations
@@ -29,12 +31,15 @@ from api.jobs.messages import ExitReportMessage, NotedExit
 from api.models.exit_reports import ExitReportIn, ExitReportResult, ExitReportsResponse
 from api.reputation.site import canonical_ip, report_site
 from api.reputation.tag_note import TagNote
+from api.services.errors import ConflictError, NotFoundError, UnavailableError
 
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from api.core.auth import CurrentUser
     from api.db.redis import RedisClient
     from api.models.project import Project
+    from api.roles.refresh import ProjectMap
 
 logger = structlog.get_logger()
 
@@ -52,6 +57,8 @@ NO_EXIT = "name the exit with a -tag- in the username, or with the exit headers"
 IP_NEEDS_CONNECTOR = "ip needs connector_id"
 NOT_A_CONNECTOR = "connector_id is not a connector id"
 NOT_AN_IP = "ip is not an IP"
+# What the client is told when Redis did not answer: nothing was taken, and the reports are sent again.
+UNAVAILABLE = "Redis cannot be reached, so the reports were not taken; send them again shortly"
 
 
 class ExitReportsUnavailableError(RuntimeError):
@@ -185,18 +192,37 @@ class _Report:
         )
 
 
-class ExitReportIntake:
-    """Takes a project's exit reports without Postgres: names each by its exit headers as sent, with its tag's note to
-    fall back on, or by that note alone, and appends the ones named to the reports stream in one pipeline.
+class ExitReportService:
+    """Takes a project's exit reports without Postgres: names each by its exit headers as sent or its tag's note, and
+    appends the ones named to the reports stream for the workers to check and apply.
 
-    It decides nothing about the exits or connectors: the workers check the exit headers against the project's rows,
-    and apply each report against the project's settings.
+    Args:
+        projects: the api's project map, which the project is taken from.
     """
 
-    def __init__(self, redis_client: RedisClient) -> None:
+    def __init__(self, redis_client: RedisClient, *, projects: ProjectMap) -> None:
         self._redis = redis_client
+        self._projects = projects
 
     async def take(
+        self, project_id: str, reports: Sequence[ExitReportIn], caller: CurrentUser
+    ) -> ExitReportsResponse:
+        """Name each report on its own and append the ones named, as the caller's; what became of each, in order.
+
+        Not found for a project the project map does not hold, a conflict while its exit reputation is off, and
+        unavailable when Redis did not answer within the request deadline.
+        """
+        project = self._projects.get(project_id)
+        if project is None:
+            raise NotFoundError("Project not found")
+        if not project.exit_reputation.records:
+            raise ConflictError("Exit reputation is off for this project")
+        try:
+            return await self._take(project, reports, reporter_id=caller.id, token_id=caller.token_id)
+        except ExitReportsUnavailableError:
+            raise UnavailableError(UNAVAILABLE) from None
+
+    async def _take(
         self,
         project: Project,
         reports: Sequence[ExitReportIn],
@@ -204,11 +230,8 @@ class ExitReportIntake:
         reporter_id: str | None,
         token_id: str | None,
     ) -> ExitReportsResponse:
-        """Name each report on its own and append the ones named; what became of each, in order.
-
-        Raises:
-            ExitReportsUnavailableError: Redis did not answer within the request deadline.
-        """
+        """Name each report on its own and append the ones named; what became of each, in order. Raises
+        ExitReportsUnavailableError when Redis did not answer within the request deadline."""
         pending = [_Report(index, report) for index, report in enumerate(reports)]
         for report in pending:
             report.name(project)

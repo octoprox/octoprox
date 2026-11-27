@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from api.feed.sections import resolve_credentials, routing_credential
+from api.geo.models import META_DYNAMIC_SESSIONS
 from api.models.connector import Connector
 from api.models.credential import Credential, CredentialType
 from api.models.location import LocationTarget
@@ -21,7 +22,6 @@ from api.models.proxy import Proxy, ProxyProtocol
 from api.providers.sdk.descriptor import FieldSpec, ProviderDescriptor, split_scoped_key
 from api.providers.sdk.loader import descriptor_from_dict, load_builtin_descriptors
 from api.providers.sdk.provider import DescriptorProvider
-from api.providers.sdk.strategies import META_DYNAMIC_SESSIONS
 
 # The condition of the "-pinned" part of the vendor's password: the account has a PIN.
 PIN_SET: dict[str, Any] = {"field": "credential.pin"}

@@ -31,6 +31,7 @@ from api.db.streams import ChangeKind
 from api.feed.sections import resolve_credentials
 from api.geo.attributor import ProxyAttributor
 from api.geo.models import (
+    META_DISCOVERED_IP,
     META_ENDPOINT_CITY,
     META_ENDPOINT_COUNTRY,
     META_ENDPOINT_STATE,
@@ -41,7 +42,6 @@ from api.jobs.job import Job
 from api.jobs.messages import SightingMessage
 from api.models.location import LocationTarget
 from api.models.proxy import metadata_diff
-from api.providers.sdk.strategies import META_DISCOVERED_IP
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession

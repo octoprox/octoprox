@@ -30,9 +30,9 @@ from api.core.workers import WorkerName
 from api.db.redis import EXIT_REPORT_STREAM_KEY
 from api.db.repository import ConnectorRepository, ProxyRepository
 from api.db.reputation_repository import ExitReputationRepository, Recording
+from api.geo.models import META_DISCOVERED_IP
 from api.jobs.messages import ExitReportMessage
 from api.models.exit_reports import DropReason
-from api.providers.sdk.strategies import META_DISCOVERED_IP
 from api.reputation.record import ConnectorSiteKey, ExitIpKey, ReportCounts
 from api.reputation.signal import ReputationSignal
 from api.reputation.site import canonical_ip

@@ -673,7 +673,7 @@ class TestSetPasswordWithoutOne:
     def test_first_password_needs_no_current_then_the_next_does(
         self, authenticated_client: TestClient, test_settings: Settings
     ) -> None:
-        from api.routes.auth import create_jwt
+        from api.core.session_tokens import create_jwt
 
         user = authenticated_client.post(
             "/api/v1/users/invite", json={"username": "sso-only", "email": "sso-only@example.com", "role": "viewer"}
@@ -825,7 +825,7 @@ class TestHistory:
         assert accepting["changes"] == {"password": [None, "********"], "invite_token": ["********", None]}
 
     def test_a_users_own_edit_names_them(self, authenticated_client: TestClient, test_settings: Settings) -> None:
-        from api.routes.auth import create_jwt
+        from api.core.session_tokens import create_jwt
 
         client = authenticated_client
         name = f"self-{uuid4().hex[:8]}"
@@ -1044,3 +1044,181 @@ class TestServiceAccounts:
         assert gone == {
             "username": [name, None], "role": ["viewer", None], "kind": ["service", None], "is_active": [True, None],
         }
+
+
+def _session_for(client: TestClient, settings: Settings, user: dict[str, Any]) -> dict[str, str]:
+    """A session JWT naming ``user``, as a sign-in would issue it."""
+    from api.core.session_tokens import create_jwt
+
+    token = create_jwt(
+        payload={"sub": user["username"], "user_id": user["id"], "role": user["role"]},
+        secret=settings.jwt_secret,
+        expiry_hours=settings.jwt_expiry_hours,
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+class TestRefusals:
+    """Each refusal's exact text, and which one answers when two apply."""
+
+    def test_a_token_caller_is_refused_before_a_missing_user_is_looked_up(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        admin = client.post("/api/v1/users/invite", json={"username": f"order-{uuid4().hex[:8]}", "role": "admin"}).json()["user"]
+        secret = client.post(f"/api/v1/users/{admin['id']}/tokens", json={"name": "t"}).json()["token"]
+        headers = {"Authorization": f"Bearer {secret}"}
+
+        refused = [
+            client.post("/api/v1/users/no-such-user/tokens", json={"name": "t"}, headers=headers),
+            client.post("/api/v1/users/no-such-user/reinvite", headers=headers),
+            client.patch("/api/v1/users/no-such-user", json={"password": "sneaky-pass"}, headers=headers),
+            client.post("/api/v1/users/me/tokens", json={"name": "t"}, headers=headers),
+            client.patch("/api/v1/users/me", json={"password": "sneaky-pass"}, headers=headers),
+        ]
+        not_found = client.patch("/api/v1/users/no-such-user", json={"role": "viewer"}, headers=headers)
+
+        assert [(r.status_code, r.json()) for r in refused] == [
+            (403, {"detail": "Sign in to the UI or with a password to create tokens"}),
+            (403, {"detail": "Sign in to the UI or with a password to send a set-password link"}),
+            (403, {"detail": "Sign in to the UI or with a password to set a password"}),
+            (403, {"detail": "Sign in to the UI or with a password to create tokens"}),
+            (403, {"detail": "Sign in to the UI or with a password to set a password"}),
+        ]
+        assert (not_found.status_code, not_found.json()) == (404, {"detail": "User not found"})
+        client.delete(f"/api/v1/users/{admin['id']}")
+
+    def test_a_service_accounts_own_password_is_refused_as_a_service_account_not_as_a_token(
+        self, authenticated_client: TestClient
+    ) -> None:
+        client = authenticated_client
+        account = _service_account(client)
+        secret = client.post(f"/api/v1/users/{account['id']}/tokens", json={"name": "t"}).json()["token"]
+
+        response = client.patch(
+            "/api/v1/users/me", json={"password": "sneaky-pass"}, headers={"Authorization": f"Bearer {secret}"}
+        )
+
+        assert (response.status_code, response.json()) == (
+            400, {"detail": "A service account has no password: it uses API tokens"}
+        )
+        client.delete(f"/api/v1/users/{account['id']}")
+
+    def test_what_is_not_found_says_what(self, authenticated_client: TestClient, test_settings: Settings) -> None:
+        client = authenticated_client
+        user = client.post("/api/v1/users", json={"username": f"nf-{uuid4().hex[:8]}", "password": "pass12345"}).json()
+        ghost = _session_for(client, test_settings, {"id": "no-such-user", "username": "ghost", "role": "admin"})
+
+        answers = [
+            client.get("/api/v1/users/no-such-user"),
+            client.get("/api/v1/users/no-such-user/tokens"),
+            client.get("/api/v1/users/no-such-user/identities"),
+            client.post("/api/v1/users/no-such-user/tokens", json={"name": "t"}),
+            client.post("/api/v1/users/no-such-user/reinvite"),
+            client.patch("/api/v1/users/no-such-user", json={"password": "a-new-pass"}),
+            client.delete("/api/v1/users/no-such-user"),
+            client.get("/api/v1/users/me", headers=ghost),
+            client.patch("/api/v1/users/me", json={"theme_preference": "dark"}, headers=ghost),
+            client.post("/api/v1/users/me/tokens", json={"name": "t"}, headers=ghost),
+        ]
+        tokens = [
+            client.delete(f"/api/v1/users/{user['id']}/tokens/nope"),
+            client.delete("/api/v1/users/me/tokens/nope"),
+        ]
+        identities = [
+            client.delete(f"/api/v1/users/{user['id']}/identities/nope"),
+            client.delete("/api/v1/users/me/identities/nope"),
+        ]
+
+        assert {(r.status_code, r.text) for r in answers} == {(404, '{"detail":"User not found"}')}
+        assert {(r.status_code, r.text) for r in tokens} == {(404, '{"detail":"Token not found"}')}
+        assert {(r.status_code, r.text) for r in identities} == {(404, '{"detail":"Linked sign-in not found"}')}
+        client.delete(f"/api/v1/users/{user['id']}")
+
+    def test_deleting_yourself_is_refused_before_anything_is_read(self, authenticated_client: TestClient) -> None:
+        response = authenticated_client.delete("/api/v1/users/test-admin-id")
+        assert (response.status_code, response.json()) == (400, {"detail": "Cannot delete your own account"})
+
+
+class TestAnswers:
+    """What a read or a write answers, field by field."""
+
+    def test_a_session_naming_no_user_lists_no_tokens_and_no_sign_ins(
+        self, authenticated_client: TestClient, test_settings: Settings
+    ) -> None:
+        ghost = _session_for(authenticated_client, test_settings, {"id": "no-such-user", "username": "ghost", "role": "viewer"})
+
+        tokens = authenticated_client.get("/api/v1/users/me/tokens", headers=ghost)
+        identities = authenticated_client.get("/api/v1/users/me/identities", headers=ghost)
+
+        assert (tokens.status_code, tokens.json()) == (200, {"tokens": []})
+        assert (identities.status_code, identities.json()) == (200, {"identities": []})
+
+    def test_a_new_user_has_no_sign_ins_and_no_tokens(self, authenticated_client: TestClient) -> None:
+        name = f"fresh-{uuid4().hex[:8]}"
+
+        created = authenticated_client.post(
+            "/api/v1/users", json={"username": name, "email": f"{name}@example.com", "password": "pass12345", "role": "editor"}
+        ).json()
+
+        assert {key: value for key, value in created.items() if key not in {"id", "created_at", "updated_at"}} == {
+            "username": name,
+            "email": f"{name}@example.com",
+            "role": "editor",
+            "kind": "person",
+            "is_active": True,
+            "has_password": True,
+            "sign_in_providers": [],
+            "token_count": 0,
+            "token_last_used_at": None,
+            "theme_preference": "light",
+            "last_login_at": None,
+        }
+        assert authenticated_client.get(f"/api/v1/users/{created['id']}").json() == created
+        authenticated_client.delete(f"/api/v1/users/{created['id']}")
+
+    def test_the_list_is_oldest_first(self, authenticated_client: TestClient) -> None:
+        made = [
+            authenticated_client.post(
+                "/api/v1/users", json={"username": f"order-{n}-{uuid4().hex[:8]}", "password": "pass12345"}
+            ).json()["id"]
+            for n in range(3)
+        ]
+
+        listed = authenticated_client.get("/api/v1/users").json()
+        stamps = [user["created_at"] for user in listed["users"]]
+
+        assert listed["total"] == len(listed["users"])
+        assert stamps == sorted(stamps)
+        assert [user["id"] for user in listed["users"] if user["id"] in made] == made
+        for user_id in made:
+            authenticated_client.delete(f"/api/v1/users/{user_id}")
+
+    def test_an_edit_answers_the_profile_as_it_was_read_before_the_write_stamped_it(
+        self, authenticated_client: TestClient, test_settings: Settings
+    ) -> None:
+        client = authenticated_client
+        user = client.post("/api/v1/users", json={"username": f"stamp-{uuid4().hex[:8]}", "password": "pass12345"}).json()
+        read = client.get(f"/api/v1/users/{user['id']}").json()["updated_at"]
+
+        by_admin = client.patch(f"/api/v1/users/{user['id']}", json={"theme_preference": "dark"}).json()
+        stamped = client.get(f"/api/v1/users/{user['id']}").json()["updated_at"]
+        by_self = client.patch(
+            "/api/v1/users/me", json={"theme_preference": "nord"}, headers=_session_for(client, test_settings, user)
+        ).json()
+
+        assert (by_admin["theme_preference"], by_admin["updated_at"]) == ("dark", read)
+        assert stamped > read
+        assert (by_self["theme_preference"], by_self["updated_at"]) == ("nord", stamped)
+        assert client.get(f"/api/v1/users/{user['id']}").json()["updated_at"] > stamped
+        client.delete(f"/api/v1/users/{user['id']}")
+
+    def test_a_reissued_link_answers_the_profile_as_it_was_read(self, authenticated_client: TestClient) -> None:
+        client = authenticated_client
+        invited = client.post("/api/v1/users/invite", json={"username": f"relink-{uuid4().hex[:8]}"}).json()
+        user = invited["user"]
+
+        again = client.post(f"/api/v1/users/{user['id']}/reinvite").json()
+
+        assert again["user"] == client.get(f"/api/v1/users/{user['id']}").json() | {"updated_at": user["updated_at"]}
+        assert again["invite_url"] != invited["invite_url"]
+        assert again["invite_url"].startswith("http://testserver/set-password/")
+        client.delete(f"/api/v1/users/{user['id']}")

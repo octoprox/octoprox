@@ -19,8 +19,7 @@ import structlog
 
 from api.core import utc_now
 from api.db.reputation_repository import ExitReputationRepository
-from api.feed.models import ConnectorSection, ProjectReputation, ReputationSection, static_exit_ip
-from api.providers.sdk.strategies import is_dynamic_gateway
+from api.feed.models import ConnectorSection, ProjectReputation, ReputationSection
 from api.reputation.record import place_levels
 
 if TYPE_CHECKING:
@@ -62,9 +61,9 @@ class ReputationScope(NamedTuple):
             if project_id not in avoiding:
                 continue
             for proxy in section.proxies:
-                if is_dynamic_gateway(proxy):
+                if proxy.is_dynamic_gateway:
                     connectors[project_id].add(section.connector.id)
-                elif (ip := static_exit_ip(proxy)) is not None:
+                elif (ip := proxy.static_exit_ip) is not None:
                     ips[project_id].add(ip)
         return {
             project_id: cls(frozenset(ips[project_id]), frozenset(connectors[project_id]), avoiding[project_id])

@@ -15,11 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.core import utc_now
 from api.core.api_tokens import hash_token, looks_like_token
 from api.core.config import settings
+from api.core.session_tokens import verify_jwt
 from api.db.auth_repository import ApiTokenRepository
 from api.db.session import get_db
 from api.models.user import UserRole
-from api.routes.auth import verify_jwt
 from api.routes.common import audit_log_of
+from api.services.errors import ForbiddenError
 
 # A token's last use is stamped at most this often, so a busy script does
 # not turn every call into a write.
@@ -44,6 +45,18 @@ class CurrentUser:
     # The personal access token the caller authenticated with; None for a session JWT.
     token_id: str | None = None
     token_name: str | None = None
+
+    def require_session(self, action: str) -> None:
+        """Refuse an API-token caller a change to how a human gets in.
+
+        A personal access token proves only possession of the token. It may do
+        what the user's role allows, but not set a password, mint a token or
+        issue a set-password link: a token leaked from a CI log must not be
+        able to create a way in that outlives its own revocation. A session
+        JWT (UI, or a script that logged in with a password) proves the person.
+        """
+        if self.auth_method == "token":
+            raise ForbiddenError(f"Sign in to the UI or with a password to {action}")
 
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]

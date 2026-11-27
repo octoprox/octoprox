@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from api.attention.mutes import MuteBook
-from api.core import utc_now
+from api.core import as_naive_utc, utc_now
 from api.db.alert_repository import AlertFilters, AlertRepository
 from api.db.repository import ProjectRepository
 from api.models.alerts import AlertEntry, AlertPage
@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from api.db.session import SessionFactory
+
+# A page when the caller does not say, and the most one may ask for.
+DEFAULT_ALERT_LIMIT = 50
+MAX_ALERT_LIMIT = 200
 
 
 class AlertHistory:
@@ -36,13 +40,13 @@ class AlertHistory:
         before: str | None = None,
         until: datetime | None = None,
     ) -> AlertPage:
-        """A page of alerts newest first, opened at or before ``until`` (now when None), each open project alert with
-        its mute; three statements for a project, two for the install.
+        """A page of alerts newest first, opened at or before ``until`` (now when None; a time with its zone reads as
+        UTC), each open project alert with its mute; three statements for a project, two for the install.
 
         Raises NotFoundError when there is no such project.
         """
         now = utc_now()
-        latest = until or now
+        latest = as_naive_utc(until) or now
         async with self._session_factory() as session:
             rows = await AlertRepository(session).page(project_id, filters, until=latest, limit=limit, before=before)
             book = await self._book(session, project_id, now)

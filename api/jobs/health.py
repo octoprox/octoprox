@@ -24,18 +24,17 @@ from api.core.roles import JobKind
 from api.db.redis import PROXY_HEALTH_KEY, PROXY_HEALTH_TTL_SECONDS
 from api.db.repository import ProxyRepository
 from api.feed.sections import resolve_credentials
-from api.feed.state import HealthSoft, RuntimeStateReader
+from api.feed.state import RuntimeStateReader
 from api.geo.extraction import DEFAULT_HEALTHCHECK_URL
 from api.geo.models import ObservationSource
 from api.jobs.attribution import Sighting
 from api.jobs.job import Job
-from api.models.proxy import Proxy, ProxyStatus
+from api.models.proxy import HealthSoft, Proxy, ProxyStatus
 from api.providers.sdk.sources import (
     default_proxied_client_factory,
     extract_ip_and_place,
     shared_ssl_context,
 )
-from api.providers.sdk.strategies import is_dynamic_gateway
 from api.services.proxies import StatusMove
 
 if TYPE_CHECKING:
@@ -230,7 +229,7 @@ class HealthCheckJob(Job):
         Such a gateway mints a vendor session per request, so no single exit speaks for it and a check would only cost
         vendor traffic.
         """
-        return connector.enabled and not proxy.status.retiring and not is_dynamic_gateway(proxy)
+        return connector.enabled and not proxy.status.retiring and not proxy.is_dynamic_gateway
 
     @staticmethod
     def soft_health_ttl(connector: Connector) -> int:

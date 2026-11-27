@@ -7,40 +7,26 @@ Admin-only because they expose deployment shape (instance ids, the lease holder,
 has a use for.
 """
 
-from datetime import timedelta
-from typing import Annotated, Literal
+from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Query, Request
 
-from api.core import utc_now
 from api.core.auth import RequireAdminDep
-from api.core.system_stats import ClusterReader, SystemReader
-from api.db.repository import SystemMetricsRepository
-from api.db.session import get_db
-from api.models.system import (
-    SystemMetricsHistory,
-    SystemMetricsPoint,
-    SystemStats,
-    SystemTopology,
-    TableGrowth,
-)
-from api.routes.common import provider_registry_of, redis_client_of, settings_of
+from api.models.system import SystemMetricsHistory, SystemStats, SystemTopology
+from api.routes.common import system_service_of
 
 router = APIRouter(prefix="/system")
 
-DbDep = Annotated[AsyncSession, Depends(get_db)]
-
 
 @router.get("/stats", response_model=SystemStats)
-async def get_system_stats(request: Request, session: DbDep, _admin: RequireAdminDep) -> SystemStats:
+async def get_system_stats(request: Request, _admin: RequireAdminDep) -> SystemStats:
     """Return every live process by role, the controller and feed, the work streams, and the stores.
 
     The processes' sections come from their heartbeats in Redis, so this one
     endpoint covers the whole cluster without a route to any process; the
     rest is read from Postgres and Redis directly.
     """
-    return await SystemReader(session, redis_client_of(request), provider_registry_of(request)).read()
+    return await system_service_of(request).stats()
 
 
 @router.get("/topology", response_model=SystemTopology)
@@ -50,24 +36,12 @@ async def get_system_topology(request: Request, _admin: RequireAdminDep) -> Syst
     Read from Redis only, without the keyspace scan and the table sizes, so the
     topology view can poll it on the heartbeats' cadence.
     """
-    return await ClusterReader(redis_client_of(request)).topology()
-
-
-# (window, bucket width). A null bucket returns raw snapshots; anything longer
-# is averaged, because these are gauges - see SystemMetricsRepository.
-HISTORY_RANGES: dict[str, tuple[timedelta, int | None]] = {
-    "1h": (timedelta(hours=1), None),
-    "24h": (timedelta(hours=24), None),
-    "7d": (timedelta(days=7), 3600),
-    "30d": (timedelta(days=30), 21600),
-    "90d": (timedelta(days=90), 86400),
-}
+    return await system_service_of(request).topology()
 
 
 @router.get("/stats/history", response_model=SystemMetricsHistory)
 async def get_system_stats_history(
     request: Request,
-    session: DbDep,
     _admin: RequireAdminDep,
     range: Literal["1h", "24h", "7d", "30d", "90d"] = Query("24h", alias="range"),
 ) -> SystemMetricsHistory:
@@ -76,31 +50,4 @@ async def get_system_stats_history(
     ``interval_seconds`` is this process's ``system_metrics_interval``, which
     the controller's snapshot producer should match.
     """
-    window, bucket_seconds = HISTORY_RANGES[range]
-    since = utc_now() - window
-
-    repo = SystemMetricsRepository(session)
-    if bucket_seconds:
-        rows = await repo.get_history_aggregated(since, bucket_seconds)
-    else:
-        rows = await repo.get_history(since)
-
-    first_sizes, last_sizes = await repo.get_table_sizes_at_edges(since)
-    growth = [
-        TableGrowth(
-            name=name,
-            first_bytes=int(first_sizes.get(name, 0)),
-            last_bytes=int(last_bytes),
-            delta_bytes=int(last_bytes) - int(first_sizes.get(name, 0)),
-        )
-        for name, last_bytes in last_sizes.items()
-    ]
-    growth.sort(key=lambda t: t.delta_bytes, reverse=True)
-
-    return SystemMetricsHistory(
-        range=range,
-        bucket_seconds=bucket_seconds,
-        interval_seconds=settings_of(request).system_metrics_interval,
-        snapshots=[SystemMetricsPoint(**row) for row in rows],
-        table_growth=growth,
-    )
+    return await system_service_of(request).history(range)

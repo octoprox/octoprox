@@ -7,12 +7,15 @@ Usage counts the history a metrics flush writes plus the Redis window gateways w
 traffic job stores, so a test writes the first two and runs the job as a worker would, then reads the api back.
 """
 
+from datetime import timedelta
 from typing import Any
 
 from starlette.testclient import TestClient
 
+from api.core import utc_now
 from api.core.roles import JobKind
 from api.core.stats import MetricDelta
+from api.db.models import ConnectorMetricsModel
 from api.db.redis import CONNECTOR_METRICS_KEY, RedisClient
 from api.db.repository import MetricsRepository
 from api.db.session import SessionFactory
@@ -123,6 +126,22 @@ class TestTrafficConfigEndpoints:
         snapshots = authenticated_client.get(url, params={"range": "1h"}).json()["snapshots"]
 
         assert [(s["bytes_sent"], s["bytes_received"]) for s in snapshots] == [(60, 40)]
+
+    def test_several_windows_come_oldest_first(
+        self, authenticated_client: TestClient, created_project: dict[str, Any], created_connector: dict[str, Any],
+    ) -> None:
+        """Raw one-minute rows up to a day, hourly buckets past it; either way the oldest first."""
+        connector_id = created_connector["id"]
+        on_app_loop(authenticated_client, _save_aged_history, api_runtime(authenticated_client).session_factory, connector_id)
+        url = f"/api/v1/projects/{created_project['id']}/connectors/{connector_id}/metrics/history"
+
+        raw = authenticated_client.get(url, params={"range": "6h"}).json()["snapshots"]
+        bucketed = authenticated_client.get(url, params={"range": "7d"}).json()["snapshots"]
+
+        assert [(s["request_count"], s["failure_count"], s["bytes_received"]) for s in raw] == [(2, 0, 20), (10, 2, 100)]
+        assert [s["request_count"] for s in bucketed] == [100, 4, 2, 10]
+        for snapshots in (raw, bucketed):
+            assert [s["timestamp"] for s in snapshots] == sorted(s["timestamp"] for s in snapshots)
 
 
 class TestBlockedConnector:
@@ -266,6 +285,24 @@ async def _save_history(session_factory: SessionFactory, connector_id: str, sent
     delta = MetricDelta(request_count=1, success_count=1, bytes_sent=sent, bytes_received=received)
     async with session_factory() as session:
         await MetricsRepository(session).save_connector_metrics_snapshots({connector_id: delta})
+        await session.commit()
+
+
+async def _save_aged_history(session_factory: SessionFactory, connector_id: str) -> None:
+    """Connector history rows 10 and 90 minutes old, an hourly one 23.5 hours old and one 25 hours old."""
+    now = utc_now()
+    async with session_factory() as session:
+        for age, granularity, requests, failures in (
+            (timedelta(minutes=10), 60, 10, 2),
+            (timedelta(minutes=90), 60, 2, 0),
+            (timedelta(hours=23, minutes=30), 3600, 4, 1),
+            (timedelta(hours=25), 3600, 100, 0),
+        ):
+            session.add(ConnectorMetricsModel(
+                connector_id=connector_id, timestamp=now - age, request_count=requests,
+                success_count=requests - failures, failure_count=failures, avg_latency_ms=10.0,
+                bytes_sent=requests, bytes_received=requests * 10, granularity=granularity,
+            ))
         await session.commit()
 
 

@@ -31,7 +31,6 @@ from api.db.redis import SSO_STATE_TTL_SECONDS
 from api.db.repository import UserRepository
 from api.db.session import get_db
 from api.models.auth import (
-    MICROSOFT_MULTI_TENANT_ALIASES,
     PROVIDER_LABELS,
     AuthIdentity,
     AuthProviderConfig,
@@ -50,6 +49,7 @@ from api.routes.common import (
     audit_log_of,
     external_base_url,
     sso_flow_of,
+    sso_provider_service_of,
 )
 from api.sso import Identity, SsoError
 
@@ -300,60 +300,19 @@ async def exchange_login_code(request: Request, data: SsoExchangeRequest) -> Log
 # --- admin: the OAuth clients -------------------------------------------------------
 
 
-def _to_response(request: Request, config: AuthProviderConfig) -> AuthProviderResponse:
-    return AuthProviderResponse(
-        kind=config.kind,
-        label=PROVIDER_LABELS[config.kind],
-        enabled=config.enabled,
-        client_id=config.client_id,
-        has_client_secret=bool(config.client_secret),
-        tenant_id=config.tenant_id,
-        redirect_uri=redirect_uri_for(request, config.kind),
-        configured=config.configured,
-        updated_by=config.updated_by,
-        updated_at=config.updated_at,
-    )
-
-
 @admin_router.get("", response_model=AuthProviderListResponse)
-async def list_providers(request: Request, session: DbDep, _admin: RequireAdminDep) -> AuthProviderListResponse:
+async def list_providers(request: Request, _admin: RequireAdminDep) -> AuthProviderListResponse:
     """Every provider Octoprox knows, set up or not, with the redirect URI to register."""
-    stored = await AuthProviderRepository(session).get_all()
+    configs = await sso_provider_service_of(request).every()
     return AuthProviderListResponse(
-        providers=[_to_response(request, stored.get(kind) or AuthProviderConfig(kind=kind)) for kind in AuthProviderKind]
+        providers=[AuthProviderResponse.of(config, redirect_uri_for(request, config.kind)) for config in configs]
     )
 
 
 @admin_router.put("/{kind}", response_model=AuthProviderResponse)
 async def save_provider(
-    request: Request, kind: AuthProviderKind, doc: AuthProviderDoc, session: DbDep, admin: RequireAdminDep
+    request: Request, kind: AuthProviderKind, doc: AuthProviderDoc, admin: RequireAdminDep
 ) -> AuthProviderResponse:
     """Replace a provider's client. A null secret keeps the stored one."""
-    repo = AuthProviderRepository(session)
-    stored = await repo.get(kind)
-    current = stored or AuthProviderConfig(kind=kind)
-    secret = current.client_secret if doc.client_secret is None else doc.client_secret
-    updated = AuthProviderConfig(
-        kind=kind,
-        enabled=doc.enabled,
-        client_id=doc.client_id,
-        client_secret=secret,
-        tenant_id=doc.tenant_id if kind == AuthProviderKind.MICROSOFT else "",
-        updated_by=admin.username,
-    )
-    if kind == AuthProviderKind.MICROSOFT and updated.tenant_id.lower() in MICROSOFT_MULTI_TENANT_ALIASES:
-        raise HTTPException(
-            status_code=400,
-            detail="Name the tenant whose accounts may sign in; 'common', 'organizations' and 'consumers' would admit any Microsoft account",
-        )
-    if updated.enabled and not updated.configured:
-        missing = "a tenant ID" if updated.needs_tenant and not updated.tenant_id else "a client ID and secret"
-        raise HTTPException(status_code=400, detail=f"{PROVIDER_LABELS[kind]} sign-in needs {missing} before it can be enabled")
-    saved = await repo.save(updated)
-    actor = actor_of(request, admin)
-    if stored is None:
-        await actor.created(session, saved)
-    else:
-        await actor.updated(session, stored, saved)
-    logger.info("Sign-in provider saved", provider=kind.value, enabled=saved.enabled, by=admin.username)
-    return _to_response(request, saved)
+    saved = await sso_provider_service_of(request).save(kind, doc, actor_of(request, admin))
+    return AuthProviderResponse.of(saved, redirect_uri_for(request, kind))

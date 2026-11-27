@@ -281,6 +281,10 @@ class GeoDatabaseStore:
         entry = self._entries.get(database_id)
         return entry is not None and entry.record.source == GeoDatabaseSource.PATH
 
+    def config_only(self, known: set[str]) -> list[LoadedDatabase]:
+        """Config-file databases open in this process that have no row: they exist only in the config."""
+        return [loaded for loaded in self.loaded if loaded.source == GeoDatabaseSource.PATH and loaded.id not in known]
+
     def missing(self) -> list[str]:
         """Enabled stored databases this process has not opened and can still hope to, sorted: a gateway is ready once none is left.
 

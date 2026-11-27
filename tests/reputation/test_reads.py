@@ -16,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.stats import RequestCount
 from api.db import reputation_repository
-from api.db.reputation_repository import ExitReputationRepository, ReputationSort, ReputationSummary
+from api.db.reputation_repository import ExitReputationRepository, ReputationSort
+from api.models.exit_reputation import ReputationSummary
 from api.models.project import ExitReputationMode, Project
 from api.reputation.record import (
     ConnectorSiteKey,

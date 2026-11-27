@@ -118,6 +118,16 @@ class TestHistory:
         }
         assert len(statuses) == 15
 
+    def test_the_installs_history_refuses_others_with_its_detail_after_checking_the_query(
+        self, authenticated_client: TestClient, editor_auth_headers: dict[str, str]
+    ) -> None:
+        refused = authenticated_client.get("/api/v1/audit/user/1", headers=editor_auth_headers)
+
+        assert (refused.status_code, refused.json()) == (403, {"detail": "Insufficient permissions"})
+        assert authenticated_client.get(
+            "/api/v1/audit/user/1", params={"limit": 0}, headers=editor_auth_headers
+        ).status_code == 422
+
     def test_refuses_an_unknown_type_a_page_size_out_of_bounds_and_a_caller_unknown(
         self, authenticated_client: TestClient
     ) -> None:

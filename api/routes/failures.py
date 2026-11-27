@@ -5,139 +5,28 @@
 Redis, and a summary from the ``failure_metrics`` history the workers' metrics flush job writes.
 """
 
-import asyncio
-import builtins
-from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Path, Query, Request
 
-from api.core import utc_now
 from api.core.auth import RequireEditorDep
 from api.core.stats import FailureKind
-from api.db.redis import FailureCursor, FailureLogRow
-from api.db.repository import ConnectorRepository, MetricsRepository
-from api.routes.common import redis_client_of, require_project, session_factory_of, settings_of
-from api.routes.metrics import HOST_HISTORY_BUCKETS, RANGE_CONFIG
+from api.models.failures import (
+    FailureLogHead,
+    FailureLogResponse,
+    FailureRecord,
+    FailureSummaryResponse,
+)
+from api.models.metrics import MetricsRange
+from api.routes.common import failure_log_service_of
+from api.services.failures import (
+    CURSOR_PATTERN,
+    DEFAULT_FAILURE_PAGE,
+    FAILURE_ID_PATTERN,
+    MAX_FAILURE_PAGE,
+)
 
 router = APIRouter(prefix="/projects/{project_id}/failures")
-
-# Every kind a failure is logged under, the streams a page reads across.
-ALL_KINDS = [kind.value for kind in FailureKind]
-
-
-class FailureRecord(BaseModel):
-    """One example: a failure, and every identical one since, whichever gateway saw it."""
-
-    id: str = Field(description="Kind and fingerprint, e.g. upstream_timeout:3f9a0c1b2d4e5f60; the same while it recurs")
-    kind: str = Field(description="What went wrong, e.g. upstream_timeout, no_proxy_available")
-    status: int = Field(description="The status the client was answered (a tunnel device's connection is closed instead)")
-    message: str
-    error_type: str | None = None
-    method: str | None = None
-    target: str | None = Field(None, description="host:port, or the URL without its query for an intercepted request")
-    session_id: str | None = None
-    location: str | None = None
-    peer_id: str | None = None
-    peer_name: str | None = None
-    proxy_id: str | None = None
-    connector_id: str | None = None
-    connector_name: str | None = None
-    proxy: str | None = Field(None, description="host:port of the upstream proxy")
-    upstream_status: int | None = Field(None, description="The vendor's HTTP status when it refused the request")
-    upstream_message: str | None = Field(
-        None, description="What the vendor said about its refusal besides the status: its error headers and body text"
-    )
-    latency_ms: float | None = Field(None, description="Average time until the failure")
-    step: str | None = Field(
-        None, description="The step of the request's latency it failed in: route, preflight, connect, handshake or response"
-    )
-    steps: dict[str, float] | None = Field(
-        None, description="Milliseconds each step took for the first failure of the example, by step"
-    )
-    count: int = Field(description="How many failures this example stands for")
-    first_at: str
-    last_at: str
-
-
-class FailureLogResponse(BaseModel):
-    """A page of a project's examples, the ones seen last first."""
-
-    records: list[FailureRecord]
-    next_cursor: str | None = None
-    total: int = Field(description="Examples the log holds (of the kind asked for, or of all kinds)")
-    newest: int = Field(description="Where the log stood when read; pass it to /head to learn how many examples changed")
-    enabled: bool
-    max_entries: int = Field(description="Examples kept per kind")
-    retention_hours: int
-
-
-class FailureLogHead(BaseModel):
-    """Where the log stands now, so a page can say how many examples are new or seen again since it was read."""
-
-    changed: int
-    total: int
-
-
-class UpstreamStatusCount(BaseModel):
-    status: int
-    count: int
-
-
-class FailureKindCount(BaseModel):
-    kind: str
-    count: int
-    upstream_statuses: list[UpstreamStatusCount] = Field(description="The vendor's statuses within this kind, most first")
-
-
-class ConnectorFailureCount(BaseModel):
-    connector_id: str | None = Field(description="None for requests refused before a proxy was chosen")
-    name: str | None
-    count: int
-
-
-class FailureSeriesPoint(BaseModel):
-    timestamp: datetime
-    count: int
-
-
-class FailureSeries(BaseModel):
-    kind: str
-    points: list[FailureSeriesPoint]
-
-
-class FailureSummaryResponse(BaseModel):
-    """Every failure of the window, counted: by kind, vendor status and connector, and over time by kind."""
-
-    range: str
-    since: datetime
-    bucket_seconds: int
-    total: int
-    kinds: list[FailureKindCount] = Field(description="Most first")
-    connectors: list[ConnectorFailureCount] = Field(description="Most first")
-    series: list[FailureSeries] = Field(description="One per kind seen, most first, each with every bucket of the window")
-    enabled: bool
-
-
-def _iso(epoch_ms: int) -> str:
-    return datetime.fromtimestamp(epoch_ms / 1000, UTC).replace(tzinfo=None).isoformat(timespec="microseconds")
-
-
-def _record(row: FailureLogRow) -> FailureRecord:
-    return FailureRecord(
-        **row.fields,
-        id=f"{row.cursor.kind}:{row.cursor.fingerprint}",
-        kind=row.cursor.kind,
-        latency_ms=row.latency_ms,
-        count=row.count,
-        first_at=_iso(row.first_ms),
-        last_at=_iso(row.last_ms),
-    )
-
-
-def _cursor(row: FailureLogRow) -> str:
-    return f"{row.cursor.rank}:{row.cursor.kind}:{row.cursor.fingerprint}"
 
 
 @router.get("", response_model=FailureLogResponse)
@@ -145,39 +34,15 @@ async def list_failures(
     request: Request,
     project_id: str,
     kind: Annotated[FailureKind | None, Query(description="Only examples of this kind")] = None,
-    count: int = Query(200, ge=1, le=1000),
+    count: int = Query(DEFAULT_FAILURE_PAGE, ge=1, le=MAX_FAILURE_PAGE),
     cursor: str | None = Query(
         None,
-        pattern=r"^\d+:[a-z_]+:[0-9a-f]+$",
+        pattern=CURSOR_PATTERN,
         description="The previous page's next_cursor",
     ),
 ) -> FailureLogResponse:
     """A project's failure examples, the ones seen last first, across every kind or of one."""
-    await require_project(request, project_id)
-    redis_client = redis_client_of(request)
-    settings = settings_of(request)
-    kinds = [kind.value] if kind else ALL_KINDS
-    after: FailureCursor | None = None
-    if cursor:
-        rank, after_kind, fingerprint = cursor.split(":")
-        after = FailureCursor(int(rank), after_kind, fingerprint)
-
-    # One more than asked tells whether there is an older page.
-    rows, total = await asyncio.gather(
-        redis_client.get_failures(project_id, kinds, count=count + 1, after=after),
-        redis_client.count_failures(project_id, kinds),
-    )
-    page = rows[:count]
-    return FailureLogResponse(
-        records=[_record(row) for row in page],
-        next_cursor=_cursor(page[-1]) if len(rows) > count and page else None,
-        total=total,
-        # The first page's top: an example added to after the read ranks above it.
-        newest=rows[0].cursor.rank if rows and after is None else 0,
-        enabled=settings.failure_log_enabled,
-        max_entries=settings.failure_log_max_entries,
-        retention_hours=settings.failure_log_retention_hours,
-    )
+    return await failure_log_service_of(request).page(project_id, kind, count=count, cursor=cursor)
 
 
 @router.get("/head", response_model=FailureLogHead)
@@ -188,89 +53,17 @@ async def failure_log_head(
     since: int = Query(0, ge=0, description="The newest of the page read"),
 ) -> FailureLogHead:
     """How many examples are new or seen again since the page read at ``since``: small reads, cheap enough to poll."""
-    await require_project(request, project_id)
-    redis_client = redis_client_of(request)
-    kinds = [kind.value] if kind else ALL_KINDS
-    total, changed = await asyncio.gather(
-        redis_client.count_failures(project_id, kinds),
-        redis_client.failures_changed(project_id, kinds, since),
-    )
-    return FailureLogHead(changed=changed, total=total)
+    return await failure_log_service_of(request).head(project_id, kind, since=since)
 
 
 @router.get("/summary", response_model=FailureSummaryResponse)
 async def failure_summary(
     request: Request,
     project_id: str,
-    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query("24h", alias="range"),
+    range: Annotated[MetricsRange, Query(alias="range")] = "24h",
 ) -> FailureSummaryResponse:
     """Every failure of the window, from the flushed history (so it lags by up to one flush interval)."""
-    await require_project(request, project_id)
-    delta, _limit, _bucket = RANGE_CONFIG[range]
-    bucket_seconds = HOST_HISTORY_BUCKETS[range]
-    now = utc_now()
-    since = now - delta
-    async with session_factory_of(request)() as session:
-        repo = MetricsRepository(session)
-        breakdown = await repo.get_failure_breakdown(project_id, since)
-        history = await repo.get_failure_history(project_id, since, bucket_seconds)
-        names = {c.id: c.name for c in await ConnectorRepository(session).get_by_project(project_id)}
-
-    by_kind: dict[str, int] = {}
-    statuses: dict[str, dict[int, int]] = {}
-    by_connector: dict[str | None, int] = {}
-    for row in breakdown:
-        n = row["failure_count"]
-        by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + n
-        if row["upstream_status"] is not None:
-            per_kind = statuses.setdefault(row["kind"], {})
-            per_kind[row["upstream_status"]] = per_kind.get(row["upstream_status"], 0) + n
-        by_connector[row["connector_id"]] = by_connector.get(row["connector_id"], 0) + n
-    ranked = sorted(by_kind, key=lambda k: (-by_kind[k], k))
-
-    # Every bucket of the window for every kind, zeros where it was quiet, so the series stack.
-    first = int(since.replace(tzinfo=UTC).timestamp()) // bucket_seconds * bucket_seconds
-    last = int(now.replace(tzinfo=UTC).timestamp())
-    buckets = [
-        datetime.fromtimestamp(epoch, UTC).replace(tzinfo=None)
-        for epoch in builtins.range(first, last + 1, bucket_seconds)  # ``range`` is the query parameter here
-    ]
-    points: dict[str, dict[datetime, int]] = {}
-    for row in history:
-        points.setdefault(row["kind"], {})[row["timestamp"]] = row["failure_count"]
-    # A row the controller stamped past this process's clock (a few ms of skew at
-    # a bucket boundary) gets its bucket too, rather than missing from the chart.
-    buckets = sorted({*buckets, *(row["timestamp"] for row in history)})
-
-    return FailureSummaryResponse(
-        range=range,
-        since=since,
-        bucket_seconds=bucket_seconds,
-        total=sum(by_kind.values()),
-        kinds=[
-            FailureKindCount(
-                kind=k,
-                count=by_kind[k],
-                upstream_statuses=[
-                    UpstreamStatusCount(status=s, count=n)
-                    for s, n in sorted(statuses.get(k, {}).items(), key=lambda item: (-item[1], item[0]))
-                ],
-            )
-            for k in ranked
-        ],
-        connectors=[
-            ConnectorFailureCount(connector_id=cid, name=names.get(cid) if cid else None, count=n)
-            for cid, n in sorted(by_connector.items(), key=lambda item: -item[1])
-        ],
-        series=[
-            FailureSeries(
-                kind=k,
-                points=[FailureSeriesPoint(timestamp=ts, count=points.get(k, {}).get(ts, 0)) for ts in buckets],
-            )
-            for k in ranked
-        ],
-        enabled=settings_of(request).failure_log_enabled,
-    )
+    return await failure_log_service_of(request).summary(project_id, range)
 
 
 # After /head and /summary, so neither is read as an example's id.
@@ -279,21 +72,15 @@ async def get_failure(
     request: Request,
     project_id: str,
     failure_id: Annotated[
-        str, Path(pattern=r"^[a-z_]+:[0-9a-f]+$", description="The example's id, as the list gives it")
+        str, Path(pattern=FAILURE_ID_PATTERN, description="The example's id, as the list gives it")
     ],
 ) -> FailureRecord:
     """One example by its id, for a link to it; 404 once the log no longer keeps it."""
-    await require_project(request, project_id)
-    kind, _, fingerprint = failure_id.partition(":")
-    row = await redis_client_of(request).get_failure(project_id, kind, fingerprint)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Failure example not found")
-    return _record(row)
+    return await failure_log_service_of(request).get(project_id, failure_id)
 
 
 @router.delete("")
 async def clear_failures(request: Request, project_id: str, _guard: RequireEditorDep) -> dict[str, str]:
     """Empty a project's failure log (the examples). The counts in history stay; new failures keep being logged."""
-    await require_project(request, project_id)
-    await redis_client_of(request).clear_failures(project_id, ALL_KINDS)
+    await failure_log_service_of(request).clear(project_id)
     return {"status": "ok"}

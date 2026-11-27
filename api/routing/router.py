@@ -21,7 +21,6 @@ import structlog
 
 from api.core import utc_now
 from api.core.logging import error_text
-from api.feed.models import static_exit_ip
 from api.feed.sections import resolve_credentials
 from api.geo.models import LocationRules, eligible_under
 from api.models.connect import ConnectPlace, ConnectRoute
@@ -29,7 +28,7 @@ from api.models.connector import DEFAULT_ROUTING_WEIGHT, DEFAULT_TRAFFIC_LIMIT_S
 from api.models.location import LocationTarget
 from api.models.project import Project
 from api.models.proxy import Proxy, ProxyStatus
-from api.providers.sdk.strategies import META_SESSION_ID, is_dynamic_gateway
+from api.providers.sdk.strategies import META_SESSION_ID
 from api.reputation.site import site_of
 from api.reputation.weight import ConnectorReputation, ReputationRule
 from api.routing.exclusions import LocalExclusions
@@ -298,7 +297,7 @@ class Router:
                 redis_client=self._redis,
                 project_id=project_id,
             )
-        if selected is None or not is_dynamic_gateway(selected):
+        if selected is None or not selected.is_dynamic_gateway:
             return selected
         return self._render(snapshot, selected, project_id, session_id, target)
 
@@ -346,7 +345,7 @@ class Router:
         if pinned_proxy_id is None:
             held = await self._sticky_avoid_hold(snapshot, project_id, session_id, reputation)
             if held is not None:
-                return AvoidedSite(reputation.site, static_exit_ip(held))
+                return AvoidedSite(reputation.site, held.static_exit_ip)
         candidates = self._eligible_proxies(
             snapshot, project_id, target_host, target, include_quarantined=False, pinned_proxy_id=pinned_proxy_id
         )
@@ -435,7 +434,7 @@ class Router:
             ConnectRoute(
                 connector_id=view.connector.id,
                 connector_name=view.connector.name,
-                dynamic=any(is_dynamic_gateway(proxy) for proxy in by_connector.get(view.connector.id, ())),
+                dynamic=any(proxy.is_dynamic_gateway for proxy in by_connector.get(view.connector.id, ())),
                 on_demand=wanted is not None,
                 proxies=len(by_connector.get(view.connector.id, ())),
                 share=max(view.weight, 1) / total,
@@ -464,7 +463,7 @@ class Router:
             for proxy in view.proxies:
                 if proxy.status != ProxyStatus.HEALTHY or self._is_excluded(snapshot, proxy.id):
                     continue
-                if is_dynamic_gateway(proxy):
+                if proxy.is_dynamic_gateway:
                     any_country = any_country or not view.declared_countries
                     continue
                 country = proxy.country
@@ -668,7 +667,7 @@ class Router:
         """Whether a row serves the state or city ``target`` names: rendered there, or known to be there."""
         if not eligible_under(rules, proxy.metadata, target):
             return False
-        return view.serves_location(target) if is_dynamic_gateway(proxy) else proxy.location_matches(target)
+        return view.serves_location(target) if proxy.is_dynamic_gateway else proxy.location_matches(target)
 
     def _is_quarantined(self, snapshot: RoutingSnapshot, proxy_id: str) -> bool:
         """Whether a rate-limit quarantine holds the proxy now: this gateway's own trip, or the feed's."""

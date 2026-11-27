@@ -27,11 +27,11 @@ from api.core.roles import JobKind
 from api.core.workers import LeaseName
 from api.db.redis import LEASE_KEY, RedisClient
 from api.feed.models import ConnectorSection
+from api.geo.models import META_DYNAMIC_SESSIONS
 from api.jobs.queue import JobQueue
 from api.models.connector import Connector
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import ProviderRegistry
-from api.providers.sdk.strategies import META_DYNAMIC_SESSIONS
 from tests.conftest import Clock, queued_job_keys
 from tests.waits import running, until
 

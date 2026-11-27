@@ -10,8 +10,9 @@ from datetime import date, datetime
 import pytest
 from pydantic import ValidationError
 
-from api.core.releases import RELEASES_FILE, LatestRelease, ReleaseNote, ReleaseNotes, version_key
+from api.core.releases import RELEASES_FILE, LatestRelease, ReleaseNotes
 from api.db.redis import LATEST_RELEASE_KEY, RedisClient
+from api.models.release import ReleaseNote, version_key
 
 NOTES = """
 # A comment, as the file starts with.

@@ -7,6 +7,13 @@ import re
 
 import pytest
 
+from api.geo.models import (
+    META_DYNAMIC_SESSIONS,
+    META_GEO_CITY,
+    META_GEO_COUNTRY,
+    META_GEO_STATE,
+    META_SESSION_GENERATION,
+)
 from api.models.location import LocationTarget
 from api.models.proxy import Proxy, ProxyStatus
 from api.providers.registry import build_registry
@@ -14,12 +21,7 @@ from api.providers.sdk.descriptor import ProviderDescriptor, SessionIdSpec
 from api.providers.sdk.provider import DescriptorProvider, SdkRuntime
 from api.providers.sdk.session_ids import SessionIdGenerator
 from api.providers.sdk.strategies import (
-    META_DYNAMIC_SESSIONS,
     META_EXIT_SAMPLE_PERCENT,
-    META_GEO_CITY,
-    META_GEO_COUNTRY,
-    META_GEO_STATE,
-    META_SESSION_GENERATION,
     META_SESSION_ID,
     META_SESSION_SECONDS,
 )

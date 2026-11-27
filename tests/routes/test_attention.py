@@ -232,6 +232,11 @@ class TestReport:
         assert authenticated_client.put(_url("nope", "/mutes"), json={"key": "connectors_off", "duration": "day"}).status_code == 404
         assert authenticated_client.delete(_url("nope", "/mutes/connectors_off")).status_code == 404
 
+    def test_an_unknown_project_s_lines_answer_its_detail(self, authenticated_client: TestClient) -> None:
+        response = authenticated_client.get(_url("nope"))
+
+        assert (response.status_code, response.json()) == (404, {"detail": "Project not found"})
+
     def test_a_project_without_a_connector(self, authenticated_client: TestClient, created_project: dict[str, Any]) -> None:
         report = _report(authenticated_client, created_project["id"])
 
